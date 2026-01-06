@@ -7,16 +7,17 @@
 3. Branch is pre-checked out to `branchName` from `scripts/ralph/prd.json` (verify only; do not switch)
 4. Pick the highest priority story where `passes` is `false` (lowest `priority` wins)
 5. Implement that ONE story (keep the change small and focused)
-6. Run feedback loops (Python + uv):
+6. Run feedback loops (project’s typecheck/tests):
    - Find the project's fastest typecheck and tests
-   - Use `uv run ...` to run them
-   - If the project has no typecheck/tests configured, add them (prefer `ruff` + `mypy` or `pyright` + `pytest`) and ensure they run fast and deterministically
-7. Update `AGENTS.md` files with reusable learnings (only if you discovered something worth preserving):
+   - Run them (e.g., `uv run ...` or the project's commands)
+   - If the project has no typecheck/tests configured, add them (prefer `ruff` + `mypy` or `pyright` + `pytest`) and ensure they run fast and deterministic
+7. Do NOT mark the story as done unless typecheck AND tests pass. If they fail, fix and rerun; only proceed when both are green.
+8. Update `AGENTS.md` files with reusable learnings (only if you discovered something worth preserving):
    - Only update `AGENTS.md` in directories you edited
    - Add patterns/gotchas/conventions, not story-specific notes
-8. Commit with message: `feat: [ID] - [Title]`
-9. Update `scripts/ralph/prd.json`: set that story's `passes` to `true`
-10. Append learnings to `scripts/ralph/progress.txt`
+9. Commit with message: `feat: [ID] - [Title]`
+10. Update `scripts/ralph/prd.json`: set that story's `passes` to `true` (only after tests/typecheck pass)
+11. Append learnings to `scripts/ralph/progress.txt`
 
 ## Progress Format
 
