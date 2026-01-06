@@ -41,7 +41,7 @@ Copy the Ralph files into your project:
 
 ```bash
 mkdir -p scripts/ralph
-cp prompt.md prd.json progress.txt ralph.sh scripts/ralph/
+cp prompt.md prd.json progress.txt ralph.sh prd_prompt.txt understand_prompt.md codebase_map.md ralph-understand.sh scripts/ralph/
 ```
 
 ### 2. Initialize
@@ -128,6 +128,30 @@ Edit `scripts/ralph/prompt.md` with instructions for the AI agent. This typicall
 ```bash
 ./scripts/ralph/ralph.sh 25
 ```
+
+### Brownfield: Codebase Understanding Mode (Read-only)
+
+Before implementing changes in an existing repo, you can run a **read-only mapping loop** that builds a codebase map over multiple iterations.
+
+It writes findings to:
+- `scripts/ralph/codebase_map.md`
+
+Run it with the convenience wrapper:
+
+```bash
+# Uses scripts/ralph/understand_prompt.md and writes to scripts/ralph/codebase_map.md
+./scripts/ralph/ralph-understand.sh 10
+```
+
+With Claude + human review after each iteration:
+
+```bash
+INTERACTIVE=1 AGENT_CMD="claude --print" ./scripts/ralph/ralph-understand.sh 10
+```
+
+Under the hood, this uses:
+- `PROMPT_FILE=scripts/ralph/understand_prompt.md`
+- `ALLOWED_PATHS=scripts/ralph/codebase_map.md` (git repos only; blocks other file edits)
 
 ## Usage Examples
 
@@ -233,6 +257,8 @@ INTERACTIVE=1 AGENT_CMD="claude --print" SLEEP_SECONDS=5 ./scripts/ralph/ralph.s
 | `MODEL` | *(empty)* | Model override for codex (e.g., `gpt-5-codex`) |
 | `SLEEP_SECONDS` | `2` | Seconds to wait between iterations |
 | `INTERACTIVE` | *(empty)* | Set to `1` for human-in-the-loop mode (pause after each iteration) |
+| `PROMPT_FILE` | `scripts/ralph/prompt.md` | Override prompt file path |
+| `ALLOWED_PATHS` | *(empty)* | Comma-separated repo-root-relative paths allowed to change (git repos only) |
 
 ### Examples
 
@@ -314,6 +340,9 @@ When Ralph detects this in the agent's output, it exits successfully (code 0).
 | `progress.txt` | No | Running log of patterns and progress (auto-created) |
 | `init.sh` | No | Initialization/validation script |
 | `prd_prompt.txt` | No | Fillable template for generating PRDs with an LLM |
+| `understand_prompt.md` | No | Read-only prompt for codebase understanding |
+| `codebase_map.md` | No | Output file for the codebase map (created if missing) |
+| `ralph-understand.sh` | No | Convenience wrapper for understanding mode |
 
 ## Tips
 

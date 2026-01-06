@@ -18,6 +18,8 @@
 #   MODEL         - Model override for codex (e.g., "o3", "gpt-4")
 #   SLEEP_SECONDS - Seconds between iterations (default: 2)
 #   INTERACTIVE   - Set to "1" for human-in-the-loop mode (pause after each iteration)
+#   PROMPT_FILE   - Override prompt file path (default: scripts/ralph/prompt.md)
+#   ALLOWED_PATHS - Comma-separated list of repo-root-relative paths allowed to change (git repos only)
 #
 # Exit Codes:
 #   0 - Agent signaled completion (<promise>COMPLETE</promise>)
@@ -45,8 +47,9 @@ MAX_ITERATIONS="${1:-10}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-# Path to the prompt file that will be fed to the agent each iteration
-PROMPT_FILE="$SCRIPT_DIR/prompt.md"
+# Path to the prompt file that will be fed to the agent each iteration.
+# Can be overridden via environment variable PROMPT_FILE.
+PROMPT_FILE="${PROMPT_FILE:-$SCRIPT_DIR/prompt.md}"
 
 # -----------------------------------------------------------------------------
 # VALIDATION
@@ -85,12 +88,154 @@ MODEL="${MODEL:-}"
 # Set to "1", "true", or "yes" to enable
 INTERACTIVE="${INTERACTIVE:-}"
 
+# Optional safety guard (git repos only): restrict which paths may change.
+# Provide comma-separated paths relative to repo root, for example:
+#   ALLOWED_PATHS="scripts/ralph/codebase_map.md"
+ALLOWED_PATHS="${ALLOWED_PATHS:-}"
+
+# -----------------------------------------------------------------------------
+# HELPERS
+# -----------------------------------------------------------------------------
+
+is_git_repo() {
+  git rev-parse --is-inside-work-tree >/dev/null 2>&1
+}
+
+trim_ws() {
+  # Trim leading/trailing whitespace
+  local s="$1"
+  s="${s#"${s%%[![:space:]]*}"}"
+  s="${s%"${s##*[![:space:]]}"}"
+  printf '%s' "$s"
+}
+
+path_is_allowed() {
+  # Check if a repo-root-relative path is allowed by ALLOWED_PATHS.
+  # Allowed entries are either:
+  # - exact file paths (e.g., scripts/ralph/codebase_map.md)
+  # - directory prefixes ending with / (e.g., docs/)
+  local path="$1"
+  local allowed raw
+
+  IFS=',' read -r -a allowed <<< "$ALLOWED_PATHS"
+  for raw in "${allowed[@]}"; do
+    raw="$(trim_ws "$raw")"
+    [[ -z "$raw" ]] && continue
+
+    # Directory prefix rule
+    if [[ "$raw" == */ ]]; then
+      if [[ "$path" == "$raw"* ]]; then
+        return 0
+      fi
+      continue
+    fi
+
+    # Exact match rule
+    if [[ "$path" == "$raw" ]]; then
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+enforce_allowed_paths_if_configured() {
+  # If ALLOWED_PATHS is set and we're in a git repo, fail (or prompt in interactive mode)
+  # when the iteration created changes outside the allowed paths.
+  [[ -z "$ALLOWED_PATHS" ]] && return 0
+  is_git_repo || return 0
+
+  local changed_files=()
+  local f
+
+  # Unstaged changes
+  while IFS= read -r f; do
+    [[ -n "$f" ]] && changed_files+=("$f")
+  done < <(git diff --name-only)
+
+  # Staged changes
+  while IFS= read -r f; do
+    [[ -n "$f" ]] && changed_files+=("$f")
+  done < <(git diff --name-only --cached)
+
+  # Untracked files
+  while IFS= read -r f; do
+    [[ -n "$f" ]] && changed_files+=("$f")
+  done < <(git ls-files --others --exclude-standard)
+
+  # Deduplicate
+  declare -A seen=()
+  local unique=()
+  for f in "${changed_files[@]}"; do
+    if [[ -z "${seen["$f"]+x}" ]]; then
+      seen["$f"]=1
+      unique+=("$f")
+    fi
+  done
+
+  # Compute disallowed
+  local disallowed=()
+  for f in "${unique[@]}"; do
+    if ! path_is_allowed "$f"; then
+      disallowed+=("$f")
+    fi
+  done
+
+  if (( ${#disallowed[@]} == 0 )); then
+    return 0
+  fi
+
+  echo ""
+  echo "scripts/ralph/ralph.sh: disallowed changes detected (ALLOWED_PATHS=$ALLOWED_PATHS):" >&2
+  for f in "${disallowed[@]}"; do
+    echo "  - $f" >&2
+  done
+
+  if [[ "$INTERACTIVE" =~ ^(1|true|yes)$ ]]; then
+    echo "" >&2
+    echo "Choose an action:" >&2
+    echo "  [r] revert disallowed changes and continue" >&2
+    echo "  [q] quit now" >&2
+    echo "  [c] continue anyway (leave changes as-is)" >&2
+    echo "" >&2
+    read -r -p "What next? " _choice
+
+    case "$_choice" in
+      r|R|revert)
+        echo "Reverting disallowed changes..." >&2
+        for f in "${disallowed[@]}"; do
+          if git ls-files --error-unmatch -- "$f" >/dev/null 2>&1; then
+            git restore --staged --worktree -- "$f" >/dev/null 2>&1 || true
+          else
+            rm -rf -- "$ROOT_DIR/$f" >/dev/null 2>&1 || true
+          fi
+        done
+        ;;
+      q|Q|quit|exit)
+        echo "Stopped by user" >&2
+        exit 1
+        ;;
+      c|C|continue)
+        ;;
+      *)
+        # Default: quit (safer)
+        echo "Unknown choice; quitting for safety." >&2
+        exit 1
+        ;;
+    esac
+  else
+    echo "Set INTERACTIVE=1 to review/revert, or clear ALLOWED_PATHS to disable enforcement." >&2
+    exit 1
+  fi
+}
+
 # -----------------------------------------------------------------------------
 # STARTUP MESSAGE
 # -----------------------------------------------------------------------------
 
 echo "Starting Ralph"
 echo "Root: $ROOT_DIR"
+echo "Prompt: $PROMPT_FILE"
 if [[ -n "$AGENT_CMD" ]]; then
   echo "Agent: custom ($AGENT_CMD)"
 else
@@ -100,6 +245,12 @@ echo "Max iterations: $MAX_ITERATIONS"
 if [[ "$INTERACTIVE" =~ ^(1|true|yes)$ ]]; then
   echo "Mode: interactive (will pause after each iteration)"
 fi
+if [[ -n "$ALLOWED_PATHS" ]]; then
+  echo "Allowed changes: $ALLOWED_PATHS"
+fi
+
+# If ALLOWED_PATHS is set, validate current repo state before starting.
+enforce_allowed_paths_if_configured
 
 # -----------------------------------------------------------------------------
 # MAIN LOOP
@@ -172,13 +323,8 @@ for i in $(seq 1 "$MAX_ITERATIONS"); do
     rm -f "$LAST_MSG_FILE"
   fi
 
-  # -------------------------------------------------------------------------
-  # ITERATION DELAY
-  # -------------------------------------------------------------------------
-  # Sleep between iterations to avoid hammering APIs and allow the agent's
-  # changes to settle (e.g., file writes, git operations)
-  
-  sleep "$SLEEP_SECONDS"
+  # Optional guardrail: enforce allowed paths if configured (git repos only)
+  enforce_allowed_paths_if_configured
 
   # -------------------------------------------------------------------------
   # INTERACTIVE MODE - Human-in-the-loop
@@ -212,6 +358,13 @@ for i in $(seq 1 "$MAX_ITERATIONS"); do
         ;;
     esac
   fi
+
+  # -------------------------------------------------------------------------
+  # ITERATION DELAY
+  # -------------------------------------------------------------------------
+  # Sleep between iterations to avoid hammering APIs and allow the agent's
+  # changes to settle (e.g., file writes, git operations)
+  sleep "$SLEEP_SECONDS"
 done
 
 # -----------------------------------------------------------------------------
