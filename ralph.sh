@@ -51,6 +51,10 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 # Can be overridden via environment variable PROMPT_FILE.
 PROMPT_FILE="${PROMPT_FILE:-$SCRIPT_DIR/prompt.md}"
 
+# Path to PRD file (used for branch selection). Optional if your prompt
+# does not rely on prd.json (e.g., understanding mode).
+PRD_FILE="${PRD_FILE:-$SCRIPT_DIR/prd.json}"
+
 # -----------------------------------------------------------------------------
 # VALIDATION
 # -----------------------------------------------------------------------------
@@ -229,6 +233,47 @@ enforce_allowed_paths_if_configured() {
   fi
 }
 
+auto_checkout_branch_from_prd() {
+  # Automatically ensure we are on the branch specified in prd.json.
+  # No-op if git repo is absent, PRD file is missing, or branchName is empty.
+  is_git_repo || return 0
+  [[ -f "$PRD_FILE" ]] || { echo "Branch: $PRD_FILE not found, skipping branch checkout"; return 0; }
+
+  local branch
+  branch="$(python3 - <<'PY' "$PRD_FILE"
+import json, sys
+path = sys.argv[1]
+try:
+    data = json.load(open(path, "r", encoding="utf-8"))
+    b = data.get("branchName")
+    if isinstance(b, str) and b.strip():
+        print(b.strip())
+except Exception:
+    pass
+PY
+)"
+
+  if [[ -z "$branch" ]]; then
+    echo "Branch: branchName missing in $PRD_FILE; skipping branch checkout"
+    return 0
+  fi
+
+  local current
+  current="$(git symbolic-ref --short HEAD 2>/dev/null || true)"
+  if [[ "$current" == "$branch" ]]; then
+    echo "Branch: already on $branch"
+    return 0
+  fi
+
+  if git show-ref --verify --quiet "refs/heads/$branch"; then
+    echo "Branch: switching to existing $branch"
+    git checkout "$branch"
+  else
+    echo "Branch: creating branch $branch"
+    git checkout -b "$branch"
+  fi
+}
+
 # -----------------------------------------------------------------------------
 # STARTUP MESSAGE
 # -----------------------------------------------------------------------------
@@ -248,6 +293,9 @@ fi
 if [[ -n "$ALLOWED_PATHS" ]]; then
   echo "Allowed changes: $ALLOWED_PATHS"
 fi
+
+# Automatically align to branchName in PRD (best effort)
+auto_checkout_branch_from_prd
 
 # If ALLOWED_PATHS is set, validate current repo state before starting.
 enforce_allowed_paths_if_configured

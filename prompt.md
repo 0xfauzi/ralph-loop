@@ -4,9 +4,7 @@
 
 1. Read `scripts/ralph/prd.json`
 2. Read `scripts/ralph/progress.txt` (check `## Codebase Patterns` first)
-3. Check you are on the correct branch:
-   - Use `branchName` from `scripts/ralph/prd.json`
-   - Create it if missing, then checkout
+3. Branch is pre-checked out to `branchName` from `scripts/ralph/prd.json` (verify only; do not switch)
 4. Pick the highest priority story where `passes` is `false` (lowest `priority` wins)
 5. Implement that ONE story (keep the change small and focused)
 6. Run feedback loops (Python + uv):

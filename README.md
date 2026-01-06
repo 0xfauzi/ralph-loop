@@ -129,6 +129,8 @@ Edit `scripts/ralph/prompt.md` with instructions for the AI agent. This typicall
 ./scripts/ralph/ralph.sh 25
 ```
 
+Ralph will automatically checkout (or create) the branch specified in `scripts/ralph/prd.json` (`branchName`) before starting iterations.
+
 ### Brownfield: Codebase Understanding Mode (Read-only)
 
 Before implementing changes in an existing repo, you can run a **read-only mapping loop** that builds a codebase map over multiple iterations.
