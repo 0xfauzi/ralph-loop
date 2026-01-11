@@ -19,11 +19,11 @@ Edit this list to match your repo. During the understanding loop, mark items as 
 - [x] Configuration, env vars, secrets, feature flags
 - [x] Authn/Authz (where permissions are enforced)
 - [x] Data model & persistence (migrations, ORM patterns, transactions)
-- [ ] Core domain flow #1 (trace end-to-end)
-- [ ] Core domain flow #2 (trace end-to-end)
-- [ ] External integrations (third-party APIs, webhooks, queues)
-- [ ] Observability (logging, metrics, tracing, error reporting)
-- [ ] Deployment / release process
+- [x] Core domain flow #1 (trace end-to-end)
+- [x] Core domain flow #2 (trace end-to-end)
+- [x] External integrations (third-party APIs, webhooks, queues)
+- [x] Observability (logging, metrics, tracing, error reporting)
+- [x] Deployment / release process
 
 ## Quick Facts (keep updated)
 
@@ -178,3 +178,105 @@ Edit this list to match your repo. During the understanding loop, mark items as 
 - **Open questions / follow-ups**:
   - If data storage becomes necessary, should it live inside `src/ralph_uv_example` (e.g., a dedicated `storage` module) or remain external to keep the CLI minimal?
   - Are there any downstream expectations (from Ralph runs or user workflows) that data should survive between invocations, or is the stateless greeting definitive for this example?
+
+## 2026-01-07 - Core domain flow #1
+
+- **Summary**:
+  - `uv run ralph-uv-example <name>` surfaces the CLI defined in `pyproject.toml`, so user input enters `ralph_uv_example.cli:main` immediately after `uv` spins up.
+  - The CLI parser accepts an optional `name`, defaults to `world`, prints the `greet(args.name)` result, and exits with `0`, keeping the command safe to script.
+  - `ralph_uv_example.greet` trims whitespace, substitutes `world` when no name is provided, and formats `Hello, …!`, with unit tests exercising both code paths.
+- **Evidence**:
+  - `README.md:13-29` — documents `uv run ralph-uv-example Alice`, describing the visible command that triggers the flow.
+  - `pyproject.toml:9-10` — `[project.scripts]` binds `ralph-uv-example` to `ralph_uv_example.cli:main`, so `uv run` dispatches through setuptools-style entrypoints.
+  - `src/ralph_uv_example/cli.py:8-21` — `build_parser()` defines the optional `name`, `main()` prints `greet(args.name)` and returns `0`, and the `__main__` guard raises `SystemExit(main())`.
+  - `src/ralph_uv_example/__init__.py:3-10` — `greet` strips, defaults to `"world"`, and returns the greeting string without external effects.
+  - `tests/test_greet.py:3-11` — coverage ensures the helper returns the correct message for both a provided name and blank input, anchoring the observable output for the flow.
+- **Conventions / invariants**:
+  - Keep CLI parsing and printing thin, delegating all normalization/formatting to `greet` so future logic lives in a single helper.
+  - Maintain the `SystemExit(main())` pattern so the CLI always communicates success/failure through exit codes, which `uv run` relies on for scripting.
+- **Risks / hotspots**:
+  - Adding more features in `cli.py` risks entwining parsing with domain logic; new behavior should be introduced via additional helpers under `ralph_uv_example`.
+  - A single-output path means any new side effects (I/O, dependencies) should be explicitly tested, as the current suite only guards the greeting helper.
+- **Open questions / follow-ups**:
+  - What should “Core domain flow #2” capture next (for example, the Ralph harness loop or future domain behaviors)?
+
+## 2026-01-07 - Core domain flow #2
+
+- **Summary**:
+  - The Ralph harness in `scripts/ralph/ralph.sh` drives an agentic loop: it loads `scripts/ralph/prompt.md`, runs either `AGENT_CMD` or the default `codex` CLI per iteration, and exits successfully only when the transcript contains `<promise>COMPLETE</promise>`.
+  - Startup in the script (and README instructions) highlight branch guards, allowed-path checks, and UI/agent knobs controlled via environment variables so configuration stays declarative rather than hard-coded.
+  - Each iteration enforces path restrictions (if `ALLOWED_PATHS` is set), optionally pauses (`INTERACTIVE`), sleeps between rounds (`SLEEP_SECONDS`), and repeats until either completion or the `max_iterations` argument is exhausted.
+- **Evidence**:
+  - `README.md:33-84` — documents invoking `scripts/ralph/ralph.sh` with dry-run/fake-agent examples and the UI/agent knobs (`RALPH_BRANCH`, `RALPH_UI`, `MODEL_REASONING_EFFORT`, etc.).
+  - `scripts/ralph/ralph.sh:1-190` — describes loop usage, env vars, exit codes, and prompt/prd defaults at top of the script.
+  - `scripts/ralph/ralph.sh:220-360` — shows enforcement helpers (`enforce_allowed_paths_if_configured`, `auto_checkout_branch_from_prd`) and startup messages that tie env overrides to branch/guard behavior.
+  - `scripts/ralph/ralph.sh:380-640` — main loop logic, including `AGENT_CMD` handling, Codex default, completion detection (`<promise>COMPLETE</promise>`), interactive review, and sleep/retry behavior.
+- **Conventions / invariants**:
+  - Completion is only acknowledged via the `<promise>COMPLETE</promise>` marker in the agent transcript; the loop keeps running (or fails) until that string appears in the captured output (scripts/ralph/ralph.sh:400-510).
+  - Customize pilot behavior exclusively through the provided env vars (`AGENT_CMD`, `MODEL`, `PROP_FILE`, `ALLOWED_PATHS`, etc.); the script sources `scripts/ralph/ui.sh` when present and defaults to plain text helpers otherwise, so configuration remains external (scripts/ralph/ralph.sh:40-210; README.md:33-84).
+  - Guard rails (branch checkout via `RALPH_BRANCH`/`prd.json`, path assertions, interactive prompts) run automatically on start-up so iterations always honor repo boundaries before touching files (scripts/ralph/ralph.sh:220-360).
+- **Risks / hotspots**:
+  - Running without `RALPH_BRANCH=""` or without reviewing the PRD branch risks mutating the outer repo (`auto_checkout_branch_from_prd` and README warning at `README.md:33-40`).
+  - `ALLOWED_PATHS` enforcement rejects any stray files; interactive mode is the only way to revert those hits, so forgetting to reallow necessary paths can leave changes blocked until manually adjusted (scripts/ralph/ralph.sh:230-310).
+  - The completion guard relies solely on `<promise>COMPLETE</promise>` in the regex-checked final message, so agents that never emit that marker or stream different formats will cause the script to hit max iterations and exit 1 (scripts/ralph/ralph.sh:430-520).
+- **Open questions / follow-ups**:
+  - The current `scripts/ralph/prd.json` has an empty `userStories` array—what story(s) should this flow trace in practice, and how should we seed new entries when experimenting with Ralph?
+  - Should documentation/state elsewhere explain how to choose between `AGENT_CMD` dry runs versus the default Codex loop, or which `MODEL`/`MODEL_REASONING_EFFORT` values are supported in this demo?
+
+## 2026-01-07 - External integrations
+
+- **Summary**:
+  - The Ralph harness defaults to OpenAI’s Codex CLI (`codex`) and feeds it `scripts/ralph/prompt.md`, so the agent loop depends on an external binary and its network-backed models for completion signals.
+  - `AGENT_CMD` lets any stdin-accepting CLI (e.g., `claude`, `cat`, a custom script) replace Codex while keeping the same `<promise>COMPLETE</promise>` contract.
+  - UI rendering can slot in the third-party `gum` utility via `scripts/ralph/ui.sh`, and the README already suggests installing it for nicer output alongside the default plain renderer.
+- **Evidence**:
+  - `scripts/ralph/ralph.sh:364-497` — startup summary reports whether `AGENT_CMD` or `codex` runs, then either pipes `PROMPT_FILE` into the custom command or into `codex` with optional `MODEL`/`MODEL_REASONING_EFFORT` flags before checking `<promise>COMPLETE</promise>`.
+  - `README.md:31-84` — documents dry-run/fake-agent examples that set `AGENT_CMD`, describes Codex-specific knobs such as `MODEL_REASONING_EFFORT`, and references the prompt/prd artifacts the agent reads.
+  - `scripts/ralph/ui.sh:1-72` — optional `gum` integration; environment variables like `RALPH_UI`, `GUM_FORCE`, `NO_COLOR`, `RALPH_ASCII` steer whether the script uses the installed `gum` CLI or falls back to plain styling.
+  - `scripts/ralph/prompt.md:1-34` — instructs the agent to load `prd.json`/`progress.txt` and treat them as the canonical story/priorities that whatever external agent runs must inspect.
+- **Conventions / invariants**:
+  - Keep the external agent contract centered on the prompt file + `<promise>COMPLETE</promise>` signal so custom tools can drop into the same loop (no extra APIs or hooks needed).
+  - Configure agent choice/behavior via env vars (`AGENT_CMD`, `MODEL`, `MODEL_REASONING_EFFORT`, UI knobs) rather than editing the scripts.
+  - Prefer declarative UI adjustments (gum vs plain) through `scripts/ralph/ui.sh` so the agent loop’s output remains consistent whether or not the optional dependency is present.
+- **Risks / hotspots**:
+  - If the required `codex` binary is missing (or the network call fails), the script exits 1—external tooling failures immediately halt the loop, so ensuring `codex`/custom agent availability is critical.
+  - Arbitrary `AGENT_CMD` strings run through `bash -lc` with the repo prompt piped in; misconfigurations could execute unintended commands, so these env vars must be managed carefully.
+  - UI styling depends on `gum` only when it is chosen and a TTY is available; log capture or CI runs might silently fall back to plain mode, so reviewers should not rely on stylized output unless `gum` is stubbed in.
+- **Open questions / follow-ups**:
+  - Are there preferred agent binaries beyond Codex that contributors expect to plug in, and should we document install steps for them?
+  - Should `scripts/ralph/prd.json` or `prompt.md` mention which third-party credentials (e.g., Codex tokens) must be present, or leave those details to higher-level deployment docs?
+
+## 2026-01-07 - Observability
+
+- **Summary**:
+  - The Python CLI simply prints the greeting from `greet` and does not import or configure any logging, metrics, or tracing helpers (`src/ralph_uv_example/cli.py:8-21`).
+  - The Ralph harness scripts use shell UI helpers (`ui_*`) that echo to stdout/stderr, with no support for structured logging, telemetry, or metric exports (`scripts/ralph/ralph.sh:62-106`).
+- **Evidence**:
+  - `src/ralph_uv_example/cli.py:8-21` — parser prints `greet(args.name)` and returns exit code `0`, with no logging imports or instrumentation.
+  - `scripts/ralph/ralph.sh:62-106` — UI helper functions (`ui_title`, `ui_info`, etc.) simply wrap `echo` statements, showing the script relies on console output rather than a logging framework.
+- **Conventions / invariants**:
+  - Keep Python behavior minimal and print-only for the CLI; adding observability would require importing logging/metrics in `src/ralph_uv_example`.
+  - Treat the Ralph shell loop as a plain console runner; any future telemetry would need to wrap or replace the existing `ui_*` helpers.
+- **Risks / hotspots**:
+  - Without logs, metrics, or tracing, diagnosing issues in longer Ralph loops or expanded CLI logic depends entirely on stdout/stderr, which makes debugging multi-iteration failures harder.
+  - The absence of structured observability leaves no easy way to monitor agent progress, so automation that cares about completion times would need custom hooks.
+- **Open questions / follow-ups**:
+  - If observability becomes important, should we introduce Python logging and metrics in `src/ralph_uv_example` or keep it outside the package and extend the Ralph shell script?
+  - Would a shell-side telemetry wrapper (e.g., exporting metrics via `echo` in a parseable format) be acceptable, or is a richer logging/monitoring solution expected before adding complexity?
+
+## 2026-01-08 - Deployment / release process
+
+- **Summary**:
+  - There are no documented deployment or release procedures; the README only describes local setup, testing, and the Ralph harness (no release, CI, or packaging instructions).
+  - No automation files (e.g., workflow YAMLs or release scripts) exist in the repo tree, so pushing changes relies entirely on manual `uv` commands and Ralph script runs.
+- **Evidence**:
+  - `README.md:5-47` — sections cover requirements, `uv sync`, `uv run pytest`, the CLI, and Ralph harness dry-run/fake-agent examples, but nothing about packaging, releases, or deployments.
+  - (Implicit) the repo contains only top-level scripts, `pyproject.toml`, and `tests/`; there are no `.github/workflows` or release tooling directories present to describe a deployment pipeline.
+- **Conventions / invariants**:
+  - Follow the documented `uv` workflow for local experimentation; no release conventions are established, so any deployment work would need new documentation before execution.
+- **Risks / hotspots**:
+  - Without an agreed release process or automation checks in the repo, it's easy to ship changes without verification beyond the local `uv run` commands, increasing the chance of regression in larger demos.
+  - Lack of docs means contributors might invent conflicting release steps; the repository currently has nothing to guide versioning, tagging, or publishing.
+- **Open questions / follow-ups**:
+  - Should we define a release/deployment checklist (even if simple) in this repo, or is it acceptable for this demo to remain manual?
+  - Does the larger Ralph/uv ecosystem expect certain release artifacts or workflows (e.g., tagging, UV package publication) that we should document here?
