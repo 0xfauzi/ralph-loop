@@ -42,3 +42,10 @@ htmlcov/
 # OS
 .DS_Store
 Thumbs.db
+
+# Ralph - auto-generated project files
+scripts/ralph/prd.json
+scripts/ralph/progress.txt
+scripts/ralph/codebase_map.md
+scripts/ralph/prompt.md
+scripts/ralph/understand_prompt.md
