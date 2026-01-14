@@ -1,0 +1,13 @@
+{
+  "branchName": "ralph/test-migration",
+  "userStories": [
+    {
+      "id": "TEST-001",
+      "title": "Add goodbye function",
+      "acceptanceCriteria": ["greet.py has a goodbye() function that returns 'Goodbye, {name}!'"],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}

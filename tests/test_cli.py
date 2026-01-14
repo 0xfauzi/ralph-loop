@@ -1,0 +1,66 @@
+"""Tests for CLI module."""
+
+from __future__ import annotations
+
+from click.testing import CliRunner
+
+from ralph_py.cli import cli
+
+
+class TestCliHelp:
+    """Tests for CLI help commands."""
+
+    def test_main_help(self) -> None:
+        runner = CliRunner()
+        result = runner.invoke(cli, ["--help"])
+        assert result.exit_code == 0
+        assert "Ralph" in result.output
+        assert "run" in result.output
+        assert "init" in result.output
+        assert "understand" in result.output
+
+    def test_run_help(self) -> None:
+        runner = CliRunner()
+        result = runner.invoke(cli, ["run", "--help"])
+        assert result.exit_code == 0
+        assert "MAX_ITERATIONS" in result.output
+        assert "--agent-cmd" in result.output
+        assert "--model" in result.output
+
+    def test_init_help(self) -> None:
+        runner = CliRunner()
+        result = runner.invoke(cli, ["init", "--help"])
+        assert result.exit_code == 0
+        assert "DIRECTORY" in result.output
+
+    def test_understand_help(self) -> None:
+        runner = CliRunner()
+        result = runner.invoke(cli, ["understand", "--help"])
+        assert result.exit_code == 0
+        assert "read-only" in result.output.lower()
+
+    def test_version(self) -> None:
+        runner = CliRunner()
+        result = runner.invoke(cli, ["--version"])
+        assert result.exit_code == 0
+        assert "0.1.0" in result.output
+
+
+class TestCliValidation:
+    """Tests for CLI argument validation."""
+
+    def test_run_invalid_max_iterations(self) -> None:
+        runner = CliRunner()
+        result = runner.invoke(cli, ["run", "invalid"])
+        assert result.exit_code == 2
+        assert "not a valid integer" in result.output
+
+    def test_run_missing_prompt_file(self) -> None:
+        runner = CliRunner()
+        with runner.isolated_filesystem():
+            result = runner.invoke(
+                cli,
+                ["run", "1", "--agent-cmd", "echo test", "--branch", ""],
+            )
+            # Should fail because prompt file doesn't exist
+            assert result.exit_code != 0
