@@ -38,7 +38,85 @@ your-project/
 └── ...
 ```
 
-## Requirements
+## Implementations
+
+Ralph has two implementations that can be used interchangeably:
+
+| Version | Location | Requirements |
+|---------|----------|--------------|
+| **Shell** | `scripts/ralph/ralph.sh` | bash 3.2+, python3, git (optional) |
+| **Python** | `python -m ralph_py` | Python 3.11+, uv |
+
+Both implementations preserve identical behavior, exit codes, and environment variables.
+
+---
+
+## Python Version
+
+### Installation
+
+```bash
+# Clone and install
+git clone https://github.com/0xfauzi/ralph-loop.git
+cd ralph-loop
+uv sync
+```
+
+### Commands
+
+```bash
+# Run the agentic loop
+python -m ralph_py run [MAX_ITERATIONS] [OPTIONS]
+
+# Initialize Ralph in a project
+python -m ralph_py init [DIRECTORY]
+
+# Codebase understanding mode (read-only)
+python -m ralph_py understand [MAX_ITERATIONS]
+```
+
+### Python CLI Options
+
+```bash
+python -m ralph_py run 25 \
+  --agent-cmd "claude --print" \    # Custom agent command
+  --model gpt-4o \                  # Model for codex
+  --reasoning low \                 # Reasoning effort
+  --sleep 1 \                       # Sleep between iterations
+  --interactive \                   # Human-in-the-loop mode
+  --branch "my-feature" \           # Git branch (empty to skip)
+  --allowed-paths "src/,tests/" \   # Restrict file changes
+  --ui plain                        # UI mode: auto, rich, plain
+```
+
+### Python Architecture
+
+```
+ralph_py/
+  cli.py          # Click-based CLI
+  config.py       # Configuration dataclass
+  loop.py         # Main agentic loop
+  prd.py          # PRD loading and validation
+  git.py          # Git operations
+  guards.py       # ALLOWED_PATHS enforcement
+  agents/         # Agent implementations (codex, custom)
+  ui/             # Terminal UI (rich, plain)
+```
+
+### Development
+
+```bash
+uv run pytest              # Run 60 unit tests
+uv run pytest --cov        # With coverage
+uv run mypy ralph_py       # Type checking
+uv run ruff check .        # Linting
+```
+
+---
+
+## Shell Version
+
+### Requirements
 
 - bash (macOS default Bash 3.2 supported)
 - python3 (used for PRD parsing/validation and branch selection)
