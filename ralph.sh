@@ -445,7 +445,11 @@ for i in $(seq 1 "$MAX_ITERATIONS"); do
     fi
 
     # Create temp files for capturing output.
-    OUTPUT_FILE="$(mktemp)"
+    OUTPUT_FILE="$(mktemp)" || OUTPUT_FILE=""
+    if [[ -z "$OUTPUT_FILE" || ! -e "$OUTPUT_FILE" ]]; then
+      ui_err_err "mktemp failed (unable to create temporary output file)"
+      exit 1
+    fi
     LAST_MSG_FILE=""
 
     # Build codex command arguments
@@ -454,8 +458,13 @@ for i in $(seq 1 "$MAX_ITERATIONS"); do
 
     # Use --output-last-message when available (older codex builds do not support it).
     if codex --help 2>&1 | grep -q -- "--output-last-message"; then
-      LAST_MSG_FILE="$(mktemp)"
-      CODEX_ARGS+=(--output-last-message "$LAST_MSG_FILE")
+      LAST_MSG_FILE="$(mktemp)" || LAST_MSG_FILE=""
+      if [[ -z "$LAST_MSG_FILE" || ! -e "$LAST_MSG_FILE" ]]; then
+        ui_warn_err "mktemp failed (continuing without --output-last-message)"
+        LAST_MSG_FILE=""
+      else
+        CODEX_ARGS+=(--output-last-message "$LAST_MSG_FILE")
+      fi
     fi
     
     # Add model flag if specified
