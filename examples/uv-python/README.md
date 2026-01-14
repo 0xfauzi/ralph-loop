@@ -81,4 +81,10 @@ RALPH_AI_RAW=1 ./scripts/ralph/ralph.sh 1
 
 # While hiding the echoed prompt, print progress every N suppressed lines
 RALPH_AI_PROMPT_PROGRESS_EVERY=25 ./scripts/ralph/ralph.sh 1
+
+# Show full tool output in the stream
+RALPH_AI_TOOL_MODE=full ./scripts/ralph/ralph.sh 1
+
+# Hide system lines in the stream (panel only)
+RALPH_AI_SYS_MODE=summary ./scripts/ralph/ralph.sh 1
 ```

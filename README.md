@@ -430,6 +430,8 @@ INTERACTIVE=1 AGENT_CMD="claude --print" SLEEP_SECONDS=5 ./scripts/ralph/ralph.s
 | `RALPH_AI_SHOW_PROMPT` | *(empty)* | Show the prompt echoed by Codex in logs (by default it is collapsed/hidden) |
 | `RALPH_AI_RAW` | *(empty)* | Stream raw Codex output (disables the Codex transcript pretty-printer) |
 | `RALPH_AI_PROMPT_PROGRESS_EVERY` | `50` | When the Codex echoed prompt is hidden, print a progress line every N suppressed lines (set to `0` to disable) |
+| `RALPH_AI_TOOL_MODE` | `summary` | Tool output display: `summary` (panel only), `full` (stream tool output), `none` (hide tool output) |
+| `RALPH_AI_SYS_MODE` | `summary` | System output display: `summary` (panel only), `full` (stream system lines) |
 
 ### Examples
 

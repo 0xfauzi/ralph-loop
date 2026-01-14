@@ -22,6 +22,16 @@ def _parse_paths(value: str | None) -> list[str]:
     return [p.strip() for p in value.split(",") if p.strip()]
 
 
+def _parse_mode(value: str | None, default: str, allowed: set[str]) -> str:
+    """Parse a mode value with allowed options."""
+    if value is None:
+        return default
+    lowered = value.lower().strip()
+    if lowered in allowed:
+        return lowered
+    return default
+
+
 @dataclass
 class RalphConfig:
     """Configuration for Ralph agentic loop."""
@@ -52,6 +62,8 @@ class RalphConfig:
     ai_show_final: bool = True
     ai_show_prompt: bool = False
     ai_prompt_progress_every: int = 50
+    ai_tool_mode: str = "summary"  # summary|full|none
+    ai_sys_mode: str = "summary"  # summary|full
 
     @classmethod
     def from_env(cls, root_dir: Path | None = None) -> RalphConfig:
@@ -85,6 +97,16 @@ class RalphConfig:
             ai_show_prompt=_parse_bool(os.environ.get("RALPH_AI_SHOW_PROMPT")),
             ai_prompt_progress_every=int(
                 os.environ.get("RALPH_AI_PROMPT_PROGRESS_EVERY", "50")
+            ),
+            ai_tool_mode=_parse_mode(
+                os.environ.get("RALPH_AI_TOOL_MODE"),
+                "summary",
+                {"summary", "full", "none"},
+            ),
+            ai_sys_mode=_parse_mode(
+                os.environ.get("RALPH_AI_SYS_MODE"),
+                "summary",
+                {"summary", "full"},
             ),
         )
 

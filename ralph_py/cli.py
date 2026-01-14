@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -113,7 +114,7 @@ def run(
     cwd = Path.cwd()
 
     # Determine if branch was explicitly set
-    branch_explicit = "RALPH_BRANCH" in click.get_current_context().params or branch is not None
+    branch_explicit = "RALPH_BRANCH" in os.environ or branch is not None
 
     # Build config
     config = RalphConfig(
@@ -265,7 +266,7 @@ def understand(
 
     # Use provided branch or default
     actual_branch = branch if branch is not None else default_branch
-    branch_explicit = branch is not None or "RALPH_BRANCH" not in click.get_current_context().params
+    branch_explicit = "RALPH_BRANCH" in os.environ or branch is not None
 
     config = RalphConfig(
         max_iterations=max_iterations,

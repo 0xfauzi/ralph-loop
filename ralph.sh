@@ -444,13 +444,19 @@ for i in $(seq 1 "$MAX_ITERATIONS"); do
       exit 1
     fi
 
-    # Create temp file to capture the agent's last message
-    LAST_MSG_FILE="$(mktemp)"
+    # Create temp files for capturing output.
+    OUTPUT_FILE="$(mktemp)"
+    LAST_MSG_FILE=""
 
     # Build codex command arguments
     # -C: working directory
-    # --output-last-message: save final message to file for completion detection
-    CODEX_ARGS=(exec -C "$ROOT_DIR" --output-last-message "$LAST_MSG_FILE")
+    CODEX_ARGS=(exec -C "$ROOT_DIR")
+
+    # Use --output-last-message when available (older codex builds do not support it).
+    if codex --help 2>&1 | grep -q -- "--output-last-message"; then
+      LAST_MSG_FILE="$(mktemp)"
+      CODEX_ARGS+=(--output-last-message "$LAST_MSG_FILE")
+    fi
     
     # Add model flag if specified
     if [[ -n "$MODEL" ]]; then
@@ -467,33 +473,50 @@ for i in $(seq 1 "$MAX_ITERATIONS"); do
     # - || true: don't abort loop on agent failure (max iterations is the backstop)
     ui_channel_header_err "AI" "Codex output"
     if [[ "${RALPH_AI_RAW-}" == "1" ]]; then
-      cat "$PROMPT_FILE" | codex "${CODEX_ARGS[@]}" - 2>&1 | ui_stream_prefix_fd 2 "AI" || true
+      cat "$PROMPT_FILE" | codex "${CODEX_ARGS[@]}" - 2>&1 | tee "$OUTPUT_FILE" | ui_stream_prefix_fd 2 "AI" || true
     else
-      cat "$PROMPT_FILE" | codex "${CODEX_ARGS[@]}" - 2>&1 | ui_codex_pretty_stream_fd 2 "$PROMPT_FILE" || true
+      cat "$PROMPT_FILE" | codex "${CODEX_ARGS[@]}" - 2>&1 | tee "$OUTPUT_FILE" | ui_codex_pretty_stream_fd 2 "$PROMPT_FILE" || true
     fi
     ui_channel_footer_err "AI" "Codex output"
 
     # Always show the final assistant message as a reliable fallback. This avoids
     # cases where the streaming transcript format changes and we miss AI lines.
     if [[ "${RALPH_AI_SHOW_FINAL-1}" != "0" ]]; then
-      if [[ -s "$LAST_MSG_FILE" ]]; then
+      if [[ -n "$LAST_MSG_FILE" && -s "$LAST_MSG_FILE" ]]; then
         ui_channel_header_err "AI" "Final message"
         cat "$LAST_MSG_FILE" | ui_ai_pretty_stream_fd 2 "AI"
         ui_channel_footer_err "AI" "Final message"
       else
-        ui_warn_err "No final message captured (LAST_MSG_FILE is empty)"
+        LAST_LINE="$(awk 'NF{line=$0} END{if (line) print line}' "$OUTPUT_FILE")"
+        if [[ -n "$LAST_LINE" ]]; then
+          ui_channel_header_err "AI" "Final message"
+          printf '%s\n' "$LAST_LINE" | ui_ai_pretty_stream_fd 2 "AI"
+          ui_channel_footer_err "AI" "Final message"
+        else
+          ui_warn_err "No final message captured (output was empty)"
+        fi
       fi
     fi
 
     # Check if agent signaled completion
-    if grep -q "<promise>COMPLETE</promise>" "$LAST_MSG_FILE"; then
+    COMPLETION_SOURCE="$OUTPUT_FILE"
+    if [[ -n "$LAST_MSG_FILE" && -s "$LAST_MSG_FILE" ]]; then
+      COMPLETION_SOURCE="$LAST_MSG_FILE"
+    fi
+    if grep -q "<promise>COMPLETE</promise>" "$COMPLETION_SOURCE"; then
       ui_ok "Done"
-      rm -f "$LAST_MSG_FILE"
+      if [[ -n "$LAST_MSG_FILE" ]]; then
+        rm -f "$LAST_MSG_FILE"
+      fi
+      rm -f "$OUTPUT_FILE"
       exit 0  # Success! All stories complete
     fi
 
     # Clean up temp file
-    rm -f "$LAST_MSG_FILE"
+    if [[ -n "$LAST_MSG_FILE" ]]; then
+      rm -f "$LAST_MSG_FILE"
+    fi
+    rm -f "$OUTPUT_FILE"
   fi
 
   # Optional guardrail: enforce allowed paths if configured (git repos only)

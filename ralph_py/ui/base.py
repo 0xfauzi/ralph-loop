@@ -35,6 +35,14 @@ class UI(Protocol):
         """Display content in a box."""
         ...
 
+    def panel(self, tag: str, title: str, content: str) -> None:
+        """Display a titled panel block."""
+        ...
+
+    def startup_art(self) -> None:
+        """Display startup animation if supported."""
+        ...
+
     def info(self, text: str) -> None:
         """Display info message (dim)."""
         ...
