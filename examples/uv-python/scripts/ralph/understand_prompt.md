@@ -2,7 +2,7 @@
 
 ## Goal (one iteration)
 
-You are running a **codebase understanding** loop. Your job is to explore the existing codebase and write an evidence-based “map” for humans.
+You are running a **codebase understanding** loop. Your job is to explore the existing codebase and write an evidence-based "map" for humans.
 
 **Hard rule:** do NOT modify application code, tests, configs, dependencies, or CI.
 
@@ -42,11 +42,11 @@ If you think code changes are needed, write that as a note in the map under **Op
 
 ## Evidence rules (important)
 
-- Every “fact” should include **evidence**:
+- Every "fact" should include **evidence**:
   - File paths
   - What to look for (function/class name)
   - Preferably line ranges (if your tooling can provide them)
-- If you’re uncertain, label it clearly as a hypothesis and add an **Open question**.
+- If you are uncertain, label it clearly as a hypothesis and add an **Open question**.
 
 ## Iteration Notes format
 
@@ -56,13 +56,13 @@ Append this to the END of `scripts/ralph/codebase_map.md`:
 
 - **Summary**: 1-3 bullets on what you learned
 - **Evidence**:
-  - `path/to/file.ext` — what to look for (and line range if available)
+  - `path/to/file.ext` - what to look for (and line range if available)
 - **Conventions / invariants**:
-  - “Do X, don’t do Y” rules implied by the codebase
+  - "Do X, don't do Y" rules implied by the codebase
 - **Risks / hotspots**:
   - Areas likely to break or require extra care
 - **Open questions / follow-ups**:
-  - What’s unclear, what needs human confirmation
+  - What's unclear, what needs human confirmation
 
 ---
 
@@ -73,4 +73,3 @@ If there are **no remaining unchecked topics** in the Next Topics checklist (or 
 <promise>COMPLETE</promise>
 
 Otherwise end normally.
-

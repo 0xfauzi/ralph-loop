@@ -26,28 +26,22 @@ Ralph operates on a simple loop:
 your-project/
 ├── scripts/
 │   └── ralph/
-│       ├── ralph.sh              # Main loop runner (required)
-│       ├── ui.sh                 # UI toolkit (gum-enhanced output; plain fallback)
-│       ├── prompt.md             # Feature-mode agent instructions (required for feature mode)
-│       ├── prd.json              # Feature-mode user stories (created by init.sh if missing)
-│       ├── progress.txt          # Optional running log (created by init.sh if missing)
+│       ├── prompt.md             # Feature-mode agent instructions (required)
+│       ├── prd.json              # Feature-mode user stories (created by python -m ralph_py init if missing)
+│       ├── progress.txt          # Optional running log (created by python -m ralph_py init if missing)
 │       ├── prd_prompt.txt        # Optional template for generating prd.json
-│       ├── ralph-understand.sh   # Understanding-mode wrapper (created by init.sh if missing)
-│       ├── understand_prompt.md  # Understanding-mode prompt (created by init.sh if missing)
-│       └── codebase_map.md       # Understanding-mode output (created by init.sh if missing)
+│       ├── understand_prompt.md  # Understanding-mode prompt (created by python -m ralph_py init if missing)
+│       └── codebase_map.md       # Understanding-mode output (created by python -m ralph_py init if missing)
 └── ...
 ```
 
-## Implementations
+## CLI
 
-Ralph has two implementations that can be used interchangeably:
+Ralph runs via the Python CLI.
 
-| Version | Location | Requirements |
-|---------|----------|--------------|
-| **Shell** | `scripts/ralph/ralph.sh` | bash 3.2+, python3, git (optional) |
-| **Python** | `python -m ralph_py` | Python 3.11+, uv |
-
-Both implementations preserve identical behavior, exit codes, and environment variables.
+| Command | Requirements |
+|---------|--------------|
+| `python -m ralph_py` | Python 3.11+, uv |
 
 ---
 
@@ -79,6 +73,7 @@ python -m ralph_py understand [MAX_ITERATIONS]
 
 ```bash
 python -m ralph_py run 25 \
+  --root /path/to/your-project \   # Optional when running outside the project root
   --agent-cmd "claude --print" \    # Custom agent command
   --model gpt-4o \                  # Model for codex
   --reasoning low \                 # Reasoning effort
@@ -106,7 +101,7 @@ ralph_py/
 ### Development
 
 ```bash
-uv run pytest              # Run 60 unit tests
+uv run pytest              # Run unit tests
 uv run pytest --cov        # With coverage
 uv run mypy ralph_py       # Type checking
 uv run ruff check .        # Linting
@@ -114,66 +109,37 @@ uv run ruff check .        # Linting
 
 ---
 
-## Shell Version
-
-### Requirements
-
-- bash (macOS default Bash 3.2 supported)
-- python3 (used for PRD parsing/validation and branch selection)
-- git (optional but recommended; enables branch checkout + `ALLOWED_PATHS` enforcement)
-- gum (optional; makes output prettier): `brew install gum`
-- An agent CLI:
-  - Default: OpenAI Codex CLI (`codex`)
-  - Or set `AGENT_CMD` to any command that reads a prompt from stdin and prints a response
-
 ## Quick Start
 
-### 1. Setup
+### 1. Initialize
 
-Copy the Ralph files into your project:
+From your project root:
 
 ```bash
-mkdir -p scripts/ralph
-cp prompt.md prd.json progress.txt ralph.sh ui.sh prd_prompt.txt understand_prompt.md codebase_map.md ralph-understand.sh scripts/ralph/
+python -m ralph_py init .
 ```
 
-### 2. Initialize
-
-Run the initialization script to validate your setup:
+Or run it from anywhere:
 
 ```bash
-./init.sh /path/to/your-project
-```
-
-Alternatively, copy `init.sh` into your project root and run it in-place:
-
-```bash
-cp init.sh /path/to/your-project/init.sh
-cd /path/to/your-project
-./init.sh
+python -m ralph_py init /path/to/your-project
 ```
 
 This will:
-- Validate that required files exist
-- Create defaults if missing: `prd.json`, `progress.txt`, `codebase_map.md`, `understand_prompt.md`, `ralph-understand.sh`
+- Create `scripts/ralph/` with `prompt.md`, `prd.json`, `progress.txt`, `prd_prompt.txt`,
+  `understand_prompt.md`, and `codebase_map.md`
 - Validate the PRD schema (`scripts/ralph/prd.json`)
-- Make loop scripts executable
 - Print a quick status summary
 
-### 3. Configure Your PRD
+### 2. Configure Your PRD
 
 You can write `prd.json` manually or generate it with an LLM using the included prompt template.
 
 #### Option A: Generate with an LLM
 
-Use `prd_prompt.txt` as a template. It contains structured sections for you to fill in:
+Use `scripts/ralph/prd_prompt.txt` as a template. It contains structured sections for you to fill in:
 
-1. **Copy the template** to your project:
-   ```bash
-   cp prd_prompt.txt scripts/ralph/prd_prompt.txt
-   ```
-
-2. **Fill in the context sections** at the bottom:
+1. **Fill in the context sections** at the bottom:
    - Feature Overview - what you're building
    - Branch Name - git branch for this work
    - Requirements - specific things the feature must do
@@ -181,7 +147,7 @@ Use `prd_prompt.txt` as a template. It contains structured sections for you to f
    - Verification Commands - exact commands to run typecheck/tests
    - Constraints - limitations or non-functional requirements
 
-3. **Feed it to an LLM**:
+2. **Feed it to an LLM**:
    ```bash
    # Generate PRD with Claude
    cat scripts/ralph/prd_prompt.txt | claude --print > scripts/ralph/prd.json
@@ -217,7 +183,7 @@ Create `scripts/ralph/prd.json` with your user stories:
 }
 ```
 
-### 4. Write Your Prompt
+### 3. Write Your Prompt
 
 Edit `scripts/ralph/prompt.md` with instructions for the AI agent. This typically includes:
 - Reference to `prd.json` for the current user stories
@@ -225,24 +191,26 @@ Edit `scripts/ralph/prompt.md` with instructions for the AI agent. This typicall
 - Guidelines for updating `progress.txt`
 - The completion signal: `<promise>COMPLETE</promise>`
 
-### 5. Run Ralph
+### 4. Run Ralph
 
 ```bash
-./scripts/ralph/ralph.sh 25
+python -m ralph_py run 25
 ```
+
+If you are outside the project root, pass `--root /path/to/your-project`.
 
 By default (git repos only), Ralph will checkout/create the branch specified in `scripts/ralph/prd.json` (`branchName`) before starting iterations.
 
 Override it (git repos only):
 
 ```bash
-RALPH_BRANCH="ralph/my-feature" ./scripts/ralph/ralph.sh 25
+RALPH_BRANCH="ralph/my-feature" python -m ralph_py run 25
 ```
 
 Skip branch management entirely:
 
 ```bash
-RALPH_BRANCH="" ./scripts/ralph/ralph.sh 25
+RALPH_BRANCH="" python -m ralph_py run 25
 ```
 
 ### Brownfield: Codebase Understanding Mode (Read-only)
@@ -254,11 +222,10 @@ It writes findings to:
 
 Understanding mode does not require `prd.json`.
 
-Run it with the convenience wrapper:
+Run understanding mode:
 
 ```bash
-# Uses scripts/ralph/understand_prompt.md and writes to scripts/ralph/codebase_map.md
-./scripts/ralph/ralph-understand.sh 10
+python -m ralph_py understand 10
 ```
 
 By default, understanding mode will checkout/create the branch:
@@ -267,19 +234,19 @@ By default, understanding mode will checkout/create the branch:
 Override it (git repos only):
 
 ```bash
-RALPH_BRANCH="ralph/codebase-map" ./scripts/ralph/ralph-understand.sh 10
+RALPH_BRANCH="ralph/codebase-map" python -m ralph_py understand 10
 ```
 
 Stay on the current branch (skip checkout/creation):
 
 ```bash
-RALPH_BRANCH="" ./scripts/ralph/ralph-understand.sh 10
+RALPH_BRANCH="" python -m ralph_py understand 10
 ```
 
 With Claude + human review after each iteration:
 
 ```bash
-INTERACTIVE=1 AGENT_CMD="claude --print" ./scripts/ralph/ralph-understand.sh 10
+INTERACTIVE=1 AGENT_CMD="claude --print" python -m ralph_py understand 10
 ```
 
 Under the hood, this uses:
@@ -287,21 +254,21 @@ Under the hood, this uses:
 - `ALLOWED_PATHS=scripts/ralph/codebase_map.md` (git repos only; blocks other file edits)
 - `RALPH_BRANCH=ralph/understanding` (git repos only; wrapper default)
 
-Note: `ALLOWED_PATHS` also counts **untracked files** as changes. If you just copied `scripts/ralph/` into a repo and haven't committed it yet, either commit once or loosen/disable the guard:
+Note: `ALLOWED_PATHS` also counts **untracked files** as changes. If `scripts/ralph/` is untracked in your repo, either commit once or loosen or disable the guard:
 
 ```bash
 # Allow changes anywhere under scripts/ralph/
-ALLOWED_PATHS="scripts/ralph/" ./scripts/ralph/ralph-understand.sh 10
+ALLOWED_PATHS="scripts/ralph/" python -m ralph_py understand 10
 
 # Or disable enforcement entirely
-ALLOWED_PATHS="" ./scripts/ralph/ralph-understand.sh 10
+ALLOWED_PATHS="" python -m ralph_py understand 10
 ```
 
 ## Example projects
 
 This repo includes a self-contained example project you can use to try Ralph end-to-end:
 
-- `examples/uv-python/` — a minimal **uv-managed** Python project (`pyproject.toml`) that vendors Ralph under `scripts/ralph/`.
+- `examples/uv-python/` - a minimal **uv-managed** Python project (`pyproject.toml`) that includes `scripts/ralph/` prompt and PRD files.
 
 Quick run:
 
@@ -311,7 +278,7 @@ uv sync
 uv run pytest
 
 # In this mono-repo, disable branch checkout while experimenting:
-AGENT_CMD="printf 'hello\n<promise>COMPLETE</promise>\n'" RALPH_BRANCH="" ./scripts/ralph/ralph.sh 1
+AGENT_CMD="printf 'hello\n<promise>COMPLETE</promise>\n'" RALPH_BRANCH="" uv run python -m ralph_py run 1
 ```
 
 ## Usage Examples
@@ -320,72 +287,71 @@ AGENT_CMD="printf 'hello\n<promise>COMPLETE</promise>\n'" RALPH_BRANCH="" ./scri
 
 ```bash
 # Run with default settings (codex agent, 10 iterations)
-./scripts/ralph/ralph.sh
+python -m ralph_py run
 
 # Specify max iterations
-./scripts/ralph/ralph.sh 25
+python -m ralph_py run 25
 
-# Run from project root (script finds its own location)
-cd /path/to/your-project
-./scripts/ralph/ralph.sh 50
+# Run from outside the project root
+python -m ralph_py run 50 --root /path/to/your-project
 ```
 
 ### Using Different Agents
 
 ```bash
 # Use OpenAI Codex (default)
-./scripts/ralph/ralph.sh 25
+python -m ralph_py run 25
 
 # Use Codex with a specific model
-MODEL=gpt-5-codex ./scripts/ralph/ralph.sh 25
+MODEL=gpt-5-codex python -m ralph_py run 25
 
 # Use Claude CLI
-AGENT_CMD="claude --print" ./scripts/ralph/ralph.sh 25
+AGENT_CMD="claude --print" python -m ralph_py run 25
 
 # Use Anthropic API directly via curl
-AGENT_CMD="curl -s https://api.anthropic.com/v1/messages -H 'x-api-key: $ANTHROPIC_API_KEY' ..." ./scripts/ralph/ralph.sh 25
+AGENT_CMD="curl -s https://api.anthropic.com/v1/messages -H 'x-api-key: $ANTHROPIC_API_KEY' ..." python -m ralph_py run 25
 
 # Use any CLI that reads from stdin
-AGENT_CMD="my-custom-agent --input-stdin" ./scripts/ralph/ralph.sh 25
+AGENT_CMD="my-custom-agent --input-stdin" python -m ralph_py run 25
 ```
 
 ### Tuning Iteration Speed
 
 ```bash
 # Faster iterations (1 second between each)
-SLEEP_SECONDS=1 ./scripts/ralph/ralph.sh 25
+SLEEP_SECONDS=1 python -m ralph_py run 25
 
 # Slower iterations (10 seconds, for rate-limited APIs)
-SLEEP_SECONDS=10 ./scripts/ralph/ralph.sh 25
+SLEEP_SECONDS=10 python -m ralph_py run 25
 
 # No delay (not recommended for most APIs)
-SLEEP_SECONDS=0 ./scripts/ralph/ralph.sh 25
+SLEEP_SECONDS=0 python -m ralph_py run 25
 ```
 
 ### Testing & Debugging
 
 ```bash
 # Dry run - see what prompt would be sent (no actual agent call)
-AGENT_CMD="cat" ./scripts/ralph/ralph.sh 1
+AGENT_CMD="cat" python -m ralph_py run 1
 
 # Dry run - discard output silently
-AGENT_CMD="cat > /dev/null" ./scripts/ralph/ralph.sh 1
+AGENT_CMD="cat > /dev/null" python -m ralph_py run 1
 
 # Test completion detection
-AGENT_CMD="echo '<promise>COMPLETE</promise>'" ./scripts/ralph/ralph.sh 1
+AGENT_CMD="echo '<promise>COMPLETE</promise>'" python -m ralph_py run 1
 
 # Log all output to a file while running
-./scripts/ralph/ralph.sh 25 2>&1 | tee ralph-output.log
+python -m ralph_py run 25 2>&1 | tee ralph-output.log
 ```
 
 ### Human-in-the-Loop (Interactive Mode)
 
 ```bash
 # Pause after each iteration for human review
-INTERACTIVE=1 ./scripts/ralph/ralph.sh 25
+INTERACTIVE=1 python -m ralph_py run 25
 
 # Interactive mode with Claude
-INTERACTIVE=1 AGENT_CMD="claude --print" ./scripts/ralph/ralph.sh 25
+INTERACTIVE=1 AGENT_CMD="claude --print" python -m ralph_py run 25
 ```
 
 When interactive mode is enabled, Ralph pauses after each iteration and prompts:
@@ -399,13 +365,13 @@ This lets you review the agent's changes, edit files manually, or adjust the PRD
 
 ```bash
 # Claude with fast iterations and high limit
-AGENT_CMD="claude --print" SLEEP_SECONDS=1 ./scripts/ralph/ralph.sh 50
+AGENT_CMD="claude --print" SLEEP_SECONDS=1 python -m ralph_py run 50
 
 # Codex with custom delay
-MODEL=gpt-5-codex SLEEP_SECONDS=5 ./scripts/ralph/ralph.sh 30
+MODEL=gpt-5-codex SLEEP_SECONDS=5 python -m ralph_py run 30
 
 # Interactive Claude with slow iterations
-INTERACTIVE=1 AGENT_CMD="claude --print" SLEEP_SECONDS=5 ./scripts/ralph/ralph.sh 25
+INTERACTIVE=1 AGENT_CMD="claude --print" SLEEP_SECONDS=5 python -m ralph_py run 25
 ```
 
 ## Configuration
@@ -423,10 +389,11 @@ INTERACTIVE=1 AGENT_CMD="claude --print" SLEEP_SECONDS=5 ./scripts/ralph/ralph.s
 | `ALLOWED_PATHS` | *(empty)* | Comma-separated repo-root-relative paths allowed to change (git repos only). Entries can be exact files or directory prefixes ending with `/`. Set to empty (`ALLOWED_PATHS=""`) to disable enforcement. |
 | `PRD_FILE` | `scripts/ralph/prd.json` | PRD file path used for branch selection (git repos only) |
 | `RALPH_BRANCH` | *(unset)* | Branch to checkout/create before running (git repos only). If set to empty (`RALPH_BRANCH=""`), branch checkout is skipped. Takes precedence over PRD `branchName` when non-empty. |
-| `RALPH_UI` | `auto` | UI mode: `auto` (use gum if available), `gum` (force), `plain` (disable gum) |
-| `GUM_FORCE` | *(empty)* | If set to `1`, force gum even when not a TTY (not recommended for CI logs) |
+| `RALPH_UI` | `auto` | UI mode: `auto`, `rich`, `plain` (accepts `gum` as an alias for `rich`) |
+| `GUM_FORCE` | *(empty)* | If set to `1`, force rich UI even when not a TTY (not recommended for CI logs) |
 | `NO_COLOR` | *(empty)* | Disable ANSI colors |
 | `RALPH_ASCII` | *(empty)* | If set to `1`, use ASCII separators instead of box-drawing chars |
+| `RALPH_AI_SHOW_FINAL` | `1` | Show the final assistant message (set to `0` to hide) |
 | `RALPH_AI_SHOW_PROMPT` | *(empty)* | Show the prompt echoed by Codex in logs (by default it is collapsed/hidden) |
 | `RALPH_AI_RAW` | *(empty)* | Stream raw Codex output (disables the Codex transcript pretty-printer) |
 | `RALPH_AI_PROMPT_PROGRESS_EVERY` | `50` | When the Codex echoed prompt is hidden, print a progress line every N suppressed lines (set to `0` to disable) |
@@ -437,22 +404,22 @@ INTERACTIVE=1 AGENT_CMD="claude --print" SLEEP_SECONDS=5 ./scripts/ralph/ralph.s
 
 ```bash
 # Use codex with a specific model
-MODEL=gpt-5-codex ./scripts/ralph/ralph.sh 25
+MODEL=gpt-5-codex python -m ralph_py run 25
 
 # Use a custom agent command (prompt is piped to stdin)
-AGENT_CMD="claude --print" ./scripts/ralph/ralph.sh 25
+AGENT_CMD="claude --print" python -m ralph_py run 25
 
 # Human-in-the-loop mode (pause after each iteration)
-INTERACTIVE=1 ./scripts/ralph/ralph.sh 25
+INTERACTIVE=1 python -m ralph_py run 25
 
 # Use any CLI that accepts stdin
-AGENT_CMD="my-agent --stdin --json" ./scripts/ralph/ralph.sh 25
+AGENT_CMD="my-agent --stdin --json" python -m ralph_py run 25
 
 # Dry run with a no-op agent (useful for testing)
-AGENT_CMD="cat > /dev/null" ./scripts/ralph/ralph.sh 1
+AGENT_CMD="cat > /dev/null" python -m ralph_py run 1
 
 # Faster iteration (1 second delay)
-SLEEP_SECONDS=1 ./scripts/ralph/ralph.sh 25
+SLEEP_SECONDS=1 python -m ralph_py run 25
 ```
 
 ## PRD Schema
@@ -507,16 +474,12 @@ When Ralph detects this in the agent's output, it exits successfully (code 0).
 
 | File | Required | Purpose |
 |------|----------|---------|
-| `ralph.sh` | Yes | Main loop script (lives in `scripts/ralph/`) |
 | `prompt.md` | Yes (feature mode) | AI agent instructions for feature work |
-| `prd.json` | Yes (feature mode) | User stories and acceptance criteria (auto-created by `init.sh` if missing) |
-| `progress.txt` | No | Running log of patterns and progress (auto-created by `init.sh` if missing) |
-| `init.sh` | No | Initialization/validation script (creates optional files + validates PRD) |
+| `prd.json` | Yes (feature mode) | User stories and acceptance criteria (created by `python -m ralph_py init` if missing) |
+| `progress.txt` | No | Running log of patterns and progress (created by `python -m ralph_py init` if missing) |
 | `prd_prompt.txt` | No | Fillable template for generating PRDs with an LLM |
-| `understand_prompt.md` | Yes (understanding mode) | Read-only prompt for codebase understanding (auto-created by `init.sh` if missing) |
-| `codebase_map.md` | No | Output file for the codebase map (auto-created by `init.sh` if missing) |
-| `ralph-understand.sh` | No | Convenience wrapper for understanding mode (auto-created by `init.sh` if missing) |
-| `ui.sh` | No | Output/UI helpers (uses `gum` if installed; falls back to plain output) |
+| `understand_prompt.md` | Yes (understanding mode) | Read-only prompt for codebase understanding (created by `python -m ralph_py init` if missing) |
+| `codebase_map.md` | No | Output file for the codebase map (created by `python -m ralph_py init` if missing) |
 
 ## Tips
 

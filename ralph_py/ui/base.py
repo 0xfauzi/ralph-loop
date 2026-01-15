@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Iterator, Protocol
+from collections.abc import Iterator
+from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
-    from io import TextIO
+    from typing import TextIO
 
 
 class UI(Protocol):

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from click.testing import CliRunner
 
 from ralph_py.cli import cli
@@ -64,3 +66,58 @@ class TestCliValidation:
             )
             # Should fail because prompt file doesn't exist
             assert result.exit_code != 0
+
+    def test_run_uses_prompt_env_for_root(self, tmp_path: Path, monkeypatch) -> None:
+        project = tmp_path / "project"
+        ralph_dir = project / "scripts" / "ralph"
+        ralph_dir.mkdir(parents=True)
+        (ralph_dir / "prompt.md").write_text("test prompt")
+        (ralph_dir / "prd.json").write_text(
+            '{"branchName": "test", "userStories": []}'
+        )
+
+        runner = CliRunner()
+        monkeypatch.chdir(tmp_path)
+        result = runner.invoke(
+            cli,
+            [
+                "run",
+                "1",
+                "--agent-cmd",
+                "printf '<promise>COMPLETE</promise>\\n'",
+                "--sleep",
+                "0",
+            ],
+            env={
+                "PROMPT_FILE": str(ralph_dir / "prompt.md"),
+                "PRD_FILE": str(ralph_dir / "prd.json"),
+            },
+        )
+        assert result.exit_code == 0
+
+    def test_understand_uses_root_option(self, tmp_path: Path, monkeypatch) -> None:
+        project = tmp_path / "project"
+        ralph_dir = project / "scripts" / "ralph"
+        ralph_dir.mkdir(parents=True)
+        (ralph_dir / "understand_prompt.md").write_text("test prompt")
+        (ralph_dir / "codebase_map.md").write_text("# Map\n")
+        (ralph_dir / "prd.json").write_text(
+            '{"branchName": "test", "userStories": []}'
+        )
+
+        runner = CliRunner()
+        monkeypatch.chdir(tmp_path)
+        result = runner.invoke(
+            cli,
+            [
+                "understand",
+                "1",
+                "--root",
+                str(project),
+                "--agent-cmd",
+                "printf '<promise>COMPLETE</promise>\\n'",
+                "--sleep",
+                "0",
+            ],
+        )
+        assert result.exit_code == 0

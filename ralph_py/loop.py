@@ -283,12 +283,14 @@ def run_loop(config: RalphConfig, ui: UI, agent: Agent, cwd: Path | None = None)
                 prompt_progress_every=config.ai_prompt_progress_every,
             )
 
-        def flush_tool() -> None:
+        def flush_tool(
+            tool_summaries_ref: list[ToolSummary] = tool_summaries,
+        ) -> None:
             nonlocal active_tool, active_tool_lines
             if active_tool is None:
                 return
             active_tool.output_lines = active_tool_lines
-            tool_summaries.append(active_tool)
+            tool_summaries_ref.append(active_tool)
             active_tool = None
             active_tool_lines = 0
 

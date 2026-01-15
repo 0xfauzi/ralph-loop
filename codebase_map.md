@@ -34,7 +34,7 @@ Edit this list to match your repo. During the understanding loop, mark items as 
 - **Primary entrypoints**:
 - **Data store**:
 
-## Known “Do Not Touch” Areas (optional)
+## Known "Do Not Touch" Areas (optional)
 
 - (add directories/files that are fragile or off-limits)
 
@@ -43,4 +43,3 @@ Edit this list to match your repo. During the understanding loop, mark items as 
 ## Iteration Notes
 
 (New notes append below; keep older notes for history.)
-

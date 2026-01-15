@@ -55,7 +55,7 @@ class PRD:
     def validate_schema(cls, data: Any) -> list[str]:
         """Validate PRD JSON schema, returning list of errors.
 
-        Schema requirements (matching init.sh exactly):
+        Schema requirements (matching the init command exactly):
         - Top-level must be dict with exactly 2 keys: branchName, userStories
         - branchName: non-empty string
         - userStories: array of story objects

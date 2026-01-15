@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import shutil
 import subprocess
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Iterator
 
 
 class CustomAgent:
@@ -31,9 +32,16 @@ class CustomAgent:
         """
         self._final_message = None
 
+        use_bash = shutil.which("bash") is not None
+        if use_bash:
+            cmd: str | list[str] = ["bash", "-lc", self._command]
+        else:
+            # Fallback to /bin/sh when bash is unavailable.
+            cmd = self._command
+
         proc = subprocess.Popen(
-            self._command,
-            shell=True,
+            cmd,
+            shell=not use_bash,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,

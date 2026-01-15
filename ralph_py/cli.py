@@ -7,13 +7,53 @@ import sys
 from pathlib import Path
 
 import click
+from click.core import ParameterSource
 
 from ralph_py import __version__
 from ralph_py.agents import CodexAgent, get_agent
-from ralph_py.config import RalphConfig
+from ralph_py.config import RalphConfig, _parse_paths
 from ralph_py.init_cmd import run_init
 from ralph_py.loop import run_loop
 from ralph_py.ui import get_ui
+
+
+def _use_cli_value(ctx: click.Context, name: str) -> bool:
+    return ctx.get_parameter_source(name) == ParameterSource.COMMANDLINE
+
+
+def _resolve_root(root: Path | None, prompt: Path | None, prd: Path | None) -> Path:
+    if root is not None:
+        return root.resolve()
+
+    for candidate in (prompt, prd):
+        if candidate is None:
+            continue
+        resolved = candidate.resolve()
+        parent = resolved.parent
+        if parent.name == "ralph" and parent.parent.name == "scripts":
+            return parent.parent.parent
+
+    return Path.cwd()
+
+
+def _resolve_path(root: Path, value: str | None, default: Path) -> Path:
+    if value is None or value == "":
+        return default
+    path = Path(value)
+    if path.is_absolute():
+        return path
+    return root / path
+
+
+def _normalize_ui_mode(value: str) -> str:
+    normalized = (value or "auto").strip().lower()
+    if normalized == "gum":
+        return "rich"
+    if normalized in {"plain", "off", "no", "0"}:
+        return "plain"
+    if normalized not in {"auto", "rich", "plain"}:
+        return "auto"
+    return normalized
 
 
 @click.group()
@@ -26,76 +66,105 @@ def cli() -> None:
 @cli.command()
 @click.argument("max_iterations", type=int, default=10)
 @click.option(
+    "--root",
+    type=click.Path(path_type=Path),
+    help="Project root path (defaults to current directory)",
+)
+@click.option(
     "--prompt", "-p",
-    type=click.Path(exists=True, path_type=Path),
+    type=str,
     help="Prompt file path",
 )
 @click.option(
     "--prd",
-    type=click.Path(exists=True, path_type=Path),
+    type=str,
     help="PRD file path",
 )
 @click.option(
     "--agent-cmd",
-    envvar="AGENT_CMD",
     help="Custom agent command (prompt piped to stdin)",
 )
 @click.option(
     "--model", "-m",
-    envvar="MODEL",
     help="Model for codex agent",
 )
 @click.option(
     "--reasoning",
-    envvar="MODEL_REASONING_EFFORT",
     help="Reasoning effort for codex (low, medium, high)",
 )
 @click.option(
     "--sleep", "-s",
     type=float,
     default=2.0,
-    envvar="SLEEP_SECONDS",
     help="Sleep seconds between iterations",
 )
 @click.option(
     "--interactive", "-i",
     is_flag=True,
-    envvar="INTERACTIVE",
     help="Enable human-in-the-loop mode",
 )
 @click.option(
     "--branch",
-    envvar="RALPH_BRANCH",
     help="Git branch to use (empty string to skip checkout)",
 )
 @click.option(
     "--allowed-paths",
-    envvar="ALLOWED_PATHS",
     help="Comma-separated allowed paths for guardrails",
 )
 @click.option(
     "--ui",
-    type=click.Choice(["auto", "rich", "plain"]),
+    type=click.Choice(["auto", "rich", "plain", "gum"]),
     default="auto",
-    envvar="RALPH_UI",
     help="UI mode",
 )
 @click.option(
     "--no-color",
     is_flag=True,
-    envvar="NO_COLOR",
     help="Disable colors",
 )
 @click.option(
     "--ascii",
     is_flag=True,
-    envvar="RALPH_ASCII",
     help="Use ASCII characters only",
+)
+@click.option(
+    "--ai-raw/--ai-no-raw",
+    default=None,
+    help="Stream raw Codex output without transcript parsing",
+)
+@click.option(
+    "--ai-show-prompt/--ai-hide-prompt",
+    default=None,
+    help="Show the echoed prompt in Codex output",
+)
+@click.option(
+    "--ai-show-final/--ai-hide-final",
+    default=None,
+    help="Show the final assistant message",
+)
+@click.option(
+    "--ai-prompt-progress-every",
+    type=int,
+    default=None,
+    help="Emit a prompt suppression marker every N lines (0 disables)",
+)
+@click.option(
+    "--ai-tool-mode",
+    type=click.Choice(["summary", "full", "none"]),
+    default=None,
+    help="Tool output display mode",
+)
+@click.option(
+    "--ai-sys-mode",
+    type=click.Choice(["summary", "full"]),
+    default=None,
+    help="System output display mode",
 )
 def run(
     max_iterations: int,
-    prompt: Path | None,
-    prd: Path | None,
+    root: Path | None,
+    prompt: str | None,
+    prd: str | None,
     agent_cmd: str | None,
     model: str | None,
     reasoning: str | None,
@@ -106,47 +175,109 @@ def run(
     ui: str,
     no_color: bool,
     ascii: bool,
+    ai_raw: bool | None,
+    ai_show_prompt: bool | None,
+    ai_show_final: bool | None,
+    ai_prompt_progress_every: int | None,
+    ai_tool_mode: str | None,
+    ai_sys_mode: str | None,
 ) -> None:
     """Run the agentic loop.
 
     MAX_ITERATIONS is the maximum number of iterations (default: 10).
     """
-    cwd = Path.cwd()
+    ctx = click.get_current_context()
+    env_prompt = os.environ.get("PROMPT_FILE")
+    env_prd = os.environ.get("PRD_FILE")
 
-    # Determine if branch was explicitly set
-    branch_explicit = "RALPH_BRANCH" in os.environ or branch is not None
-
-    # Build config
-    config = RalphConfig(
-        max_iterations=max_iterations,
-        prompt_file=prompt or (cwd / "scripts/ralph/prompt.md"),
-        prd_file=prd or (cwd / "scripts/ralph/prd.json"),
-        sleep_seconds=sleep,
-        interactive=interactive,
-        allowed_paths=[p.strip() for p in (allowed_paths or "").split(",") if p.strip()],
-        ralph_branch=branch,
-        ralph_branch_explicit=branch_explicit,
-        agent_cmd=agent_cmd,
-        model=model,
-        model_reasoning_effort=reasoning,
-        ui_mode=ui,
-        no_color=no_color,
-        ascii_only=ascii,
+    prompt_for_root = (
+        Path(prompt) if _use_cli_value(ctx, "prompt") and prompt is not None else None
     )
+    if prompt_for_root is None and env_prompt is not None:
+        prompt_for_root = Path(env_prompt)
+
+    prd_for_root = Path(prd) if _use_cli_value(ctx, "prd") and prd is not None else None
+    if prd_for_root is None and env_prd is not None:
+        prd_for_root = Path(env_prd)
+
+    root_value = root if _use_cli_value(ctx, "root") else None
+    root_dir = _resolve_root(root_value, prompt_for_root, prd_for_root)
+
+    # Build config from environment defaults first.
+    config = RalphConfig.from_env(root_dir)
+
+    # Apply CLI overrides when explicitly provided.
+    if _use_cli_value(ctx, "max_iterations"):
+        config.max_iterations = max_iterations
+    if _use_cli_value(ctx, "prompt"):
+        config.prompt_file = _resolve_path(
+            root_dir, prompt, root_dir / "scripts/ralph/prompt.md"
+        )
+    if _use_cli_value(ctx, "prd"):
+        config.prd_file = _resolve_path(
+            root_dir, prd, root_dir / "scripts/ralph/prd.json"
+        )
+    if _use_cli_value(ctx, "sleep"):
+        config.sleep_seconds = sleep
+    if _use_cli_value(ctx, "interactive"):
+        config.interactive = interactive
+    if _use_cli_value(ctx, "allowed_paths"):
+        config.allowed_paths = _parse_paths(allowed_paths)
+    if _use_cli_value(ctx, "branch"):
+        config.ralph_branch = branch
+        config.ralph_branch_explicit = True
+    if _use_cli_value(ctx, "agent_cmd"):
+        config.agent_cmd = agent_cmd
+    if _use_cli_value(ctx, "model"):
+        config.model = model
+    if _use_cli_value(ctx, "reasoning"):
+        config.model_reasoning_effort = reasoning
+    if _use_cli_value(ctx, "ui"):
+        config.ui_mode = _normalize_ui_mode(ui)
+    if _use_cli_value(ctx, "no_color"):
+        config.no_color = no_color
+    if _use_cli_value(ctx, "ascii"):
+        config.ascii_only = ascii
+    if _use_cli_value(ctx, "ai_raw"):
+        config.ai_raw = bool(ai_raw)
+    if _use_cli_value(ctx, "ai_show_prompt"):
+        config.ai_show_prompt = bool(ai_show_prompt)
+    if _use_cli_value(ctx, "ai_show_final"):
+        config.ai_show_final = bool(ai_show_final)
+    if _use_cli_value(ctx, "ai_prompt_progress_every") and ai_prompt_progress_every is not None:
+        config.ai_prompt_progress_every = ai_prompt_progress_every
+    if _use_cli_value(ctx, "ai_tool_mode") and ai_tool_mode is not None:
+        config.ai_tool_mode = ai_tool_mode
+    if _use_cli_value(ctx, "ai_sys_mode") and ai_sys_mode is not None:
+        config.ai_sys_mode = ai_sys_mode
+
+    config.ui_mode = _normalize_ui_mode(config.ui_mode)
 
     # Check codex availability if not using custom agent
-    if not agent_cmd and not CodexAgent.is_available():
-        ui_impl = get_ui(config.ui_mode, config.no_color, config.ascii_only)
+    force_rich = os.environ.get("GUM_FORCE") == "1"
+    ui_impl = get_ui(
+        config.ui_mode,
+        config.no_color,
+        config.ascii_only,
+        force_rich=force_rich,
+    )
+
+    if config.max_iterations < 0:
+        ui_impl.err(
+            f"MAX_ITERATIONS must be non-negative (got: {config.max_iterations})"
+        )
+        sys.exit(2)
+
+    if not config.agent_cmd and not CodexAgent.is_available():
         ui_impl.err("codex not found in PATH")
         ui_impl.info("Install codex or use --agent-cmd to specify a custom agent")
         sys.exit(1)
 
     # Get UI and agent
-    ui_impl = get_ui(config.ui_mode, config.no_color, config.ascii_only)
     agent = get_agent(config.agent_cmd, config.model, config.model_reasoning_effort)
 
     # Run loop
-    result = run_loop(config, ui_impl, agent, cwd)
+    result = run_loop(config, ui_impl, agent, root_dir)
     sys.exit(result.exit_code)
 
 
@@ -154,15 +285,13 @@ def run(
 @click.argument("directory", type=click.Path(path_type=Path), default=".")
 @click.option(
     "--ui",
-    type=click.Choice(["auto", "rich", "plain"]),
+    type=click.Choice(["auto", "rich", "plain", "gum"]),
     default="auto",
-    envvar="RALPH_UI",
     help="UI mode",
 )
 @click.option(
     "--no-color",
     is_flag=True,
-    envvar="NO_COLOR",
     help="Disable colors",
 )
 def init(directory: Path, ui: str, no_color: bool) -> None:
@@ -170,7 +299,8 @@ def init(directory: Path, ui: str, no_color: bool) -> None:
 
     DIRECTORY is the target project directory (default: current directory).
     """
-    ui_impl = get_ui(ui, no_color)
+    force_rich = os.environ.get("GUM_FORCE") == "1"
+    ui_impl = get_ui(_normalize_ui_mode(ui), no_color, force_rich=force_rich)
     exit_code = run_init(directory, ui_impl)
     sys.exit(exit_code)
 
@@ -178,68 +308,121 @@ def init(directory: Path, ui: str, no_color: bool) -> None:
 @cli.command()
 @click.argument("max_iterations", type=int, default=10)
 @click.option(
+    "--root",
+    type=click.Path(path_type=Path),
+    help="Project root path (defaults to current directory)",
+)
+@click.option(
+    "--prompt", "-p",
+    type=str,
+    help="Prompt file path",
+)
+@click.option(
+    "--prd",
+    type=str,
+    help="PRD file path",
+)
+@click.option(
     "--agent-cmd",
-    envvar="AGENT_CMD",
     help="Custom agent command",
 )
 @click.option(
     "--model", "-m",
-    envvar="MODEL",
     help="Model for codex agent",
 )
 @click.option(
     "--reasoning",
-    envvar="MODEL_REASONING_EFFORT",
     help="Reasoning effort for codex",
 )
 @click.option(
     "--sleep", "-s",
     type=float,
     default=2.0,
-    envvar="SLEEP_SECONDS",
     help="Sleep seconds between iterations",
 )
 @click.option(
     "--interactive", "-i",
     is_flag=True,
-    envvar="INTERACTIVE",
     help="Enable human-in-the-loop mode",
 )
 @click.option(
     "--branch",
-    envvar="RALPH_BRANCH",
     help="Git branch (default: ralph/understanding)",
 )
 @click.option(
+    "--allowed-paths",
+    help="Comma-separated allowed paths for guardrails",
+)
+@click.option(
     "--ui",
-    type=click.Choice(["auto", "rich", "plain"]),
+    type=click.Choice(["auto", "rich", "plain", "gum"]),
     default="auto",
-    envvar="RALPH_UI",
     help="UI mode",
 )
 @click.option(
     "--no-color",
     is_flag=True,
-    envvar="NO_COLOR",
     help="Disable colors",
 )
 @click.option(
     "--ascii",
     is_flag=True,
-    envvar="RALPH_ASCII",
     help="Use ASCII characters only",
+)
+@click.option(
+    "--ai-raw/--ai-no-raw",
+    default=None,
+    help="Stream raw Codex output without transcript parsing",
+)
+@click.option(
+    "--ai-show-prompt/--ai-hide-prompt",
+    default=None,
+    help="Show the echoed prompt in Codex output",
+)
+@click.option(
+    "--ai-show-final/--ai-hide-final",
+    default=None,
+    help="Show the final assistant message",
+)
+@click.option(
+    "--ai-prompt-progress-every",
+    type=int,
+    default=None,
+    help="Emit a prompt suppression marker every N lines (0 disables)",
+)
+@click.option(
+    "--ai-tool-mode",
+    type=click.Choice(["summary", "full", "none"]),
+    default=None,
+    help="Tool output display mode",
+)
+@click.option(
+    "--ai-sys-mode",
+    type=click.Choice(["summary", "full"]),
+    default=None,
+    help="System output display mode",
 )
 def understand(
     max_iterations: int,
+    root: Path | None,
+    prompt: str | None,
+    prd: str | None,
     agent_cmd: str | None,
     model: str | None,
     reasoning: str | None,
     sleep: float,
     interactive: bool,
     branch: str | None,
+    allowed_paths: str | None,
     ui: str,
     no_color: bool,
     ascii: bool,
+    ai_raw: bool | None,
+    ai_show_prompt: bool | None,
+    ai_show_final: bool | None,
+    ai_prompt_progress_every: int | None,
+    ai_tool_mode: str | None,
+    ai_sys_mode: str | None,
 ) -> None:
     """Run codebase understanding loop (read-only mode).
 
@@ -250,58 +433,118 @@ def understand(
     - Only allows edits to codebase_map.md
     - Works on ralph/understanding branch by default
     """
-    cwd = Path.cwd()
-    ralph_dir = cwd / "scripts" / "ralph"
+    ctx = click.get_current_context()
+    env_prompt = os.environ.get("PROMPT_FILE")
+    env_prd = os.environ.get("PRD_FILE")
+
+    prompt_for_root = (
+        Path(prompt) if _use_cli_value(ctx, "prompt") and prompt is not None else None
+    )
+    if prompt_for_root is None and env_prompt is not None:
+        prompt_for_root = Path(env_prompt)
+
+    prd_for_root = Path(prd) if _use_cli_value(ctx, "prd") and prd is not None else None
+    if prd_for_root is None and env_prd is not None:
+        prd_for_root = Path(env_prd)
+
+    root_value = root if _use_cli_value(ctx, "root") else None
+    root_dir = _resolve_root(root_value, prompt_for_root, prd_for_root)
+    ralph_dir = root_dir / "scripts" / "ralph"
 
     # Create codebase_map.md if missing
     codebase_map = ralph_dir / "codebase_map.md"
     if not codebase_map.exists():
         from ralph_py.init_cmd import DEFAULT_CODEBASE_MAP
+        codebase_map.parent.mkdir(parents=True, exist_ok=True)
         codebase_map.write_text(DEFAULT_CODEBASE_MAP)
 
-    # Set understanding mode defaults
-    prompt_file = ralph_dir / "understand_prompt.md"
-    allowed_paths = "scripts/ralph/codebase_map.md"
-    default_branch = "ralph/understanding"
+    config = RalphConfig.from_env(root_dir)
 
-    # Use provided branch or default
-    actual_branch = branch if branch is not None else default_branch
-    branch_explicit = "RALPH_BRANCH" in os.environ or branch is not None
+    # Apply CLI overrides when explicitly provided.
+    if _use_cli_value(ctx, "max_iterations"):
+        config.max_iterations = max_iterations
+    if _use_cli_value(ctx, "prompt"):
+        config.prompt_file = _resolve_path(
+            root_dir, prompt, ralph_dir / "understand_prompt.md"
+        )
+    if _use_cli_value(ctx, "prd"):
+        config.prd_file = _resolve_path(
+            root_dir, prd, ralph_dir / "prd.json"
+        )
+    if _use_cli_value(ctx, "sleep"):
+        config.sleep_seconds = sleep
+    if _use_cli_value(ctx, "interactive"):
+        config.interactive = interactive
+    if _use_cli_value(ctx, "allowed_paths"):
+        config.allowed_paths = _parse_paths(allowed_paths)
+    if _use_cli_value(ctx, "branch"):
+        config.ralph_branch = branch
+        config.ralph_branch_explicit = True
+    if _use_cli_value(ctx, "agent_cmd"):
+        config.agent_cmd = agent_cmd
+    if _use_cli_value(ctx, "model"):
+        config.model = model
+    if _use_cli_value(ctx, "reasoning"):
+        config.model_reasoning_effort = reasoning
+    if _use_cli_value(ctx, "ui"):
+        config.ui_mode = _normalize_ui_mode(ui)
+    if _use_cli_value(ctx, "no_color"):
+        config.no_color = no_color
+    if _use_cli_value(ctx, "ascii"):
+        config.ascii_only = ascii
+    if _use_cli_value(ctx, "ai_raw"):
+        config.ai_raw = bool(ai_raw)
+    if _use_cli_value(ctx, "ai_show_prompt"):
+        config.ai_show_prompt = bool(ai_show_prompt)
+    if _use_cli_value(ctx, "ai_show_final"):
+        config.ai_show_final = bool(ai_show_final)
+    if _use_cli_value(ctx, "ai_prompt_progress_every") and ai_prompt_progress_every is not None:
+        config.ai_prompt_progress_every = ai_prompt_progress_every
+    if _use_cli_value(ctx, "ai_tool_mode") and ai_tool_mode is not None:
+        config.ai_tool_mode = ai_tool_mode
+    if _use_cli_value(ctx, "ai_sys_mode") and ai_sys_mode is not None:
+        config.ai_sys_mode = ai_sys_mode
 
-    config = RalphConfig(
-        max_iterations=max_iterations,
-        prompt_file=prompt_file,
-        prd_file=cwd / "scripts/ralph/prd.json",
-        sleep_seconds=sleep,
-        interactive=interactive,
-        allowed_paths=[allowed_paths],
-        ralph_branch=actual_branch,
-        ralph_branch_explicit=branch_explicit,
-        agent_cmd=agent_cmd,
-        model=model,
-        model_reasoning_effort=reasoning,
-        ui_mode=ui,
-        no_color=no_color,
-        ascii_only=ascii,
-    )
+    # Apply understanding defaults when not overridden by env or CLI.
+    if not _use_cli_value(ctx, "prompt") and "PROMPT_FILE" not in os.environ:
+        config.prompt_file = ralph_dir / "understand_prompt.md"
+    if not _use_cli_value(ctx, "allowed_paths") and "ALLOWED_PATHS" not in os.environ:
+        config.allowed_paths = ["scripts/ralph/codebase_map.md"]
+    if not _use_cli_value(ctx, "branch") and "RALPH_BRANCH" not in os.environ:
+        config.ralph_branch = "ralph/understanding"
+        config.ralph_branch_explicit = False
+
+    config.ui_mode = _normalize_ui_mode(config.ui_mode)
 
     # Check codex availability
-    if not agent_cmd and not CodexAgent.is_available():
-        ui_impl = get_ui(config.ui_mode, config.no_color, config.ascii_only)
+    force_rich = os.environ.get("GUM_FORCE") == "1"
+    ui_impl = get_ui(
+        config.ui_mode,
+        config.no_color,
+        config.ascii_only,
+        force_rich=force_rich,
+    )
+
+    if config.max_iterations < 0:
+        ui_impl.err(
+            f"MAX_ITERATIONS must be non-negative (got: {config.max_iterations})"
+        )
+        sys.exit(2)
+
+    if not config.agent_cmd and not CodexAgent.is_available():
         ui_impl.err("codex not found in PATH")
         ui_impl.info("Install codex or use --agent-cmd to specify a custom agent")
         sys.exit(1)
 
-    ui_impl = get_ui(config.ui_mode, config.no_color, config.ascii_only)
     agent = get_agent(config.agent_cmd, config.model, config.model_reasoning_effort)
 
-    result = run_loop(config, ui_impl, agent, cwd)
+    result = run_loop(config, ui_impl, agent, root_dir)
     sys.exit(result.exit_code)
 
 
 def main() -> None:
     """Main entry point."""
-    cli(auto_envvar_prefix="RALPH")
+    cli()
 
 
 if __name__ == "__main__":

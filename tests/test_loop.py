@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Iterator
 
-from ralph_py.agents.base import Agent
 from ralph_py.config import RalphConfig
 from ralph_py.loop import COMPLETION_MARKER, run_loop
 from ralph_py.ui.plain import PlainUI
@@ -23,8 +22,7 @@ class MockAgent:
         return "mock"
 
     def run(self, prompt: str, cwd: Path | None = None) -> Iterator[str]:
-        for line in self._output:
-            yield line
+        yield from self._output
         if self._output:
             self._final_message = self._output[-1]
 

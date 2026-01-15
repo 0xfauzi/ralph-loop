@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import sys
-from typing import TYPE_CHECKING, Iterator
+from collections.abc import Callable, Iterator
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from io import TextIO
+    from typing import TextIO
 
 # ANSI color codes
 COLORS = {
@@ -196,14 +197,19 @@ class PlainUI:
         if not self.can_prompt():
             return default
 
+        prompt_radiolist_dialog: Callable[..., Any] | None
         try:
-            from prompt_toolkit.shortcuts import radiolist_dialog
+            from prompt_toolkit.shortcuts import radiolist_dialog as _radiolist_dialog
         except Exception:
-            radiolist_dialog = None
+            prompt_radiolist_dialog = None
+        else:
+            prompt_radiolist_dialog = _radiolist_dialog
 
-        if radiolist_dialog is not None:
+        if prompt_radiolist_dialog is not None:
             values = [(idx, opt) for idx, opt in enumerate(options)]
-            result = radiolist_dialog(title="Ralph", text=header, values=values).run()
+            result = prompt_radiolist_dialog(
+                title="Ralph", text=header, values=values
+            ).run()
             if result is None:
                 return default
             return int(result)
@@ -239,13 +245,16 @@ class PlainUI:
         if not self.can_prompt():
             return default
 
+        prompt_yes_no_dialog: Callable[..., Any] | None
         try:
-            from prompt_toolkit.shortcuts import yes_no_dialog
+            from prompt_toolkit.shortcuts import yes_no_dialog as _yes_no_dialog
         except Exception:
-            yes_no_dialog = None
+            prompt_yes_no_dialog = None
+        else:
+            prompt_yes_no_dialog = _yes_no_dialog
 
-        if yes_no_dialog is not None:
-            result = yes_no_dialog(title="Ralph", text=prompt).run()
+        if prompt_yes_no_dialog is not None:
+            result = prompt_yes_no_dialog(title="Ralph", text=prompt).run()
             if result is None:
                 return default
             return bool(result)

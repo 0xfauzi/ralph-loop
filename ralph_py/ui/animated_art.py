@@ -1,14 +1,15 @@
 """Animated ASCII art for Ralph UI."""
-
 from __future__ import annotations
 
 import math
 import time
-from typing import Iterable
+from collections.abc import Iterable
+from typing import TYPE_CHECKING
 
 from rich.text import Text
 
-
+if TYPE_CHECKING:
+    from rich.console import Console, ConsoleOptions
 LARGE_ACCENT = "o"
 LARGE_ACCENT_SECONDARY = "O"
 LARGE_PRIMARY = "."
@@ -139,7 +140,9 @@ class LoopIndicator:
         self._interval = interval
         self._start = time.monotonic()
 
-    def __rich_console__(self, console, options):
+    def __rich_console__(
+        self, console: Console, options: ConsoleOptions
+    ) -> Iterable[Text]:
         if not self._frames:
             yield Text("")
             return
