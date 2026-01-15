@@ -27,21 +27,27 @@ your-project/
 ├── scripts/
 │   └── ralph/
 │       ├── prompt.md             # Feature-mode agent instructions (required)
-│       ├── prd.json              # Feature-mode user stories (created by python -m ralph_py init if missing)
-│       ├── progress.txt          # Optional running log (created by python -m ralph_py init if missing)
+│       ├── prd.json              # Feature-mode user stories (created by ralph init if missing)
+│       ├── progress.txt          # Optional running log (created by ralph init if missing)
 │       ├── prd_prompt.txt        # Optional template for generating prd.json
-│       ├── understand_prompt.md  # Understanding-mode prompt (created by python -m ralph_py init if missing)
-│       └── codebase_map.md       # Understanding-mode output (created by python -m ralph_py init if missing)
+│       ├── understand_prompt.md  # Understanding-mode prompt (created by ralph init if missing)
+│       └── codebase_map.md       # Understanding-mode output (created by ralph init if missing)
 └── ...
 ```
 
 ## CLI
 
-Ralph runs via the Python CLI.
+Install the CLI from the repo:
+
+```bash
+uv tool install .
+```
+
+This creates the `ralph` command. `python -m ralph_py` remains available for dev workflows.
 
 | Command | Requirements |
 |---------|--------------|
-| `python -m ralph_py` | Python 3.11+, uv |
+| `ralph` | Python 3.11+, uv |
 
 ---
 
@@ -54,25 +60,28 @@ Ralph runs via the Python CLI.
 git clone https://github.com/0xfauzi/ralph-loop.git
 cd ralph-loop
 uv sync
+uv tool install .
 ```
 
 ### Commands
 
 ```bash
 # Run the agentic loop
-python -m ralph_py run [MAX_ITERATIONS] [OPTIONS]
+ralph run [MAX_ITERATIONS] [OPTIONS]
 
 # Initialize Ralph in a project
-python -m ralph_py init [DIRECTORY]
+ralph init [DIRECTORY]
 
 # Codebase understanding mode (read-only)
-python -m ralph_py understand [MAX_ITERATIONS]
+ralph understand [MAX_ITERATIONS]
 ```
+
+Note: You can replace `python -m ralph_py` with `ralph` in the examples below after installing the CLI.
 
 ### Python CLI Options
 
 ```bash
-python -m ralph_py run 25 \
+ralph run 25 \
   --root /path/to/your-project \   # Optional when running outside the project root
   --agent-cmd "claude --print" \    # Custom agent command
   --model gpt-4o \                  # Model for codex
@@ -116,13 +125,13 @@ uv run ruff check .        # Linting
 From your project root:
 
 ```bash
-python -m ralph_py init .
+ralph init .
 ```
 
 Or run it from anywhere:
 
 ```bash
-python -m ralph_py init /path/to/your-project
+ralph init /path/to/your-project
 ```
 
 This will:
@@ -194,7 +203,7 @@ Edit `scripts/ralph/prompt.md` with instructions for the AI agent. This typicall
 ### 4. Run Ralph
 
 ```bash
-python -m ralph_py run 25
+ralph run 25
 ```
 
 If you are outside the project root, pass `--root /path/to/your-project`.

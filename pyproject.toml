@@ -9,6 +9,9 @@ dependencies = [
     "click>=8.0.0",
 ]
 
+[project.scripts]
+ralph = "ralph_py.cli:main"
+
 [project.optional-dependencies]
 tui = [
     "prompt_toolkit>=3.0.0",

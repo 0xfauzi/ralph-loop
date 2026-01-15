@@ -306,6 +306,48 @@ def init(directory: Path, ui: str, no_color: bool) -> None:
 
 
 @cli.command()
+@click.option(
+    "--transport",
+    type=click.Choice(["stdio", "http"]),
+    default="stdio",
+    help="Transport mode",
+)
+@click.option(
+    "--root",
+    type=click.Path(path_type=Path),
+    help="Project root path",
+)
+@click.option(
+    "--host",
+    help="HTTP host",
+)
+@click.option(
+    "--port",
+    type=int,
+    help="HTTP port",
+)
+@click.option(
+    "--log-dir",
+    type=click.Path(path_type=Path),
+    default=Path(".ralph/logs"),
+    help="Log directory",
+)
+def mcp(
+    transport: str,
+    root: Path | None,
+    host: str | None,
+    port: int | None,
+    log_dir: Path,
+) -> None:
+    """Run the MCP server."""
+    click.echo(
+        "MCP server is not implemented yet. See docs/mcp_server_design.md.",
+        err=True,
+    )
+    sys.exit(2)
+
+
+@cli.command()
 @click.argument("max_iterations", type=int, default=10)
 @click.option(
     "--root",

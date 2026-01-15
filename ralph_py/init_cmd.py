@@ -396,10 +396,10 @@ def run_init(directory: Path, ui: UI) -> int:
     ui.section("Next steps")
     ui.info("1. Edit scripts/ralph/prompt.md")
     ui.info("2. Add user stories to scripts/ralph/prd.json")
-    ui.info("3. Run: python -m ralph_py run [iterations]")
+    ui.info("3. Run: ralph run [iterations]")
     ui.info("")
     ui.info("For codebase understanding mode:")
-    ui.info("  python -m ralph_py understand [iterations]")
+    ui.info("  ralph understand [iterations]")
 
     return 0
 
