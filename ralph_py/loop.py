@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -21,12 +22,18 @@ COMPLETION_MARKER = "<promise>COMPLETE</promise>"
 PLAN_PREFIXES = (
     "preparing to",
     "planning to",
+    "deciding to",
+    "i'm deciding to",
+    "i am deciding to",
     "plan:",
     "goal:",
     "next:",
     "listing",
     "reading",
     "reviewing",
+    "exploring",
+    "investigating",
+    "checking",
     "i will",
     "i'm going to",
     "i am going to",
@@ -80,11 +87,57 @@ def _looks_like_plan_line(text: str) -> bool:
 def _extract_plan_lines(lines: list[tuple[str, str]]) -> list[str]:
     plan_lines: list[str] = []
     for tag, text in lines:
-        if tag != "THINK":
+        if tag not in {"THINK", "AI"}:
             continue
         if _looks_like_plan_line(text):
             plan_lines.append(_normalize_plan_line(text))
     return plan_lines
+
+
+MD_BOLD_HEADING_RE = re.compile(r"^\*\*(?P<title>[^*].*?)\*\*$")
+MD_HASH_HEADING_RE = re.compile(r"^(?P<hashes>#{1,6})\s+(?P<title>.+)$")
+
+
+def _extract_heading(text: str) -> str | None:
+    """Extract a single heading candidate from a line."""
+    raw = text.strip()
+    if not raw:
+        return None
+    match = MD_BOLD_HEADING_RE.match(raw) or MD_HASH_HEADING_RE.match(raw)
+    if not match:
+        return None
+    title = _normalize_plan_line(match.group("title").strip())
+    return title or None
+
+
+def _extract_headings(lines: list[tuple[str, str]], max_items: int = 8) -> list[str]:
+    """Extract lightweight headings from AI/THINK output for UI callouts."""
+    headings: list[str] = []
+    for tag, text in lines:
+        if tag not in {"AI", "THINK"}:
+            continue
+        title = _extract_heading(text)
+        if not title:
+            continue
+        if title in headings:
+            continue
+        headings.append(title)
+        if len(headings) >= max_items:
+            break
+    return headings
+
+
+def _merge_plan_lines(headings: list[str], plan_lines: list[str]) -> list[str]:
+    merged: list[str] = []
+    for item in headings:
+        if item not in merged:
+            merged.append(item)
+    for item in plan_lines:
+        if item not in merged:
+            merged.append(item)
+    if not merged:
+        merged = ["(no explicit plan detected)"]
+    return [line if line.startswith(("-", "*")) else f"- {line}" for line in merged]
 
 
 def _extract_completion_metrics(lines: list[tuple[str, str]]) -> dict[str, str]:
@@ -182,7 +235,13 @@ class LoopResult:
     exit_code: int
 
 
-def run_loop(config: RalphConfig, ui: UI, agent: Agent, cwd: Path | None = None) -> LoopResult:
+def run_loop(
+    config: RalphConfig,
+    ui: UI,
+    agent: Agent,
+    cwd: Path | None = None,
+    iteration_callback: Callable[[int, Path], None] | None = None,
+) -> LoopResult:
     """Run the main agentic loop.
 
     Args:
@@ -190,6 +249,7 @@ def run_loop(config: RalphConfig, ui: UI, agent: Agent, cwd: Path | None = None)
         ui: UI implementation for output
         agent: Agent to run
         cwd: Working directory (defaults to current)
+        iteration_callback: Optional callback invoked after each iteration completes.
 
     Returns:
         LoopResult with completion status and exit code
@@ -265,7 +325,6 @@ def run_loop(config: RalphConfig, ui: UI, agent: Agent, cwd: Path | None = None)
         ui.section(f"Iteration {iteration} / {config.max_iterations}")
 
         # Run agent
-        ui.channel_header("AI", "Agent output")
         output_lines: list[str] = []
         parsed_lines: list[tuple[str, str]] = []
         tool_summaries: list[ToolSummary] = []
@@ -276,12 +335,59 @@ def run_loop(config: RalphConfig, ui: UI, agent: Agent, cwd: Path | None = None)
         active_tool_lines = 0
         tool_mode = config.ai_tool_mode
         parser: CodexTranscriptParser | None = None
+        completion_parser: CodexTranscriptParser | None = None
+        last_ai_line: str | None = None
+        streaming_started = False
+        plan_rendered = False
+        buffered_lines: list[tuple[str, str]] = []
+        plan_headings: list[str] = []
+        plan_candidates: list[str] = []
+        buffer_limit = 80
         if is_codex_agent and not config.ai_raw:
             parser = CodexTranscriptParser(
                 prompt_file=config.prompt_file,
                 show_prompt=config.ai_show_prompt,
                 prompt_progress_every=config.ai_prompt_progress_every,
             )
+        if is_codex_agent:
+            # Always parse Codex transcripts for completion detection so we don't
+            # mistakenly treat an echoed prompt (which may contain the marker) as completion.
+            completion_parser = CodexTranscriptParser(
+                prompt_file=config.prompt_file,
+                show_prompt=True,
+                prompt_progress_every=0,
+            )
+
+        def start_streaming(render_plan: bool = False) -> None:
+            nonlocal streaming_started, plan_rendered
+            if streaming_started:
+                return
+            if render_plan and not plan_rendered:
+                merged_plan = _merge_plan_lines(plan_headings, plan_candidates)
+                _render_callout(ui, "PLAN", "Iteration intent", merged_plan)
+                plan_rendered = True
+            ui.channel_header("AI", "Agent output")
+            for tag, text in buffered_lines:
+                ui.stream_line(tag, text)
+            buffered_lines.clear()
+            streaming_started = True
+
+        def emit_line(tag: str, text: str) -> None:
+            if streaming_started:
+                ui.stream_line(tag, text)
+            else:
+                buffered_lines.append((tag, text))
+
+        def collect_plan_candidates(tag: str, text: str) -> None:
+            if tag not in {"AI", "THINK"}:
+                return
+            heading = _extract_heading(text)
+            if heading and heading not in plan_headings:
+                plan_headings.append(heading)
+            if _looks_like_plan_line(text):
+                normalized = _normalize_plan_line(text)
+                if normalized and normalized not in plan_candidates:
+                    plan_candidates.append(normalized)
 
         def flush_tool(
             tool_summaries_ref: list[ToolSummary] = tool_summaries,
@@ -296,8 +402,21 @@ def run_loop(config: RalphConfig, ui: UI, agent: Agent, cwd: Path | None = None)
 
         for line in agent.run(prompt, cwd):
             output_lines.append(line)
+            if completion_parser is not None:
+                for parsed in completion_parser.feed(line):
+                    if parsed.tag == "AI":
+                        candidate = parsed.text.strip()
+                        if candidate:
+                            last_ai_line = candidate
             if parser is None:
-                ui.stream_line("AI", line)
+                parsed_lines.append(("AI", line))
+                collect_plan_candidates("AI", line)
+                if not streaming_started:
+                    if plan_headings or plan_candidates:
+                        start_streaming(render_plan=True)
+                    elif len(buffered_lines) >= buffer_limit:
+                        start_streaming(render_plan=False)
+                emit_line("AI", line)
             else:
                 for parsed in parser.feed(line):
                     if parsed.tag == "TOOL":
@@ -305,17 +424,19 @@ def run_loop(config: RalphConfig, ui: UI, agent: Agent, cwd: Path | None = None)
                             active_tool = _parse_tool_header(parsed.text)
                             active_tool_lines = 0
                             if tool_mode == "full":
-                                ui.stream_line("TOOL", parsed.text)
+                                emit_line("TOOL", parsed.text)
                         elif TOOL_HEADER_RE.search(parsed.text):
                             flush_tool()
                             active_tool = _parse_tool_header(parsed.text)
                             active_tool_lines = 0
                             if tool_mode == "full":
-                                ui.stream_line("TOOL", parsed.text)
+                                emit_line("TOOL", parsed.text)
                         else:
                             active_tool_lines += 1
                             if tool_mode == "full":
-                                ui.stream_line("TOOL", parsed.text)
+                                emit_line("TOOL", parsed.text)
+                        if not streaming_started and not plan_rendered:
+                            start_streaming(render_plan=False)
                         continue
 
                     if active_tool is not None:
@@ -336,13 +457,34 @@ def run_loop(config: RalphConfig, ui: UI, agent: Agent, cwd: Path | None = None)
                         continue
 
                     parsed_lines.append((parsed.tag, parsed.text))
-                    ui.stream_line(parsed.tag, parsed.text)
+                    collect_plan_candidates(parsed.tag, parsed.text)
+                    if not streaming_started:
+                        if plan_headings or plan_candidates:
+                            start_streaming(render_plan=True)
+                        elif len(buffered_lines) >= buffer_limit:
+                            start_streaming(render_plan=False)
+                    emit_line(parsed.tag, parsed.text)
 
         if active_tool is not None:
             flush_tool()
+        if not streaming_started:
+            start_streaming(render_plan=False)
         ui.channel_footer("AI", "Agent output")
 
-        completion_seen = any(COMPLETION_MARKER in line for line in output_lines)
+        # Completion detection:
+        # - Prefer CodexAgent.final_message when available (codex --output-last-message).
+        # - For Codex transcripts, only treat the marker as valid when it is the last non-empty
+        #   assistant line (avoids false positives from echoed prompts).
+        # - For other agents, require the marker to be the last non-empty output line.
+        completion_seen = False
+        final_message = agent.final_message
+        if final_message and COMPLETION_MARKER in final_message:
+            completion_seen = True
+        elif is_codex_agent:
+            completion_seen = (last_ai_line == COMPLETION_MARKER)
+        else:
+            last_non_empty = next((l.strip() for l in reversed(output_lines) if l.strip()), "")
+            completion_seen = (last_non_empty == COMPLETION_MARKER)
 
         if parser is not None:
             if (sys_info or sys_notes) and config.ai_sys_mode == "summary" and iteration == 1:
@@ -355,31 +497,37 @@ def run_loop(config: RalphConfig, ui: UI, agent: Agent, cwd: Path | None = None)
                     sys_lines.extend(f"- {note}" for note in sys_notes)
                 _render_callout(ui, "SYS", "Session info", sys_lines)
 
+        # UI callouts: show consistent demarcations even when the model output is free-form.
+        if not plan_rendered:
+            headings = _extract_headings(parsed_lines)
             plan_lines = _extract_plan_lines(parsed_lines)
-            plan_lines = [
-                line if line.startswith(("-", "*")) else f"- {line}" for line in plan_lines
-            ]
-            _render_callout(ui, "PLAN", "Iteration intent", plan_lines)
+            merged_plan = _merge_plan_lines(headings, plan_lines)
+            _render_callout(ui, "PLAN", "Iteration intent", merged_plan)
 
-            if tool_summaries and tool_mode == "summary":
-                tool_lines = [f"- {_format_tool_summary(tool)}" for tool in tool_summaries]
-                _render_callout(ui, "ACTIONS", "Tool activity", tool_lines)
+        tool_lines: list[str] = []
+        if tool_summaries and tool_mode == "summary":
+            tool_lines = [f"- {_format_tool_summary(tool)}" for tool in tool_summaries]
+        elif tool_mode != "none":
+            tool_lines = ["- (no tool calls detected)"]
+        _render_callout(ui, "ACTIONS", "Tool activity", tool_lines)
 
-            metrics = _extract_completion_metrics(parsed_lines)
-            report_lines: list[str] = []
-            if completion_seen:
-                report_lines.append("Completion: yes")
-            if metrics:
-                report_lines.extend(f"{key}: {value}" for key, value in metrics.items())
-            _render_callout(ui, "REPORT", "Completion report", report_lines)
+        metrics = _extract_completion_metrics(parsed_lines)
+        report_lines: list[str] = [f"Completion: {'yes' if completion_seen else 'no'}"]
+        if metrics:
+            report_lines.extend(f"{key}: {value}" for key, value in metrics.items())
+        if is_codex_agent and last_ai_line and last_ai_line != COMPLETION_MARKER:
+            report_lines.append(f"Last assistant line: {_truncate(last_ai_line, 96)}")
+        _render_callout(ui, "REPORT", "Completion report", report_lines)
 
         if is_codex_agent and config.ai_show_final:
-            final_message = agent.final_message
             if final_message:
                 ui.channel_header("AI", "Final message")
                 for line in final_message.splitlines():
                     ui.stream_line("AI", line)
                 ui.channel_footer("AI", "Final message")
+
+        if iteration_callback is not None:
+            iteration_callback(iteration, cwd)
 
         # Check for completion
         if completion_seen:

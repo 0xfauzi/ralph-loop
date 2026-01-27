@@ -199,7 +199,9 @@ class PlainUI:
 
         prompt_radiolist_dialog: Callable[..., Any] | None
         try:
-            from prompt_toolkit.shortcuts import radiolist_dialog as _radiolist_dialog
+            from prompt_toolkit.shortcuts import (  # type: ignore[import-not-found]
+                radiolist_dialog as _radiolist_dialog,
+            )
         except Exception:
             prompt_radiolist_dialog = None
         else:

@@ -1,0 +1,100 @@
+You are a product manager and QA lead. Produce a PRD as a single JSON object
+meant to be saved as `scripts/ralph/prd.json`.
+
+Output requirements:
+- Output ONLY valid JSON (no Markdown, no code fences, no comments).
+- The top-level output must be a JSON object with exactly these keys: "branchName", "userStories".
+- Do not add any other top-level keys.
+- "userStories" must be an array of story objects.
+- Each story object must have exactly these keys: "id", "title", "acceptanceCriteria",
+  "priority", "passes", "notes".
+- Set "passes" to false for every story.
+- Set "notes" to "" for every story.
+
+Schema (example shape only, do not copy the text):
+{
+  "branchName": "ralph/feature-name",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Short description of the story",
+      "acceptanceCriteria": [
+        "First testable requirement",
+        "Second testable requirement",
+        "Typecheck passes: <typecheck command>",
+        "Tests pass: <test command>"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}
+
+Content rules:
+- Stories must be small and atomic: each story should be implementable and verifiable in a single
+  Ralph iteration.
+- "priority": lower number = higher priority. Priorities must be unique and start at 1.
+- "acceptanceCriteria": explicit, testable, ordered checks. Include verification commands with
+  expected outcomes.
+- Always include typecheck and test criteria using the commands specified in the context below.
+- Do not invent UI elements, endpoints, or files that are not described in the context.
+- Cover core flows first, then important edge cases implied by the context.
+- If the context mentions existing patterns or conventions, criteria should verify the new code
+  follows them.
+
+================================================================================
+CONTEXT - Fill in the sections below, then feed this entire file to an LLM
+================================================================================
+
+## Feature Overview
+<!-- What are you building? Describe the feature in 2-3 sentences. -->
+
+
+
+## Branch Name
+<!-- What should the git branch be called? e.g., ralph/add-user-auth -->
+
+
+
+## Target Users
+<!-- Who will use this feature? What problem does it solve for them? -->
+
+
+
+## Requirements
+<!-- List the specific things this feature must do. Be concrete. -->
+1. 
+2. 
+3. 
+
+## Out of Scope
+<!-- What are you NOT building? Helps the LLM avoid inventing extra features. -->
+- 
+
+## Tech Stack & Conventions
+<!-- What technologies is the project using? What patterns should be followed? -->
+- Language: 
+- Framework: 
+- Testing: 
+- Other: 
+
+## Existing Code Context
+<!-- Describe relevant existing files, APIs, or patterns the new code should integrate with. -->
+
+
+
+## Verification Commands
+<!-- How should the agent verify the code works? Provide exact commands. -->
+- Typecheck: 
+- Tests: 
+- Lint: 
+- Other: 
+
+## Constraints
+<!-- Any limitations, performance requirements, or non-functional requirements? -->
+
+
+
+## Additional Notes
+<!-- Anything else the LLM should know? Edge cases, error handling, etc. -->

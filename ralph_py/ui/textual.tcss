@@ -1,0 +1,691 @@
+Screen {
+    background: $background;
+    color: $foreground;
+}
+
+.hidden {
+    display: none;
+}
+
+#header {
+    height: 3;
+    background: $panel;
+    border-bottom: solid $surface;
+    padding: 0 2;
+}
+
+#header Label {
+    margin-right: 1;
+}
+
+#header-title {
+    text-style: bold;
+    width: 1fr;
+}
+
+.header-badge {
+    background: $surface;
+    color: $foreground;
+    padding: 0 1;
+    border: solid $surface;
+    text-style: bold;
+    width: auto;
+}
+
+#header-mode {
+    color: $accent;
+}
+
+#header-agent {
+    color: $secondary;
+}
+
+#header-iteration {
+    color: $primary;
+}
+
+#header-status {
+    color: $secondary;
+    width: auto;
+    background: $surface;
+    padding: 0 1;
+    border: solid $surface;
+    text-style: bold;
+}
+
+#header-status.status-ok {
+    color: $success;
+}
+
+#header-status.status-warn {
+    color: $warning;
+}
+
+#header-status.status-err {
+    color: $error;
+}
+
+#header-progress {
+    width: auto;
+}
+
+#header-spinner {
+    width: auto;
+}
+
+#main-body {
+    height: 1fr;
+}
+
+#timeline {
+    width: 2fr;
+    padding: 1 2;
+    background: $background;
+    border-right: solid $surface;
+}
+
+#timeline > * {
+    margin-bottom: 1;
+}
+
+#inspector {
+    width: 1fr;
+    background: $panel 20%;
+    border-left: solid $surface;
+    padding: 1 1 0 1;
+}
+
+#summary-rail {
+    background: $panel 25%;
+    border: solid $surface;
+    padding: 1;
+    height: 1fr;
+}
+
+#summary-rail > ListItem {
+    margin-bottom: 1;
+}
+
+#summary-rail > ListItem.-highlight {
+    background: $panel 50%;
+}
+
+#summary-detail {
+    padding: 1;
+    background: $panel 15%;
+    height: 2fr;
+}
+
+.inspector-title {
+    color: $accent;
+    padding: 0 1;
+    text-style: bold;
+    margin-top: 1;
+    border-left: solid $accent;
+    background: $panel 40%;
+}
+
+.inspector-rule {
+    color: $surface;
+    margin: 0 1 1 1;
+}
+
+.empty-state {
+    background: $panel 35%;
+    border: dashed $surface;
+    padding: 2 2;
+    height: auto;
+    align: center middle;
+}
+
+.empty-title {
+    color: $accent;
+    text-style: bold;
+    margin-bottom: 1;
+}
+
+.empty-body {
+    color: $secondary;
+}
+
+.empty-spinner {
+    color: $accent;
+    margin: 1 0;
+}
+
+ListView {
+    background: transparent;
+}
+
+LoadingIndicator {
+    color: $accent;
+}
+
+SummaryCard {
+    background: $panel 45%;
+    border: solid $surface;
+    border-left: solid $panel;
+    padding: 1 2;
+    height: auto;
+    min-height: 6;
+}
+
+SummaryCard.-highlight {
+    border-left: solid $primary;
+}
+
+SummaryCard.summary-active {
+    border-left: solid $accent;
+}
+
+SummaryCard.summary-pending {
+    border-left: solid $panel;
+}
+
+SummaryCard.summary-complete {
+    border-left: solid $success;
+}
+
+SummaryCard.summary-session {
+    border-left: solid $primary;
+}
+
+.summary-placeholder {
+    color: $accent;
+    text-style: italic;
+}
+
+.summary-empty {
+    padding: 1 1;
+    background: $panel 40%;
+    border: dashed $surface;
+    min-height: 4;
+}
+
+.summary-placeholder-spinner {
+    width: 2;
+    color: $accent;
+    margin-right: 1;
+}
+
+.detail-title {
+    text-style: bold;
+    color: $foreground;
+    margin-bottom: 1;
+}
+
+.detail-section-title {
+    text-style: bold;
+    color: $accent;
+    margin: 1 0;
+}
+
+.detail-markdown {
+    background: $panel 25%;
+    border: solid $surface;
+    padding: 1 1;
+}
+
+.detail-tabs {
+    margin-top: 1;
+}
+
+.detail-plan,
+.detail-actions,
+.detail-report,
+.detail-final {
+    background: $panel 20%;
+    border: solid $surface;
+    padding: 1 1;
+}
+
+.summary-title {
+    text-style: bold;
+    color: $foreground;
+}
+
+.summary-status {
+    color: $secondary;
+    text-style: italic;
+}
+
+.summary-spinner {
+    width: 2;
+    color: $accent;
+}
+
+.summary-card-body > ProgressBar {
+    margin-top: 1;
+}
+
+.event-card {
+    background: transparent;
+    padding: 0 1;
+    height: auto;
+}
+
+.event-card.section {
+    text-style: bold;
+    color: $primary;
+    padding: 1 1;
+    margin-top: 1;
+    border-left: solid $primary;
+}
+
+.event-card.subsection {
+    text-style: bold;
+    color: $secondary;
+    margin-top: 1;
+}
+
+.section-header {
+    padding: 1 1 0 1;
+    border-left: solid $primary;
+    background: $panel 30%;
+}
+
+.section-title {
+    text-style: bold;
+    color: $primary;
+}
+
+.section-rule {
+    color: $surface;
+    margin-top: 1;
+}
+
+.subsection-header {
+    padding: 0 1;
+    margin-top: 1;
+}
+
+.subsection-title {
+    text-style: bold;
+    color: $secondary;
+}
+
+.event-card.info {
+    color: $secondary;
+}
+
+.event-card.ok {
+    color: $success;
+}
+
+.event-card.warn {
+    color: $warning;
+}
+
+.event-card.err {
+    color: $error;
+}
+
+.kv-table {
+    background: $panel 35%;
+    border: solid $surface;
+    padding: 1 1;
+    height: auto;
+}
+
+.kv-table-title {
+    color: $accent;
+    text-style: bold;
+    margin-bottom: 1;
+}
+
+DataTable {
+    background: $panel 40%;
+    border: solid $surface;
+    color: $foreground;
+    height: auto;
+}
+
+DataTable > .datatable--header {
+    background: $surface;
+    color: $foreground;
+    text-style: bold;
+}
+
+DataTable > .datatable--odd-row {
+    background: $panel 50%;
+}
+
+DataTable > .datatable--even-row {
+    background: $panel 35%;
+}
+
+.panel-card {
+    background: $panel 40%;
+    border: solid $surface;
+    border-left: solid $accent;
+    padding: 1 2;
+    height: auto;
+    margin-top: 1;
+}
+
+.panel-title {
+    text-style: bold;
+    color: $foreground;
+    margin-bottom: 1;
+}
+
+.panel-body {
+    color: $foreground;
+}
+
+.stream-block {
+    background: $panel 40%;
+    border: solid $surface;
+    border-left: solid $panel;
+    padding: 1 2;
+    height: auto;
+    margin-top: 1;
+}
+
+.stream-block-header {
+    layout: horizontal;
+    align: left middle;
+    margin-bottom: 1;
+}
+
+.stream-body {
+    height: auto;
+    padding: 0 0 0 1;
+}
+
+.stream-body-placeholder {
+    color: $secondary;
+    text-style: italic;
+    padding: 0 1;
+}
+
+.stream-block-title {
+    text-style: bold;
+    color: $foreground;
+}
+
+.stream-badge {
+    background: $surface;
+    color: $foreground;
+    text-style: bold;
+    padding: 0 1;
+    margin-right: 1;
+}
+
+.badge-ai {
+    background: $primary;
+    color: $background;
+}
+
+.badge-sys {
+    background: $secondary;
+    color: $background;
+}
+
+.badge-tool {
+    background: $warning;
+    color: $background;
+}
+
+.badge-user {
+    background: $success;
+    color: $background;
+}
+
+.badge-default {
+    background: $surface;
+    color: $foreground;
+}
+
+.stream-row {
+    layout: horizontal;
+    height: auto;
+}
+
+.line-think .stream-content {
+    color: $secondary;
+    text-style: italic;
+}
+
+.line-tool .stream-content {
+    color: $warning;
+}
+
+.line-git .stream-content {
+    color: $secondary;
+}
+
+.line-sys .stream-content {
+    color: $secondary;
+}
+
+.line-user .stream-content {
+    color: $success;
+}
+
+.line-prompt .stream-content {
+    color: $secondary;
+}
+
+.diff-add .stream-content {
+    color: $success;
+}
+
+.diff-del .stream-content {
+    color: $error;
+}
+
+.diff-hunk .stream-content {
+    color: $accent;
+    text-style: bold;
+}
+
+.diff-meta .stream-content {
+    color: $secondary;
+}
+
+.diff-file .stream-content {
+    color: $primary;
+    text-style: bold;
+}
+
+.stream-tag {
+    content-align-horizontal: right;
+    padding: 0 1 0 0;
+    text-style: bold;
+    color: $secondary;
+    background: $panel 60%;
+}
+
+.stream-ai {
+    border-left: solid $primary;
+}
+
+.stream-tool {
+    border-left: solid $warning;
+}
+
+.stream-sys {
+    border-left: solid $secondary;
+}
+
+.stream-user {
+    border-left: solid $success;
+}
+
+MarkdownH1 {
+    margin: 1 0;
+    padding: 0 1;
+    text-style: bold;
+    background: $panel;
+    border-left: solid $accent;
+}
+
+MarkdownH2 {
+    margin: 1 0 0 0;
+    padding: 0 1;
+    text-style: bold;
+    color: $accent;
+    background: $panel;
+    border-left: solid $accent;
+}
+
+MarkdownH3 {
+    margin: 1 0 0 0;
+    text-style: bold;
+    color: $secondary;
+}
+
+MarkdownBullet {
+    color: $accent;
+}
+
+MarkdownBlock > .code_inline {
+    background: $panel;
+    color: $accent;
+}
+
+MarkdownBlock > .strong {
+    text-style: bold;
+    color: $foreground;
+}
+
+ProgressBar {
+    height: 1;
+}
+
+Bar > .bar--bar {
+    color: $primary;
+    background: $panel;
+}
+
+Bar > .bar--complete {
+    color: $success;
+    background: $panel;
+}
+
+Bar > .bar--indeterminate {
+    color: $accent;
+    background: $panel;
+}
+
+.stream-content {
+    width: 1fr;
+    color: $foreground;
+    padding-left: 1;
+}
+
+.tag-ai {
+    color: $primary;
+}
+
+.tag-user {
+    color: $success;
+}
+
+.tag-prompt {
+    color: $secondary;
+}
+
+.tag-think {
+    color: $accent;
+}
+
+.tag-sys {
+    color: $secondary;
+}
+
+.tag-tool {
+    color: $warning;
+}
+
+.tag-git {
+    color: $secondary;
+}
+
+.tag-guard {
+    color: $error;
+}
+
+.tag-plan {
+    color: $success;
+}
+
+.tag-report {
+    color: $foreground;
+}
+
+.tag-actions {
+    color: $warning;
+}
+
+#footer {
+    height: 1;
+    background: $panel;
+    border-top: solid $surface;
+    color: $secondary;
+}
+
+TabbedContent {
+    background: $panel 25%;
+    border: solid $surface;
+}
+
+Tabs {
+    background: $surface;
+}
+
+Tab {
+    color: $secondary;
+    padding: 0 1;
+}
+
+Tab.-active {
+    color: $foreground;
+    text-style: bold;
+    border-bottom: solid $accent;
+}
+
+TabPane {
+    padding: 1;
+}
+
+Markdown {
+    background: transparent;
+    padding: 0 1;
+}
+
+ScrollBar {
+    background: $background;
+    color: $surface;
+}
+
+ScrollBar > .scrollbar--thumb {
+    background: $secondary;
+}
+
+ModalScreen {
+    align: center middle;
+    background: $background 80%;
+}
+
+.prompt-dialog {
+    background: $panel;
+    border: solid $surface;
+    padding: 1 2;
+    width: 60;
+}
+
+.prompt-header {
+    text-style: bold;
+    margin-bottom: 1;
+}
+
+.prompt-buttons {
+    layout: vertical;
+    margin-top: 1;
+}
+
+.prompt-buttons Button {
+    width: 1fr;
+}

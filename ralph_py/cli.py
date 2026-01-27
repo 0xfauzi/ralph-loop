@@ -15,6 +15,7 @@ from ralph_py.config import RalphConfig, _parse_paths
 from ralph_py.init_cmd import run_init
 from ralph_py.loop import run_loop
 from ralph_py.ui import get_ui
+from ralph_py.ui.base import UI
 
 
 def _use_cli_value(ctx: click.Context, name: str) -> bool:
@@ -51,7 +52,7 @@ def _normalize_ui_mode(value: str) -> str:
         return "rich"
     if normalized in {"plain", "off", "no", "0"}:
         return "plain"
-    if normalized not in {"auto", "rich", "plain"}:
+    if normalized not in {"auto", "rich", "plain", "textual"}:
         return "auto"
     return normalized
 
@@ -113,7 +114,7 @@ def cli() -> None:
 )
 @click.option(
     "--ui",
-    type=click.Choice(["auto", "rich", "plain", "gum"]),
+    type=click.Choice(["auto", "rich", "plain", "gum", "textual"]),
     default="auto",
     help="UI mode",
 )
@@ -253,6 +254,26 @@ def run(
 
     config.ui_mode = _normalize_ui_mode(config.ui_mode)
 
+    if config.ui_mode == "textual":
+        from ralph_py.ui.textual_ui import run_textual_app
+
+        def runner(ui: UI) -> int:
+            if config.max_iterations < 0:
+                ui.err(
+                    f"MAX_ITERATIONS must be non-negative (got: {config.max_iterations})"
+                )
+                return 2
+            if not config.agent_cmd and not CodexAgent.is_available():
+                ui.err("codex not found in PATH")
+                ui.info("Install codex or use --agent-cmd to specify a custom agent")
+                return 1
+            agent = get_agent(config.agent_cmd, config.model, config.model_reasoning_effort)
+            result = run_loop(config, ui, agent, root_dir)
+            return result.exit_code
+
+        exit_code = run_textual_app(runner, mode_label="run")
+        sys.exit(exit_code)
+
     # Check codex availability if not using custom agent
     force_rich = os.environ.get("GUM_FORCE") == "1"
     ui_impl = get_ui(
@@ -285,7 +306,7 @@ def run(
 @click.argument("directory", type=click.Path(path_type=Path), default=".")
 @click.option(
     "--ui",
-    type=click.Choice(["auto", "rich", "plain", "gum"]),
+    type=click.Choice(["auto", "rich", "plain", "gum", "textual"]),
     default="auto",
     help="UI mode",
 )
@@ -299,8 +320,18 @@ def init(directory: Path, ui: str, no_color: bool) -> None:
 
     DIRECTORY is the target project directory (default: current directory).
     """
+    mode = _normalize_ui_mode(ui)
+    if mode == "textual":
+        from ralph_py.ui.textual_ui import run_textual_app
+
+        def runner(ui_impl: UI) -> int:
+            return run_init(directory, ui_impl)
+
+        exit_code = run_textual_app(runner, mode_label="init")
+        sys.exit(exit_code)
+
     force_rich = os.environ.get("GUM_FORCE") == "1"
-    ui_impl = get_ui(_normalize_ui_mode(ui), no_color, force_rich=force_rich)
+    ui_impl = get_ui(mode, no_color, force_rich=force_rich)
     exit_code = run_init(directory, ui_impl)
     sys.exit(exit_code)
 
@@ -340,11 +371,17 @@ def mcp(
     log_dir: Path,
 ) -> None:
     """Run the MCP server."""
-    click.echo(
-        "MCP server is not implemented yet. See docs/mcp_server_design.md.",
-        err=True,
-    )
-    sys.exit(2)
+    from ralph_py import mcp_server
+
+    args = ["--transport", transport, "--log-dir", str(log_dir)]
+    if root is not None:
+        args.extend(["--root", str(root)])
+    if host is not None:
+        args.extend(["--host", host])
+    if port is not None:
+        args.extend(["--port", str(port)])
+
+    mcp_server.main(args)
 
 
 @cli.command()
@@ -397,7 +434,7 @@ def mcp(
 )
 @click.option(
     "--ui",
-    type=click.Choice(["auto", "rich", "plain", "gum"]),
+    type=click.Choice(["auto", "rich", "plain", "gum", "textual"]),
     default="auto",
     help="UI mode",
 )
@@ -557,6 +594,26 @@ def understand(
         config.ralph_branch_explicit = False
 
     config.ui_mode = _normalize_ui_mode(config.ui_mode)
+
+    if config.ui_mode == "textual":
+        from ralph_py.ui.textual_ui import run_textual_app
+
+        def runner(ui: UI) -> int:
+            if config.max_iterations < 0:
+                ui.err(
+                    f"MAX_ITERATIONS must be non-negative (got: {config.max_iterations})"
+                )
+                return 2
+            if not config.agent_cmd and not CodexAgent.is_available():
+                ui.err("codex not found in PATH")
+                ui.info("Install codex or use --agent-cmd to specify a custom agent")
+                return 1
+            agent = get_agent(config.agent_cmd, config.model, config.model_reasoning_effort)
+            result = run_loop(config, ui, agent, root_dir)
+            return result.exit_code
+
+        exit_code = run_textual_app(runner, mode_label="understand")
+        sys.exit(exit_code)
 
     # Check codex availability
     force_rich = os.environ.get("GUM_FORCE") == "1"

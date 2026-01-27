@@ -3,8 +3,9 @@
 from ralph_py.ui.base import UI
 from ralph_py.ui.plain import PlainUI
 from ralph_py.ui.rich_ui import RichUI
+from ralph_py.ui.textual_ui import TextualUI
 
-__all__ = ["UI", "RichUI", "PlainUI", "get_ui"]
+__all__ = ["UI", "RichUI", "PlainUI", "TextualUI", "get_ui"]
 
 
 def get_ui(
@@ -22,6 +23,8 @@ def get_ui(
 
     if normalized in {"plain", "off", "no", "0"}:
         return PlainUI(no_color=no_color, ascii_only=ascii_only)
+    if normalized == "textual":
+        raise RuntimeError("textual UI must be started via the CLI runner")
 
     # auto or rich mode
     try:

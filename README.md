@@ -78,6 +78,48 @@ ralph understand [MAX_ITERATIONS]
 
 Note: You can replace `python -m ralph_py` with `ralph` in the examples below after installing the CLI.
 
+### MCP Server
+
+Run the MCP server using the CLI:
+
+```bash
+# Stdio mode for IDEs that spawn the process
+ralph mcp --transport stdio --root /absolute/path/to/your-project
+
+# HTTP mode for remote or manual testing
+ralph mcp --transport http --root /absolute/path/to/your-project --host 127.0.0.1 --port 8765
+```
+
+Dev workflow option:
+
+```bash
+python -m ralph_py.mcp_server --transport stdio --root /absolute/path/to/your-project
+```
+
+Notes:
+- `root` must be an absolute path that exists and is a directory.
+- Logs are written under `<root>/.ralph/logs` by default. Override with `--log-dir`.
+- Stdio mode keeps stdout reserved for MCP protocol traffic.
+
+JetBrains `mcp.json` example:
+
+```json
+{
+  "servers": {
+    "ralph": {
+      "command": "ralph",
+      "args": [
+        "mcp",
+        "--transport",
+        "stdio",
+        "--root",
+        "/absolute/path/to/your-project"
+      ]
+    }
+  }
+}
+```
+
 ### Python CLI Options
 
 ```bash

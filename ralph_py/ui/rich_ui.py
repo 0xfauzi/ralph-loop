@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import re
 import sys
 import time
 from collections.abc import Callable, Iterator
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from rich import box
@@ -13,6 +15,7 @@ from rich.console import Console
 from rich.live import Live
 from rich.panel import Panel
 from rich.prompt import Confirm, Prompt
+from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
 
@@ -55,6 +58,21 @@ LINE_STYLES = {
     "PROMPT": "dim",
 }
 
+RL_START_RE = re.compile(r"^<RL\b([^>]*)>$", re.IGNORECASE)
+RL_END_RE = re.compile(r"^</RL>\s*$", re.IGNORECASE)
+RL_ATTR_RE = re.compile(r'(\w+)="([^"]*)"')
+STREAMABLE_RL_TYPES = {"log", "think", "analysis"}
+
+
+@dataclass
+class RLBlock:
+    block_type: str
+    section: str | None = None
+    title: str | None = None
+    level: str | None = None
+    source_tag: str | None = None
+    lines: list[str] = field(default_factory=list)
+
 
 class RichUI:
     """Rich-based terminal UI."""
@@ -82,6 +100,7 @@ class RichUI:
         self._tag_width = max(len(tag) for tag in CHANNEL_COLORS)
         self._block_active = False
         self._stream_live: Live | None = None
+        self._rl_block: RLBlock | None = None
 
     def _format_tag(self, tag: str) -> str:
         """Pad tag to a stable width for alignment."""
@@ -152,6 +171,99 @@ class RichUI:
         line.append(self._hr_char * (width - 2), style="dim")
         line.append(self._block_br, style="dim")
         return line
+
+    def _print_stream_line(self, tag: str, line: str) -> None:
+        sep = "|" if self.ascii_only else "\u2502"
+        tag_label = self._format_tag(tag)
+        prefix = Text()
+        if self._block_active:
+            prefix.append(f"{self._block_left} ", style="dim")
+        prefix.append(f"{tag_label} ", style=self._badge_style(tag))
+        prefix.append(f"{sep} ", style="dim")
+        self.console.print(prefix, end="")
+        line_style = LINE_STYLES.get(tag)
+        if line_style:
+            self.console.print(Text(line, style=line_style))
+        else:
+            self.console.print(line, markup=False)
+
+    def _parse_rl_attrs(self, raw: str) -> dict[str, str]:
+        attrs: dict[str, str] = {}
+        for match in RL_ATTR_RE.finditer(raw):
+            attrs[match.group(1).lower()] = match.group(2)
+        return attrs
+
+    def _render_rl_block(self, block: RLBlock) -> None:
+        content = "\n".join(block.lines).rstrip()
+        block_type = block.block_type.lower()
+        if block_type == "summary":
+            section = (block.section or "summary").upper()
+            self.panel(section, block.title or "", content)
+            return
+        if block_type in {"think", "analysis"}:
+            for line in content.splitlines():
+                self._print_stream_line("THINK", line)
+            return
+        if block_type == "diff":
+            title = block.title or "Diff"
+            syntax = Syntax(content, "diff", word_wrap=True)
+            self.console.print(
+                Panel(
+                    syntax,
+                    title=Text(title, style="bold bright_blue"),
+                    border_style="bright_blue",
+                    box=box.SQUARE,
+                    padding=(0, 1),
+                )
+            )
+            return
+        if block_type == "status":
+            level = (block.level or "info").lower()
+            if level in {"ok", "success"}:
+                self.ok(content)
+            elif level in {"warn", "warning"}:
+                self.warn(content)
+            elif level in {"err", "error"}:
+                self.err(content)
+            else:
+                self.info(content)
+            return
+        if block_type == "table":
+            title = block.title or "Table"
+            table = Table(box=box.MINIMAL, show_header=False, expand=False)
+            table.add_column("Key", style="bold")
+            table.add_column("Value")
+            for line in content.splitlines():
+                if not line.strip():
+                    continue
+                if ":" in line:
+                    key, value = line.split(":", 1)
+                else:
+                    key, value = line, ""
+                table.add_row(key.strip(), value.strip())
+            self.console.print(
+                Panel(
+                    table,
+                    title=Text(title, style="bold"),
+                    border_style="dim",
+                    box=box.SQUARE,
+                    padding=(0, 1),
+                )
+            )
+            return
+        if block_type == "log":
+            self.console.print(content)
+            return
+        title = block.title or block.block_type.upper()
+        self.console.print(
+            Panel(
+                Text(content),
+                title=Text(title, style="bold"),
+                border_style="dim",
+                box=box.SQUARE,
+                padding=(0, 1),
+            )
+        )
 
     def title(self, text: str) -> None:
         """Display a large title."""
@@ -281,6 +393,10 @@ class RichUI:
         """Display channel footer."""
         _ = channel
         _ = title
+        if self._rl_block is not None:
+            if self._rl_block.block_type.lower() not in STREAMABLE_RL_TYPES:
+                self._render_rl_block(self._rl_block)
+            self._rl_block = None
         self.console.print(self._block_footer_line())
         self._block_active = False
         if self._stream_live is not None:
@@ -288,19 +404,39 @@ class RichUI:
 
     def stream_line(self, tag: str, line: str) -> None:
         """Display a single prefixed line."""
-        sep = "|" if self.ascii_only else "\u2502"
-        tag_label = self._format_tag(tag)
-        prefix = Text()
-        if self._block_active:
-            prefix.append(f"{self._block_left} ", style="dim")
-        prefix.append(f"{tag_label} ", style=self._badge_style(tag))
-        prefix.append(f"{sep} ", style="dim")
-        self.console.print(prefix, end="")
-        line_style = LINE_STYLES.get(tag)
-        if line_style:
-            self.console.print(Text(line, style=line_style))
+        if self._rl_block is None and "<RL" not in line and "</RL>" not in line:
+            self._print_stream_line(tag, line)
+            return
+        stripped = line.strip()
+        if self._rl_block is None:
+            if RL_END_RE.match(stripped):
+                return
+            start_match = RL_START_RE.match(stripped)
+            if start_match:
+                attrs = self._parse_rl_attrs(start_match.group(1))
+                self._rl_block = RLBlock(
+                    block_type=attrs.get("type", "log"),
+                    section=attrs.get("section"),
+                    title=attrs.get("title"),
+                    level=attrs.get("level"),
+                    source_tag=tag,
+                )
+                return
         else:
-            self.console.print(line, markup=False)
+            if RL_END_RE.match(stripped):
+                if self._rl_block.block_type.lower() not in STREAMABLE_RL_TYPES:
+                    self._render_rl_block(self._rl_block)
+                self._rl_block = None
+                return
+            if self._rl_block.block_type.lower() in STREAMABLE_RL_TYPES:
+                stream_tag = self._rl_block.source_tag or tag
+                if self._rl_block.block_type.lower() in {"think", "analysis"}:
+                    stream_tag = "THINK"
+                self._print_stream_line(stream_tag, line)
+            else:
+                self._rl_block.lines.append(line)
+            return
+        self._print_stream_line(tag, line)
 
     def stream_lines(self, tag: str, stream: TextIO) -> Iterator[str]:
         """Stream lines with prefix, yielding raw lines."""
@@ -316,7 +452,9 @@ class RichUI:
 
         prompt_radiolist_dialog: Callable[..., Any] | None
         try:
-            from prompt_toolkit.shortcuts import radiolist_dialog as _radiolist_dialog
+            from prompt_toolkit.shortcuts import (  # type: ignore[import-not-found]
+                radiolist_dialog as _radiolist_dialog,
+            )
         except Exception:
             prompt_radiolist_dialog = None
         else:
