@@ -31,7 +31,18 @@ your-project/
 │       ├── progress.txt          # Optional running log (created by ralph init if missing)
 │       ├── prd_prompt.txt        # Optional template for generating prd.json
 │       ├── understand_prompt.md  # Understanding-mode prompt (created by ralph init if missing)
+│       ├── feature_understand_prompt.md # Feature-understand prompt (created by ralph init if missing)
 │       └── codebase_map.md       # Understanding-mode output (created by ralph init if missing)
+│       └── feature/
+│           └── <feature_name>/
+│               ├── prd.json       # Feature scoped PRD
+│               ├── understand.md  # Feature understanding notes
+│               └── repairs/
+│                   ├── repair_<timestamp>.json
+│                   └── latest.json
+├── .ralph/
+│   └── logs/
+│       └── feature_<feature_name>/  # Feature run logs
 └── ...
 ```
 
@@ -74,6 +85,9 @@ ralph init [DIRECTORY]
 
 # Codebase understanding mode (read-only)
 ralph understand [MAX_ITERATIONS]
+
+# Feature understanding + implementation
+ralph feature --understand-iterations 5 --prd scripts/ralph/feature/<feature_name>/prd.json
 ```
 
 Note: You can replace `python -m ralph_py` with `ralph` in the examples below after installing the CLI.
@@ -273,6 +287,52 @@ ALLOWED_PATHS="scripts/ralph/" python -m ralph_py understand 10
 ALLOWED_PATHS="" python -m ralph_py understand 10
 ```
 
+### Feature Understanding + Implementation
+
+Use this when you want a **feature scoped map** tied to a specific PRD, then run implementation.
+It writes findings to:
+- `scripts/ralph/feature/<feature_name>/understand.md`
+Requires:
+- `scripts/ralph/codebase_map.md` (run `ralph init` or `ralph understand` if missing)
+
+Run feature understanding mode:
+
+```bash
+python -m ralph_py feature \
+  --understand-iterations 5 \
+  --prd scripts/ralph/feature/<feature_name>/prd.json
+```
+
+Example with auto-run and repairs tuned:
+
+```bash
+python -m ralph_py feature \
+  --understand-iterations 3 \
+  --prd scripts/ralph/feature/<feature_name>/prd.json \
+  --implementation-auto-run \
+  --repair-max-runs 3 \
+  --repair-iterations 4
+```
+
+Under the hood, this uses:
+- `PROMPT_FILE=scripts/ralph/feature_understand_prompt.md`
+- `ALLOWED_PATHS=scripts/ralph/feature/<feature_name>/understand.md` (git repos only; blocks other file edits)
+- Branch selection follows the PRD branch by default
+
+Behavior:
+- Runs the understanding loop for `--understand-iterations`
+- Prompts you to review `understand.md` before implementation (unless `--implementation-auto-run`)
+- Implementation iterations are auto-set to the number of user stories in the PRD
+- Feature name resolution:
+  - If the PRD is at `scripts/ralph/feature/<feature_name>/prd.json`, uses that folder name
+  - Otherwise uses the PRD filename stem
+- Use `--implementation-auto-run` to skip the review gate
+- Auto-repair runs will trigger on failures (default max 5, 5 iterations each)
+- Use `--repair-max-runs` and `--repair-iterations` to tune repair behavior
+- Use `--repair-agent-cmd` to run repairs with a different agent
+- Repair runs skip branch checkout and write repair PRDs to `scripts/ralph/feature/<feature_name>/repairs/`
+- Logs are stored under `.ralph/logs/feature_<feature_name>/`
+
 ## Example projects
 
 This repo includes a self-contained example project you can use to try Ralph end-to-end:
@@ -402,12 +462,6 @@ INTERACTIVE=1 AGENT_CMD="claude --print" SLEEP_SECONDS=5 python -m ralph_py run 
 | `GUM_FORCE` | *(empty)* | If set to `1`, force rich UI even when not a TTY (not recommended for CI logs) |
 | `NO_COLOR` | *(empty)* | Disable ANSI colors |
 | `RALPH_ASCII` | *(empty)* | If set to `1`, use ASCII separators instead of box-drawing chars |
-| `RALPH_AI_SHOW_FINAL` | `1` | Show the final assistant message (set to `0` to hide) |
-| `RALPH_AI_SHOW_PROMPT` | *(empty)* | Show the prompt echoed by Codex in logs (by default it is collapsed/hidden) |
-| `RALPH_AI_RAW` | *(empty)* | Stream raw Codex output (disables the Codex transcript pretty-printer) |
-| `RALPH_AI_PROMPT_PROGRESS_EVERY` | `50` | When the Codex echoed prompt is hidden, print a progress line every N suppressed lines (set to `0` to disable) |
-| `RALPH_AI_TOOL_MODE` | `summary` | Tool output display: `summary` (panel only), `full` (stream tool output), `none` (hide tool output) |
-| `RALPH_AI_SYS_MODE` | `summary` | System output display: `summary` (panel only), `full` (stream system lines) |
 
 ### Examples
 
@@ -469,7 +523,8 @@ The agent signals completion by outputting:
 <promise>COMPLETE</promise>
 ```
 
-When Ralph detects this in the agent's output, it exits successfully (code 0).
+Ralph treats a line that exactly matches this marker as completion and exits successfully
+(code 0).
 
 ## Exit Codes
 
@@ -488,7 +543,13 @@ When Ralph detects this in the agent's output, it exits successfully (code 0).
 | `progress.txt` | No | Running log of patterns and progress (created by `python -m ralph_py init` if missing) |
 | `prd_prompt.txt` | No | Fillable template for generating PRDs with an LLM |
 | `understand_prompt.md` | Yes (understanding mode) | Read-only prompt for codebase understanding (created by `python -m ralph_py init` if missing) |
+| `feature_understand_prompt.md` | Yes (feature understanding mode) | Read-only prompt for feature understanding (created by `python -m ralph_py init` if missing) |
 | `codebase_map.md` | No | Output file for the codebase map (created by `python -m ralph_py init` if missing) |
+| `feature/<feature_name>/prd.json` | Yes (feature understanding mode) | Feature scoped PRD used by `ralph feature` |
+| `feature/<feature_name>/understand.md` | No | Output file for feature understanding notes (created by `ralph feature` if missing) |
+| `feature/<feature_name>/repairs/repair_<timestamp>.json` | No | Auto-generated repair PRDs |
+| `feature/<feature_name>/repairs/latest.json` | No | Latest repair PRD (overwritten each repair run) |
+| `.ralph/logs/feature_<feature_name>/` | No | Feature run logs (understand, run, repairs) |
 
 ## Tips
 

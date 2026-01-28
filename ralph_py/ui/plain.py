@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import sys
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -54,14 +54,10 @@ class PlainUI:
         self._file = file or sys.stderr
         self._hr_char = "-" if ascii_only else "\u2500"
         self._sep_char = "|" if ascii_only else "\u2502"
-        self._block_left = "|" if ascii_only else "\u2502"
         self._block_tl = "+" if ascii_only else "\u250c"
         self._block_tr = "+" if ascii_only else "\u2510"
-        self._block_bl = "+" if ascii_only else "\u2514"
-        self._block_br = "+" if ascii_only else "\u2518"
         self._tag_width = max(len(tag) for tag in CHANNEL_COLORS)
         self._width = 80
-        self._block_active = False
 
         # Try to get terminal width
         try:
@@ -96,11 +92,6 @@ class PlainUI:
             return label_text
         return f"{self._block_tl}{label_text}{self._hr_char * fill_len}{self._block_tr}"
 
-    def _block_footer_line(self) -> str:
-        """Build a block footer line."""
-        width = max(self._width, 2)
-        return f"{self._block_bl}{self._hr_char * (width - 2)}{self._block_br}"
-
     def title(self, text: str) -> None:
         """Display a large title."""
         self.hr()
@@ -131,19 +122,6 @@ class PlainUI:
         padded_key = f"  {key}:".ljust(16)
         self._print(f"{padded_key}{value}")
 
-    def box(self, content: str) -> None:
-        """Display content in a box (just indented)."""
-        for line in content.splitlines():
-            self._print(f"  {line}")
-
-    def panel(self, tag: str, title: str, content: str) -> None:
-        """Display a titled panel block."""
-        label = f"{tag} \u00b7 {title}" if title else tag
-        self._print(self._block_header_line(label))
-        for line in content.splitlines():
-            self._print(f"{self._block_left} {line}")
-        self._print(self._block_footer_line())
-
     def info(self, text: str) -> None:
         """Display info message (dim)."""
         self._print(self._color(text, "dim"))
@@ -163,34 +141,18 @@ class PlainUI:
     def channel_header(self, channel: str, title: str = "") -> None:
         """Display channel header with optional title."""
         full_title = f"{channel} \u00b7 {title}" if title else channel
-        self._block_active = True
         self._print(self._block_header_line(full_title))
-
-    def channel_footer(self, channel: str, title: str = "") -> None:
-        """Display channel footer."""
-        _ = channel
-        _ = title
-        self._block_active = False
-        self._print(self._block_footer_line())
 
     def stream_line(self, tag: str, line: str) -> None:
         """Display a single prefixed line."""
         color = CHANNEL_COLORS.get(tag, "white")
         tag_label = self._format_tag(tag)
-        block = f"{self._block_left} " if self._block_active else ""
-        prefix = self._color(f"{block}{tag_label} {self._sep_char} ", color)
+        prefix = self._color(f"{tag_label} {self._sep_char} ", color)
         line_style = "dim" if tag in {"SYS", "PROMPT"} else ""
         if line_style:
             self._print(f"{prefix}{self._color(line, line_style)}")
         else:
             self._print(f"{prefix}{line}")
-
-    def stream_lines(self, tag: str, stream: TextIO) -> Iterator[str]:
-        """Stream lines with prefix, yielding raw lines."""
-        for line in stream:
-            line = line.rstrip("\n")
-            self.stream_line(tag, line)
-            yield line
 
     def choose(self, header: str, options: list[str], default: int = 0) -> int:
         """Interactive choice, returns selected index."""
@@ -239,34 +201,6 @@ class PlainUI:
                 self._print(self._color(f"Invalid choice. Enter 1-{len(options)}", "red"))
             except (EOFError, KeyboardInterrupt):
                 return default
-
-    def confirm(self, prompt: str, default: bool = False) -> bool:
-        """Interactive yes/no confirmation."""
-        if not self.can_prompt():
-            return default
-
-        prompt_yes_no_dialog: Callable[..., Any] | None
-        try:
-            from prompt_toolkit.shortcuts import yes_no_dialog as _yes_no_dialog
-        except Exception:
-            prompt_yes_no_dialog = None
-        else:
-            prompt_yes_no_dialog = _yes_no_dialog
-
-        if prompt_yes_no_dialog is not None:
-            result = prompt_yes_no_dialog(title="Ralph", text=prompt).run()
-            if result is None:
-                return default
-            return bool(result)
-
-        suffix = "[Y/n]" if default else "[y/N]"
-        try:
-            response = input(f"{prompt} {suffix}: ").strip().lower()
-            if not response:
-                return default
-            return response in ("y", "yes")
-        except (EOFError, KeyboardInterrupt):
-            return default
 
     def can_prompt(self) -> bool:
         """Check if interactive prompts are available."""

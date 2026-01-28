@@ -2,11 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
-from typing import TYPE_CHECKING, Protocol
-
-if TYPE_CHECKING:
-    from typing import TextIO
+from typing import Protocol
 
 
 class UI(Protocol):
@@ -30,14 +26,6 @@ class UI(Protocol):
 
     def kv(self, key: str, value: str) -> None:
         """Display a key-value pair."""
-        ...
-
-    def box(self, content: str) -> None:
-        """Display content in a box."""
-        ...
-
-    def panel(self, tag: str, title: str, content: str) -> None:
-        """Display a titled panel block."""
         ...
 
     def startup_art(self) -> None:
@@ -64,24 +52,12 @@ class UI(Protocol):
         """Display channel header with optional title."""
         ...
 
-    def channel_footer(self, channel: str, title: str = "") -> None:
-        """Display channel footer."""
-        ...
-
     def stream_line(self, tag: str, line: str) -> None:
         """Display a single prefixed line."""
         ...
 
-    def stream_lines(self, tag: str, stream: TextIO) -> Iterator[str]:
-        """Stream lines with prefix, yielding raw lines."""
-        ...
-
     def choose(self, header: str, options: list[str], default: int = 0) -> int:
         """Interactive choice, returns selected index."""
-        ...
-
-    def confirm(self, prompt: str, default: bool = False) -> bool:
-        """Interactive yes/no confirmation."""
         ...
 
     def can_prompt(self) -> bool:

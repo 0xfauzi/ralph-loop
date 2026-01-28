@@ -51,12 +51,6 @@ def clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "GUM_FORCE",
         "NO_COLOR",
         "RALPH_ASCII",
-        "RALPH_AI_RAW",
-        "RALPH_AI_SHOW_PROMPT",
-        "RALPH_AI_SHOW_FINAL",
-        "RALPH_AI_PROMPT_PROGRESS_EVERY",
-        "RALPH_AI_TOOL_MODE",
-        "RALPH_AI_SYS_MODE",
     ]
     for var in env_vars:
         monkeypatch.delenv(var, raising=False)

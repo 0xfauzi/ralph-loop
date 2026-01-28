@@ -22,16 +22,22 @@ DEFAULT_PROMPT = """# Ralph Agent Instructions
 
 ## Your Task (one iteration)
 
-1. Read `scripts/ralph/prd.json`
+1. Read the PRD file for this run (default: `scripts/ralph/prd.json`)
 2. Read `scripts/ralph/progress.txt` (check `## Codebase Patterns` first)
-3. If `scripts/ralph/codebase_map.md` exists, scan its headers and read only sections
-   relevant to your current story
-   (skip unrelated sections to save context)
-4. Branch is pre-checked out to `branchName` from `scripts/ralph/prd.json`
+3. Derive a short list of keywords from the PRD intent, not just exact wording.
+4. If `scripts/ralph/codebase_map.md` exists, query it for sections relevant to your story
+   using those keywords.
+   - Do not load the entire file.
+   - Always check **Quick Facts** and any relevant **Iteration Notes**.
+5. If a feature understand file exists for this PRD, query it using the same keywords.
+   - Default path: `scripts/ralph/feature/<feature_name>/understand.md`
+   - If the PRD is at `scripts/ralph/feature/<feature_name>/prd.json`, use that folder name.
+   - Otherwise use the PRD filename stem as `<feature_name>`.
+6. Branch is pre-checked out to `branchName` from the PRD
    (verify only; do not switch)
-5. Pick the highest priority story where `passes` is `false` (lowest `priority` wins)
-6. Implement that ONE story (keep the change small and focused)
-7. Run feedback loops (Python + uv):
+7. Pick the highest priority story where `passes` is `false` (lowest `priority` wins)
+8. Implement that ONE story (keep the change small and focused)
+9. Run feedback loops (Python + uv):
    - Find the project's fastest typecheck and tests
    - Use `uv run ...` to run them
    - If the project has no typecheck/tests configured, add them (prefer `ruff` + `mypy`
@@ -39,14 +45,17 @@ DEFAULT_PROMPT = """# Ralph Agent Instructions
      and ensure they run fast and deterministically
    - Do NOT mark the story as done unless typecheck AND tests pass. If they fail, fix and rerun;
      only proceed when both are green.
-8. Update `AGENTS.md` files with reusable learnings
+10. If you discover durable, reusable codebase facts, append a brief, evidence-based note to
+   `scripts/ralph/codebase_map.md` under **Iteration Notes** or update **Quick Facts**
+   (skip if nothing new).
+11. Update `AGENTS.md` files with reusable learnings
    (only if you discovered something worth preserving):
    - Only update `AGENTS.md` in directories you edited
    - Add patterns/gotchas/conventions, not story-specific notes
-9. Commit with message: `feat: [ID] - [Title]`
-10. Update `scripts/ralph/prd.json`: set that story's `passes` to `true`
+12. Commit with message: `feat: [ID] - [Title]`
+13. Update `scripts/ralph/prd.json`: set that story's `passes` to `true`
     (only after tests/typecheck pass)
-11. Append learnings to `scripts/ralph/progress.txt`
+14. Append learnings to `scripts/ralph/progress.txt`
 
 ## Progress Format
 
@@ -133,6 +142,40 @@ Edit this list to match your repo. During the understanding loop, mark items as 
 (New notes append below; keep older notes for history.)
 """
 
+DEFAULT_FEATURE_UNDERSTAND = """# Feature Understand Notes
+
+This file captures feature-specific understanding tied to one PRD.
+
+## How to use this file
+
+- **Evidence-first**: prefer citations to specific files/entrypoints over broad claims.
+- **Feature scope**: keep notes anchored to the PRD for this feature.
+- **Small increments**: one topic per iteration keeps notes high-signal.
+
+## Quick Feature Facts (keep updated)
+
+- **PRD**:
+- **Branch**:
+- **Stories in scope**:
+- **Primary entrypoints**:
+- **Data touched**:
+- **Tests / commands**:
+
+## Story Coverage (checklist)
+
+- [ ] (add story IDs from the PRD)
+
+## Known Risks / Hotspots (optional)
+
+- (add areas likely to break or require extra care)
+
+---
+
+## Iteration Notes
+
+(New notes append below; keep older notes for history.)
+"""
+
 DEFAULT_UNDERSTAND_PROMPT = """# Ralph Codebase Understanding Instructions (Read-Only)
 
 ## Goal (one iteration)
@@ -207,6 +250,75 @@ Append this to the END of `scripts/ralph/codebase_map.md`:
 
 If there are **no remaining unchecked topics** in the Next Topics checklist
 (or you have covered the default list above), reply with exactly:
+
+<promise>COMPLETE</promise>
+
+Otherwise end normally.
+"""
+
+DEFAULT_FEATURE_UNDERSTAND_PROMPT = """# Ralph Feature Understanding Instructions (Read-Only)
+
+## Goal (one iteration)
+
+You are running a **feature understanding** loop for a specific PRD.
+Your job is to build a focused, evidence-based map of the code that this feature touches.
+
+**Hard rule:** do NOT modify application code, tests, configs, dependencies, or CI.
+
+**The only file you may edit is the feature understand file, for example:**
+- `scripts/ralph/feature/<feature_name>/understand.md`
+
+If you think code changes are needed, write that as a note in the feature understand file
+under **Open questions / Follow-ups**. Do not implement changes in this mode.
+
+## What to do
+
+1. Read the feature PRD file you were given.
+2. Derive a short list of keywords from the PRD intent, not just exact wording.
+3. Read `scripts/ralph/codebase_map.md` and query only the sections relevant to this feature.
+   - Always check **Quick Facts** and any relevant **Iteration Notes**.
+   - Do not load the entire file.
+4. Investigate by reading docs, configs, and code. Prefer fast, high-signal entrypoints:
+   - README / docs
+   - build/test scripts
+   - app entrypoints (server/main)
+   - routes/controllers
+   - data layer (models, migrations)
+5. Update **ONLY** the feature understand file:
+   - Update **Quick Feature Facts** if you learned something durable
+   - Append a new **Iteration Notes** section for this topic (template below)
+   - If there is a **Story Coverage** checklist, mark items you verified
+
+## Evidence rules (important)
+
+- Every "fact" should include **evidence**:
+  - File paths
+  - What to look for (function/class name)
+  - Preferably line ranges (if your tooling can provide them)
+- If you are uncertain, label it clearly as a hypothesis and add an **Open question**.
+
+## Iteration Notes format
+
+Append this to the END of the feature understand file:
+
+## [YYYY-MM-DD] - [Topic]
+
+- **Summary**: 1-3 bullets on what you learned
+- **Evidence**:
+  - `path/to/file.ext` - what to look for (and line range if available)
+- **Conventions / invariants**:
+  - "Do X, don't do Y" rules implied by the codebase
+- **Risks / hotspots**:
+  - Areas likely to break or require extra care
+- **Open questions / follow-ups**:
+  - What's unclear, what needs human confirmation
+
+---
+
+## Stop condition
+
+If there are **no remaining unchecked stories** in the **Story Coverage** checklist,
+reply with exactly:
 
 <promise>COMPLETE</promise>
 
@@ -359,6 +471,11 @@ def run_init(directory: Path, ui: UI) -> int:
     _create_if_missing(ralph_dir / "progress.txt", DEFAULT_PROGRESS, ui)
     _create_if_missing(ralph_dir / "codebase_map.md", DEFAULT_CODEBASE_MAP, ui)
     _create_if_missing(ralph_dir / "understand_prompt.md", DEFAULT_UNDERSTAND_PROMPT, ui)
+    _create_if_missing(
+        ralph_dir / "feature_understand_prompt.md",
+        DEFAULT_FEATURE_UNDERSTAND_PROMPT,
+        ui,
+    )
 
     # Validate PRD
     ui.section("Validate PRD")
@@ -400,6 +517,9 @@ def run_init(directory: Path, ui: UI) -> int:
     ui.info("")
     ui.info("For codebase understanding mode:")
     ui.info("  ralph understand [iterations]")
+    ui.info("")
+    ui.info("For feature understanding mode:")
+    ui.info("  ralph feature [iterations] --prd scripts/ralph/feature/<feature_name>/prd.json")
 
     return 0
 

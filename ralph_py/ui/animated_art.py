@@ -2,14 +2,10 @@
 from __future__ import annotations
 
 import math
-import time
 from collections.abc import Iterable
-from typing import TYPE_CHECKING
 
 from rich.text import Text
 
-if TYPE_CHECKING:
-    from rich.console import Console, ConsoleOptions
 LARGE_ACCENT = "o"
 LARGE_ACCENT_SECONDARY = "O"
 LARGE_PRIMARY = "."
@@ -102,50 +98,3 @@ def large_loop_frames() -> list[Text]:
     """Return rendered large loop frames."""
     raw_frames = build_loop_frames()
     return [render_loop_frame(frame) for frame in raw_frames]
-
-
-SMALL_LOOP_FRAMES = [
-    "\u280b",
-    "\u2819",
-    "\u2839",
-    "\u2838",
-    "\u283c",
-    "\u2834",
-    "\u2826",
-    "\u2827",
-    "\u2807",
-    "\u280f",
-]
-
-
-def small_loop_frames() -> list[str]:
-    """Return small loop frames for streaming."""
-    return SMALL_LOOP_FRAMES
-
-
-def render_small_frame(frame: str) -> Text:
-    """Render a small loop frame with subtle styling."""
-    text = Text()
-    text.append("[", style="dim")
-    text.append(frame, style="cyan")
-    text.append("]", style="dim")
-    return text
-
-
-class LoopIndicator:
-    """Renderable that animates a small loop indicator."""
-
-    def __init__(self, frames: list[str], interval: float = 0.08):
-        self._frames = frames
-        self._interval = interval
-        self._start = time.monotonic()
-
-    def __rich_console__(
-        self, console: Console, options: ConsoleOptions
-    ) -> Iterable[Text]:
-        if not self._frames:
-            yield Text("")
-            return
-        elapsed = time.monotonic() - self._start
-        idx = int(elapsed / self._interval) % len(self._frames)
-        yield render_small_frame(self._frames[idx])

@@ -62,27 +62,9 @@ RALPH_ASCII=1 uv run python -m ralph_py run 1
 NO_COLOR=1 uv run python -m ralph_py run 1
 ```
 
-## Agent output knobs (Codex)
-
-By default, Ralph prettifies the Codex transcript and **hides the echoed user prompt**
-(since it's just your `scripts/ralph/prompt.md` content repeated in the logs).
+## Codex knobs
 
 ```bash
 # Lower reasoning effort (faster/cheaper; model-dependent)
 MODEL_REASONING_EFFORT=low uv run python -m ralph_py run 1
-
-# Show the echoed prompt in logs
-RALPH_AI_SHOW_PROMPT=1 uv run python -m ralph_py run 1
-
-# Stream raw Codex output (no transcript prettifier)
-RALPH_AI_RAW=1 uv run python -m ralph_py run 1
-
-# While hiding the echoed prompt, print progress every N suppressed lines
-RALPH_AI_PROMPT_PROGRESS_EVERY=25 uv run python -m ralph_py run 1
-
-# Show full tool output in the stream
-RALPH_AI_TOOL_MODE=full uv run python -m ralph_py run 1
-
-# Hide system lines in the stream (panel only)
-RALPH_AI_SYS_MODE=summary uv run python -m ralph_py run 1
 ```

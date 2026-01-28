@@ -124,9 +124,43 @@ class TestRunLoop:
             ralph_branch_explicit=True,
         )
         ui = PlainUI(no_color=True)
-        agent = MockAgent(["start", f"found {COMPLETION_MARKER} here", "more output"])
+        agent = MockAgent(["start", COMPLETION_MARKER, "more output"])
 
         result = run_loop(config, ui, agent, tmp_path)
 
         assert result.completed is True
         assert result.exit_code == 0
+
+    def test_inline_marker_does_not_trigger_completion(self, tmp_path: Path) -> None:
+        """Inline marker should not end the loop."""
+        ralph_dir = tmp_path / "scripts" / "ralph"
+        ralph_dir.mkdir(parents=True)
+        (ralph_dir / "prompt.md").write_text("hello")
+        (ralph_dir / "prd.json").write_text(
+            '{"branchName": "test", "userStories": []}'
+        )
+
+        config = RalphConfig(
+            max_iterations=1,
+            prompt_file=ralph_dir / "prompt.md",
+            prd_file=ralph_dir / "prd.json",
+            sleep_seconds=0,
+            ralph_branch="",
+            ralph_branch_explicit=True,
+        )
+        ui = PlainUI(no_color=True)
+        agent = MockAgent(
+            [
+                "User",
+                "hello",
+                f"marker inside line {COMPLETION_MARKER} and more",
+                "Assistant",
+                "working...",
+            ]
+        )
+
+        result = run_loop(config, ui, agent, tmp_path)
+
+        assert result.completed is False
+        assert result.exit_code == 1
+        assert result.iterations == 1
