@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import functools
+import importlib
 import json
 import os
 import shutil
@@ -16,7 +17,7 @@ from collections.abc import Callable, Mapping
 from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import IO, TYPE_CHECKING, Any, TextIO
+from typing import IO, TYPE_CHECKING, Any, Protocol, TextIO
 
 from kstrl.agents.base import UsageTotals, collect_usage, print_usage_rollup
 from kstrl.agents.proc import kill_active_process_groups
@@ -77,6 +78,7 @@ from kstrl.findings import POLICY_CATEGORY_PREFIX
 from kstrl.fixtures import FixturesConfig
 from kstrl.git import fetch_base_branch, resolve_base_ref
 from kstrl.guards import ScopeHazard, scope_entry_hazard
+from kstrl.inbox import Inbox, InboxConfig, ItemKind
 from kstrl.interaction import InteractionChannel
 from kstrl.knowledge import (
     KnowledgeConfig,
@@ -2730,6 +2732,116 @@ def _expired_futures(
     return [f for f in running if not f.done() and f in deadlines and now >= deadlines[f]]
 
 
+class _HealthBreach(Protocol):
+    """The R8.4 breach record this seam reads and #151 will supply.
+
+    Structural rather than imported: ``kstrl/health.py`` does not exist
+    yet, so the factory must not take a hard dependency on it. These five
+    attributes are the whole contract between #232 and #151; anything
+    else the eventual dataclass carries is invisible here.
+    """
+
+    metric: str
+    rule: str
+    value: float
+    limit: float
+    window_runs: int
+
+
+def _record_health_breaches(
+    root_dir: Path,
+    state: AutonomyState,
+    *,
+    run_id: str,
+    ui: UI,
+    bus: EventBus,
+) -> None:
+    """Open an inbox item per R8.4 control-limit breach, and maybe demote.
+
+    Inert until ``kstrl/health.py`` exists (#151). The import guard
+    swallows exactly one thing: that module not being importable at all.
+    A ``kstrl.health`` that IS importable and has renamed
+    ``health_breaches`` raises ``AttributeError``, which reaches the
+    caller's "Autonomy state update failed" warning - a seam that
+    disarms itself silently on a rename is worse than one that is loudly
+    broken, and a bare ``except ImportError`` cannot tell the two apart.
+
+    Advisory first: the item is always written, the demotion happens only
+    under ``[autonomy] demote_on_health_breach``. It is additionally
+    suppressed while a cool-down is running, because a breach is a
+    WINDOWED TREND rather than an event: it persists across runs, so an
+    ungated trigger would take one level per run down to L1 before the
+    operator had read the first notice.
+
+    The false-alarm arithmetic #151 must choose its rule set against, so
+    the choice is made with the cost in front of it: one point beyond
+    three sigma fires by chance about once in 370 observations, and all
+    four Western Electric rules together about once in 92
+    (https://handwiki.org/wiki/Western_Electric_rules). With demotion on,
+    one false alarm costs a level plus ``DEMOTION_COOLDOWN_RUNS``
+    decisive runs of locked re-promotion.
+    """
+    try:
+        health = importlib.import_module("kstrl.health")
+    except ModuleNotFoundError as exc:
+        if exc.name != "kstrl.health":
+            raise
+        return
+    breaches: list[_HealthBreach] = list(health.health_breaches(root_dir))
+    if not breaches:
+        return
+    try:
+        inbox_config = InboxConfig.load(root_dir)
+        if inbox_config.enabled:
+            inbox = Inbox(root_dir, inbox_config)
+            for breach in breaches:
+                inbox.add(
+                    ItemKind.HEALTH_BREACH,
+                    f"Health breach: {breach.metric} {breach.rule}",
+                    detail=(
+                        f"value {breach.value} beyond limit {breach.limit} "
+                        f"over {breach.window_runs} run(s)"
+                    ),
+                    run_id=run_id,
+                    dedupe_key=f"health:{breach.metric}:{breach.rule}",
+                    evidence={
+                        "metric": breach.metric,
+                        "rule": breach.rule,
+                        "value": breach.value,
+                        "limit": breach.limit,
+                        "window_runs": breach.window_runs,
+                    },
+                )
+    except (OSError, ValueError) as exc:
+        ui.warn(f"Inbox write failed (non-fatal): {exc}")
+    if not AutonomyConfig.load(root_dir).demote_on_health_breach:
+        return
+    if state.cooldown_runs_remaining > 0:
+        return
+    first = breaches[0]
+    apply_demotion(
+        root_dir,
+        DemotionTrigger.HEALTH_BREACH,
+        f"{first.metric}: {first.rule}",
+        evidence={
+            "breaches": [
+                {
+                    "metric": breach.metric,
+                    "rule": breach.rule,
+                    "value": breach.value,
+                    "limit": breach.limit,
+                }
+                for breach in breaches
+            ],
+            "run_id": run_id,
+        },
+        run_id=run_id,
+        ui=ui,
+        bus=bus,
+        state=state,
+    )
+
+
 def _record_autonomy_outcome(
     *,
     root_dir: Path,
@@ -2759,6 +2871,10 @@ def _record_autonomy_outcome(
       These both block promotion AND fire an immediate demotion, because a
       breach of the envelope is the clearest evidence that the current
       level is not warranted.
+    - **Health breaches** (R8.4, seam only until #151): control-limit
+      breaches over run metrics, opened as inbox items on every path and
+      demoting only under an explicit switch. Read from ``kstrl.health``
+      if that module exists; see ``_record_health_breaches``.
 
     Automatic demotion happens here rather than mid-run: demoting while
     components are still executing would change the flag bundle underneath
@@ -2792,8 +2908,17 @@ def _record_autonomy_outcome(
     ]
     if violations:
         state.record_policy_violation(len(violations))
-
-    if not violations:
+        apply_demotion(
+            root_dir,
+            DemotionTrigger.POLICY_VIOLATION,
+            f"policy violation in {', '.join(sorted(violations))}",
+            evidence={"components": sorted(violations), "run_id": run_id},
+            run_id=run_id,
+            ui=ui,
+            bus=bus,
+            state=state,
+        )
+    else:
         state.save(root_dir)
         if decisive:
             ui.kv(
@@ -2801,18 +2926,11 @@ def _record_autonomy_outcome(
                 f"L{state.level}: {state.decisive_runs_at_level} decisive run(s), "
                 f"{state.components_merged_at_level} merged",
             )
-        return
 
-    apply_demotion(
-        root_dir,
-        DemotionTrigger.POLICY_VIOLATION,
-        f"policy violation in {', '.join(sorted(violations))}",
-        evidence={"components": sorted(violations), "run_id": run_id},
-        run_id=run_id,
-        ui=ui,
-        bus=bus,
-        state=state,
-    )
+    # The health seam runs on every path, the demoting one included: the
+    # cool-down that demotion just set is what then stops a second
+    # revocation inside one run.
+    _record_health_breaches(root_dir, state, run_id=run_id, ui=ui, bus=bus)
 
 
 def run_factory(

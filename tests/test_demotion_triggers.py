@@ -1,7 +1,7 @@
 """R10.11 (#232): the demotion triggers this PR wires, and the R8.4 seam.
 
 ``DemotionTrigger`` has declared five causes since R8.2 and exactly one
-of them fired. Two things changed here, and each is pinned below:
+of them fired. Three things changed here, and each is pinned below:
 
 - ``autonomy.apply_demotion``, one applier for every automatic demotion,
   so the four writes a demotion performs (state, evolution journal, run
@@ -14,6 +14,8 @@ of them fired. Two things changed here, and each is pinned below:
 - the calibration-regression emitter on ``python -m kstrl.calibration
   compare``: advisory always, demoting only behind
   ``[autonomy] demote_on_calibration_regression``.
+- the health seam, inert until ``kstrl/health.py`` exists (#151) and
+  shown to fire against a monkeypatched module rather than assumed to.
 
 No LLM anywhere: the baselines are built from synthetic per-run records
 through ``calibration.build_report``, the same path a real capture uses.
@@ -21,8 +23,11 @@ through ``calibration.build_report``, the same path a real capture uses.
 
 from __future__ import annotations
 
+import importlib.util
 import io
+import sys
 from pathlib import Path
+from types import ModuleType, SimpleNamespace
 from typing import Any
 
 import pytest
@@ -37,7 +42,10 @@ from kstrl.autonomy import (
     apply_demotion,
 )
 from kstrl.calibration_ladder import LADDER_DISABLED_LINE
-from kstrl.inbox import Inbox, InboxConfig, ItemKind
+from kstrl.events import EventBus
+from kstrl.factory import FactoryResult, _record_autonomy_outcome
+from kstrl.inbox import Inbox, InboxConfig, ItemKind, Priority
+from kstrl.manifest import Component, Manifest
 from kstrl.ui.plain import PlainUI
 
 OLD_TS = "20260901-000000"
@@ -106,12 +114,15 @@ def _write_config(
     *,
     autonomy: bool = True,
     demote_on_calibration: bool | None = None,
+    demote_on_health: bool | None = None,
 ) -> None:
     lines = ["[autonomy]", f"enabled = {'true' if autonomy else 'false'}"]
     if demote_on_calibration is not None:
         lines.append(
             f"demote_on_calibration_regression = {'true' if demote_on_calibration else 'false'}"
         )
+    if demote_on_health is not None:
+        lines.append(f"demote_on_health_breach = {'true' if demote_on_health else 'false'}")
     (tmp_path / "kstrl.toml").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -125,6 +136,51 @@ def _items(tmp_path: Path, kind: ItemKind | None = None) -> list[Any]:
 def _ui() -> tuple[PlainUI, io.StringIO]:
     buffer = io.StringIO()
     return PlainUI(no_color=True, file=buffer), buffer
+
+
+def _manifest() -> Manifest:
+    return Manifest(
+        version="1",
+        spec_file="spec.md",
+        project_name="test",
+        base_branch="main",
+        single_pr=False,
+        components=[
+            Component(
+                "comp-a",
+                "Component A",
+                "Desc",
+                [],
+                "scripts/kstrl/feature/comp-a/prd.json",
+                "kstrl/factory/comp-a",
+            )
+        ],
+    )
+
+
+def _breach(
+    metric: str = "retry_rate",
+    rule: str = "WE1: 1 point beyond 3 sigma",
+) -> SimpleNamespace:
+    return SimpleNamespace(metric=metric, rule=rule, value=0.4, limit=0.3, window_runs=8)
+
+
+def _fake_health(*breaches: object, with_function: bool = True) -> ModuleType:
+    module = ModuleType("kstrl.health")
+    if with_function:
+        module.health_breaches = lambda root_dir: list(breaches)  # type: ignore[attr-defined]
+    return module
+
+
+def _run_outcome(tmp_path: Path, ui: PlainUI) -> None:
+    _record_autonomy_outcome(
+        root_dir=tmp_path,
+        manifest=_manifest(),
+        factory_result=FactoryResult(completed=["comp-a"]),
+        bus=EventBus(),
+        run_id="run-1",
+        ui=ui,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -312,6 +368,103 @@ class TestCompareLadder:
         assert code == 2
         assert "error:" in capsys.readouterr().err
         assert _items(tmp_path) == []
+
+
+# ---------------------------------------------------------------------------
+# 8-11, 13: the R8.4 health seam
+# ---------------------------------------------------------------------------
+
+
+class TestHealthSeam:
+    def test_health_seam_inert_without_module(self, tmp_path: Path) -> None:
+        """Until #151 lands there is no kstrl.health, and nothing fires."""
+        assert "kstrl.health" not in sys.modules
+        assert importlib.util.find_spec("kstrl.health") is None
+        _write_config(tmp_path, demote_on_health=True)
+        AutonomyState(level=int(AutonomyLevel.L2_GATED_MERGE)).save(tmp_path)
+        ui, _ = _ui()
+
+        _run_outcome(tmp_path, ui)
+
+        assert _items(tmp_path) == []
+        assert AutonomyState.load(tmp_path).level == int(AutonomyLevel.L2_GATED_MERGE)
+
+    def test_health_module_present_but_missing_function_raises(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A renamed contract must fail loud, not disarm the seam.
+
+        The guard swallows exactly one thing: kstrl.health not existing.
+        A module that exists and does not export ``health_breaches``
+        raises AttributeError, which the factory's caller reports as
+        "Autonomy state update failed". A bare ``except ImportError``
+        would have read the rename as "#151 has not landed yet".
+        """
+        monkeypatch.setitem(sys.modules, "kstrl.health", _fake_health(with_function=False))
+        _write_config(tmp_path)
+        AutonomyState(level=int(AutonomyLevel.L2_GATED_MERGE)).save(tmp_path)
+        ui, _ = _ui()
+
+        with pytest.raises(AttributeError):
+            _run_outcome(tmp_path, ui)
+
+    def test_health_breach_opens_inbox_item(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setitem(sys.modules, "kstrl.health", _fake_health(_breach()))
+        _write_config(tmp_path)
+        AutonomyState(level=int(AutonomyLevel.L2_GATED_MERGE)).save(tmp_path)
+        ui, _ = _ui()
+
+        _run_outcome(tmp_path, ui)
+
+        breaches = _items(tmp_path, ItemKind.HEALTH_BREACH)
+        assert len(breaches) == 1
+        assert breaches[0].title == "Health breach: retry_rate WE1: 1 point beyond 3 sigma"
+        assert breaches[0].dedupe_key == "health:retry_rate:WE1: 1 point beyond 3 sigma"
+        assert breaches[0].priority is Priority.NORMAL
+        assert breaches[0].evidence["metric"] == "retry_rate"
+        assert breaches[0].evidence["window_runs"] == 8
+        # Advisory by default: a breach alone revokes nothing.
+        assert AutonomyState.load(tmp_path).level == int(AutonomyLevel.L2_GATED_MERGE)
+        assert _items(tmp_path, ItemKind.DEMOTION_NOTICE) == []
+
+    def test_health_breach_demotes_when_enabled(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setitem(sys.modules, "kstrl.health", _fake_health(_breach()))
+        _write_config(tmp_path, demote_on_health=True)
+        AutonomyState(level=int(AutonomyLevel.L2_GATED_MERGE)).save(tmp_path)
+        ui, _ = _ui()
+
+        _run_outcome(tmp_path, ui)
+
+        state = AutonomyState.load(tmp_path)
+        assert state.level == int(AutonomyLevel.L1_SUPERVISED)
+        assert state.history[-1].trigger == "health_breach"
+        assert _items(tmp_path, ItemKind.DEMOTION_NOTICE)
+
+    def test_health_breach_suppressed_during_cooldown(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A cooling-down ladder records the breach and holds the level.
+
+        A breach is a windowed trend, so it persists across runs. Without
+        this gate one breach costs a level per run all the way to L1
+        before the operator has read the first notice.
+        """
+        monkeypatch.setitem(sys.modules, "kstrl.health", _fake_health(_breach()))
+        _write_config(tmp_path, demote_on_health=True)
+        state = AutonomyState(level=int(AutonomyLevel.L3_ENVELOPED_AUTO))
+        state.cooldown_runs_remaining = 3
+        state.save(tmp_path)
+        ui, _ = _ui()
+
+        _run_outcome(tmp_path, ui)
+
+        assert _items(tmp_path, ItemKind.HEALTH_BREACH)
+        assert AutonomyState.load(tmp_path).level == int(AutonomyLevel.L3_ENVELOPED_AUTO)
+        assert _items(tmp_path, ItemKind.DEMOTION_NOTICE) == []
 
 
 # ---------------------------------------------------------------------------
