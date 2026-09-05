@@ -11,7 +11,7 @@ from collections import Counter
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from kstrl.agents.base import (
     ARCHITECT_COMPONENT,
@@ -1575,8 +1575,11 @@ class ExcludedHistory:
     Three buckets, because there are three ways for the report to see
     less than the journal holds, and #280 is that any of them going
     unsaid is the failure the report cannot afford. Each round of
-    review found another one being missed, so they are enumerated here
-    and every ``spec_issues`` entry falls into exactly one:
+    review found another one being missed, so they are enumerated here.
+    Every ``spec_issues`` entry falls into exactly one, and
+    :func:`_audit_bucket` is the only place that decides which: #338 is
+    what happened when two of the three were computed by separate
+    predicates that agreed at every project name except "".
 
     - ``own_recorded`` counts THIS project's audits on disk. The trend
       may count fewer, because ``lookback_runs`` windows it and because
@@ -1629,6 +1632,42 @@ class ExcludedHistory:
         return max(0, self.own_recorded - counted - self.unreadable(counted))
 
 
+def _audit_bucket(
+    entry: dict[str, Any],
+    project_name: str,
+) -> Literal["own", "other", "unattributed"]:
+    """Which of ``ExcludedHistory``'s three buckets one spec audit is in.
+
+    The ONLY place the rule lives, because #338 is what two copies of
+    it cost. ``own_recorded`` was ``entry_str(e, "project") ==
+    project_name`` and ``unattributed`` was ``not entry_str(e,
+    "project")``. Those are two spellings of the same question at
+    ``project_name == ""``, so an audit with an absent, null or
+    non-string project satisfied both and was counted twice: five
+    audits on disk, eight bucket placements. One call per audit places
+    it once, so the three counts sum to the audits by construction
+    rather than by the two predicates happening to disagree.
+
+    The ORDER is the decision, and it is own before unattributed.
+    :meth:`EvolutionJournal.get_spec_issue_runs` windows the trend by
+    the identical ``entry_str(entry, "project") == project`` expression,
+    so at "" the trend counts those audits. Calling them unattributed
+    here would make ``own_recorded`` 0 for a trend showing 3, and would
+    make the rendered note claiming neither the trend nor the
+    cross-project line counts them false about audits the trend just
+    counted. Agreeing with the window keeps one answer for one journal.
+
+    For every non-empty ``project_name`` the order is unobservable:
+    ``project == project_name`` and ``not project`` cannot both hold.
+    """
+    project = entry_str(entry, "project")
+    if project == project_name:
+        return "own"
+    if not project:
+        return "unattributed"
+    return "other"
+
+
 def _excluded_projects(
     audits: list[dict[str, Any]],
     project_name: str,
@@ -1654,7 +1693,7 @@ def _excluded_projects(
     last_seen: dict[str, str] = {}
     for entry in audits:
         project = entry_str(entry, "project")
-        if not project or project == project_name:
+        if _audit_bucket(entry, project_name) != "other":
             continue
         by_project.setdefault(project, []).append(entry_str(entry, "spec_file"))
         # Only a timestamp that exists replaces one that exists. Round 2
@@ -1700,10 +1739,11 @@ def _excluded_history(
     excludes that was itself windowed would omit history silently,
     which is the bug this exists to fix.
     """
+    buckets = Counter(_audit_bucket(e, project_name) for e in audits)
     return ExcludedHistory(
-        own_recorded=sum(1 for e in audits if entry_str(e, "project") == project_name),
+        own_recorded=buckets["own"],
         projects=_excluded_projects(audits, project_name, spec_file),
-        unattributed=sum(1 for e in audits if not entry_str(e, "project")),
+        unattributed=buckets["unattributed"],
         lookback=lookback,
     )
 

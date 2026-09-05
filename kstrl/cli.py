@@ -165,6 +165,38 @@ def _use_cli_value(ctx: click.Context, name: str) -> bool:
     return ctx.get_parameter_source(name) == ParameterSource.COMMANDLINE
 
 
+def _reject_blank_project_name(
+    ctx: click.Context,
+    param: click.Parameter,
+    value: str | None,
+) -> str | None:
+    """Refuse an empty or whitespace-only project name at the boundary (#338).
+
+    The project name is an identity: it keys the journal audits, the
+    decision register and, under ``--single-pr``, the branch. "" was
+    accepted by Click and is the one value at which the convergence
+    accounting counted an audit with no project as BOTH this project's
+    and unattributed, reporting five audits as eight. Refusing it here
+    means no downstream reader has to carry a special case for it, and
+    the refusal lands before the architect is invoked, measured at 119
+    to 210 seconds against a frontier model on a real spec.
+
+    Rejects or returns the value VERBATIM; it never strips. " x " is a
+    strange name but it is the name the operator typed, and quietly
+    substituting "x" would write a manifest, a branch and a journal
+    audit under something else.
+
+    Not on ``ks queue add``: its ``--project-name`` defaults to "" as
+    the sentinel ``serve`` derives ``queue-<id>`` from, and Click runs
+    a callback over an option's own default. A queued item with a
+    whitespace name still reaches this check, because ``serve`` spawns
+    a child ``ks factory --project-name``, which refuses it with exit 2.
+    """
+    if value is not None and not value.strip():
+        raise click.BadParameter("must not be empty or whitespace-only", ctx=ctx, param=param)
+    return value
+
+
 # Accepted spellings for the agent type across the config surface.
 # kstrl.toml documents "claude" | "codex" | "custom"; the --agent-type
 # flags and KSTRL_AGENT_TYPE historically use "claude-code" | "codex" |
@@ -2006,6 +2038,7 @@ def feature(
 @click.option(
     "--project-name",
     required=True,
+    callback=_reject_blank_project_name,
     help="Name for this factory project",
 )
 @click.option(
@@ -2216,6 +2249,7 @@ def decompose(
 )
 @click.option(
     "--project-name",
+    callback=_reject_blank_project_name,
     help="Name for this factory project (required with --spec)",
 )
 @click.option(

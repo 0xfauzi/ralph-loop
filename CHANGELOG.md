@@ -13,6 +13,19 @@ stage, runtime feedback, and an earned-autonomy ladder). See
 
 ### Fixed
 
+- `ks decompose --project-name` and `ks factory --project-name` refuse an
+  empty or whitespace-only name at the command line, exiting 2 and naming
+  the option, instead of running the architect against it. The name is an
+  identity: it keys the journal audits, the decision register and, under
+  `--single-pr`, the branch. Related, and the reason the boundary check
+  is worth having: the convergence report's accounting of audits the
+  trend leaves out is now computed by one classifier per audit, so the
+  three buckets (this project's, another project's, no project recorded)
+  always sum to the audits on disk. At an empty project name the two
+  counts were separate predicates asking the same question, so an audit
+  recording no project was counted both as this project's and as
+  unattributed: five audits on disk reported as eight (#338).
+
 - `kstrl.toml` and the `KSTRL_*` environment are now resolved once, at
   command entry, before a command constructs anything. They used to be
   parsed lazily, by whichever config dataclass first needed its section,
