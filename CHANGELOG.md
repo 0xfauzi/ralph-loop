@@ -170,6 +170,22 @@ stage, runtime feedback, and an earned-autonomy ladder). See
 
 ### Changed
 
+- **Breaking:** a hard-mode review or security phase that finds
+  `max_adversarial_calls` already spent now halts the component instead of
+  downgrading itself to a skip. Before this, an operator running with a cap and
+  `review_mode = "hard"` got every component past the cap merged on mechanical
+  verification alone, with the reviewer silently shed: the reviewer accounts for
+  14 of the 17 failure signatures in this repository's own journal, so the phase
+  dropped under budget pressure was the one doing most of the catching. The halt
+  is recorded as `failed_check = adversarial_budget`, journalled as
+  `review:budget-exhausted` or `security:budget-exhausted`, and carries an
+  `infrastructure_error` finding for the phase. It does not retry, because the
+  budget only shrinks. Advisory mode is unchanged and still records a
+  `phase_skipped`, and the knowledge distiller is still skipped in every mode
+  because it is not a merge gate. Nothing changes for a default configuration:
+  `max_adversarial_calls = 0` means unbounded, so the wall is unreachable unless
+  an operator sets a cap. If you set one, budget one call per adversarial phase
+  per component (R10.5, #226).
 - The retry context handed to the engineer is now level-triggered: it renders
   the failures measured in the latest attempt, lists earlier findings whose
   sensor did not run again under "Not re-measured", and replaces the rest with

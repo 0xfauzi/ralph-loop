@@ -759,6 +759,15 @@ the chunked one.
 Two fair qualifications: the degrade is loud, and `max_adversarial_calls = 0`
 means unbounded by default, so this is latent rather than active.
 
+Shipped in #226, with one correction to the diagnosis above. The chunked
+hard-mode path this section held up as the model was removed by #266, which
+took diff chunking out entirely: the reviewer now runs inside the worktree and
+reads git itself, so there is no chunking decision to make and no second path to
+match. The unchunked path was therefore the only path, and it now halts.
+Advisory mode keeps the recorded skip, and the knowledge distiller keeps its
+skip in every mode, which is the priority policy this section asked for stated
+explicitly: the merge gates halt, the non-gate sheds.
+
 ### 5.10 Ready to iterate faster
 
 **Ready to iterate faster, and this is where the two speculative mechanisms
@@ -1006,7 +1015,7 @@ Cycle: R10, milestone [R10: Control Loop](https://github.com/0xfauzi/kstrl/miles
 | 2 | 5.3 level-triggered retry context | [#223](https://github.com/0xfauzi/kstrl/issues/223) | `[x]` |
 | 3 | 5.2 set-point agreement | [#224](https://github.com/0xfauzi/kstrl/issues/224) | `[x]` |
 | 4 | 5.9 name safe mode | [#225](https://github.com/0xfauzi/kstrl/issues/225) | `[x]` |
-| 5 | 5.9 adversarial budget: hard mode halts | [#226](https://github.com/0xfauzi/kstrl/issues/226) | `[ ]` |
+| 5 | 5.9 adversarial budget: hard mode halts | [#226](https://github.com/0xfauzi/kstrl/issues/226) | `[x]` merged in (this PR) |
 | 6 | 5.5 dampener | [#227](https://github.com/0xfauzi/kstrl/issues/227) | `[ ]` |
 | 7 | 5.6 flow control | [#228](https://github.com/0xfauzi/kstrl/issues/228) | `[ ]` |
 | 8 | 5.4 golden patterns | [#229](https://github.com/0xfauzi/kstrl/issues/229) | `[ ]` |

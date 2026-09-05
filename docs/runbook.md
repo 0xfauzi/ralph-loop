@@ -92,7 +92,7 @@ In advisory review mode a crashed or unparseable reviewer still passes the revie
 
 **Symptom, third form**: `Phase 2 FAILED for <comp_id>: Set-point agreement cannot be confirmed: the reviewer never ran (adversarial LLM budget (N) exhausted) and a story is still marked passes=true`.
 
-The adversarial budget covers review, security and knowledge distillation together. When it runs out, Phase 2 downgrades to a skip, and in blocking mode a skipped reviewer cannot confirm anything. This does not retry, because retrying cannot recover budget: raise `max_adversarial_calls`, or accept the components already done and re-run the rest.
+The adversarial budget covers review, security and knowledge distillation together. When it runs out, an **advisory** Phase 2 downgrades to a skip, and in blocking mode a skipped reviewer cannot confirm anything. A **hard-mode** Phase 2 does not reach this form at all since R10.5: it halts the component at the budget wall, which is the symptom below rather than this one. This does not retry, because retrying cannot recover budget: raise `max_adversarial_calls`, or accept the components already done and re-run the rest.
 
 **Resolve**: the retry resets `passes` to false on each unconfirmed story and puts the disagreement in the agent's context. The engineer's own story selection then picks the story up again, because it takes the highest-priority story where `passes` is false. Nothing needs doing by hand.
 
@@ -168,11 +168,20 @@ To stop it failing components, set `[divergence] mode = "advisory"` (the default
 
 ## Adversarial budget exhausted mid-run
 
-**Symptom**: `Phase 2 SKIPPED for <comp_id>: adversarial LLM budget exhausted`
+**Symptom, advisory mode**: `Phase 2 SKIPPED for <comp_id>: adversarial LLM budget exhausted`, or `Phase 2.5 SKIPPED for <comp_id>: adversarial LLM budget exhausted`. The component continues and completes.
 
-**Diagnose**: `FactoryConfig.max_adversarial_calls` is set and the count of review + security + distillation calls has hit the cap.
+**Symptom, hard mode** (R10.5): the component halts instead.
 
-**Resolve**: increase the cap, or accept that later components run without adversarial phases. The mechanical pipeline (Phase 1) still gates them.
+```
+Phase 2 FAILED for <comp_id>: Review infrastructure error: adversarial LLM budget (N) exhausted before the phase ran; hard mode refuses to merge unreviewed
+Phase 2.5 FAILED for <comp_id>: Security review infrastructure error: adversarial LLM budget (N) exhausted before the phase ran; hard mode refuses to merge unreviewed
+```
+
+It is recorded as `failed_check = adversarial_budget` and journalled as `review:budget-exhausted` or `security:budget-exhausted`, with an `infrastructure_error` finding for the phase. It does not retry: the budget only shrinks, so a retry would burn engineer iterations against the same wall.
+
+**Diagnose**: `FactoryConfig.max_adversarial_calls` is set and the count of review + security + distillation calls has hit the cap. Each adversarial phase costs one call per component, so hard review plus hard security needs `2 * components`; a cap below that halts every component past the cap.
+
+**Resolve**: raise the cap to cover the run, or set `review_mode` (and `[security] mode`) to `advisory` as a deliberate decision to merge on mechanical checks alone. There is no third option, and that is the point: hard mode will not silently drop the reviewer to stay inside a budget. The knowledge distiller is still skipped in every mode, because it is not a merge gate.
 
 ## Spec was rejected by the architect
 
@@ -348,8 +357,10 @@ stream (`.kstrl/runs/<run_id>/events.jsonl`, `phase_skipped` events).
 The usual causes are `mode = skip` in `[security]` or the review config,
 a security reviewer that was never configured, and the adversarial LLM
 budget (`max_adversarial_calls`) running out mid-run. The first two are
-choices; the third is worth acting on, because it means components
-merged on mechanical checks alone. See also
+choices; the third is worth acting on, because under an **advisory**
+mode it means components merged on mechanical checks alone. Under a hard
+mode the budget produces no skip at all since R10.5: the component halts,
+and shows up as a failure rather than here. See also
 [Adversarial budget exhausted mid-run](#adversarial-budget-exhausted-mid-run).
 
 This reason clears when the next factory run **completes** without
