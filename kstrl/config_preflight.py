@@ -129,6 +129,28 @@ def raise_if_defect(exc: BaseException) -> None:
     ``builtins`` and any dependency's ``RuntimeError`` is not something
     we modelled and so not something we can honestly blame a file for.
     ``tests/test_tui_config_guard.py`` pins both halves.
+
+    ``RecursionError`` is the one that needs an argument rather than a
+    rule, and the argument is layering rather than inspection (#323). A
+    kstrl.toml with 600 nested arrays exhausts the stack inside
+    tomllib's recursive descent, and that is the operator's file, not a
+    defect of ours. It never arrives here. There are four tomllib parses
+    in ``kstrl/`` - ``tests/test_toml_readers.py`` pins the census - and
+    every one of them ends on a bare ``except Exception``:
+    ``config.load_toml_document`` re-raises ``ConfigError`` naming the
+    path, and the pyproject.toml and ruff.toml readers in ``verify`` and
+    ``feedforward`` fall back to a default. So a ``RecursionError`` that
+    does reach this function is a cycle in kstrl's own code, and the
+    traceback this re-raise keeps is what locates it.
+
+    Inspecting the exception could not have settled it anyway. Measured
+    on 3.12.8 and 3.13.2, both directions give
+    ``builtins.RecursionError`` with ``str(exc)`` "maximum recursion
+    depth exceeded" and no attribute of its own; only the frames differ,
+    and by the time they could be read the boundary has already
+    answered. ``tests/test_recursion_provenance.py`` pins both
+    directions, at :func:`preflight_config` and at the ``ks status``
+    seam.
     """
     if isinstance(exc, RuntimeError) and type(exc).__module__.split(".")[0] != "kstrl":
         raise exc

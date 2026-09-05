@@ -545,8 +545,10 @@ def load_toml_document(path: Path) -> dict[str, Any]:
       then refuses to build: ``max_iterations = <4301 digits>`` raises
       "Exceeds the limit (4300 digits) for integer string conversion"
       from ``sys.get_int_max_str_digits``. Walked past round 1.
-    - ``RecursionError``, at roughly 496 nested arrays or inline tables,
-      from tomllib's recursive-descent parser. It derives from
+    - ``RecursionError``, from tomllib's recursive-descent parser, at no
+      one depth: at the default limit nested arrays first fail at 497
+      levels from a one-frame caller and 396 under 200 more, inline
+      tables at 331 and 264; the caller's own stack sets it. It derives from
       ``RuntimeError``, NOT ``ValueError``, so it walked past round 2 -
       whose docstring, whose AST guard and whose CLAUDE.md line all
       asserted that ``ValueError`` WAS the whole class. Round 2 stated
@@ -563,6 +565,11 @@ def load_toml_document(path: Path) -> dict[str, Any]:
     covered, since it derives from ``Exception``, with the honest caveat
     that no handler can promise the interpreter has the headroom left to
     render the message.
+
+    Provenance follows (#323): the parse runs at stack depth 9 to 16
+    under ``ks status``, so a ``RecursionError`` here is the document's,
+    and every block ``config_preflight`` guards reaches tomllib only
+    through this function, so one above is ours - see ``raise_if_defect``.
 
     ``OSError`` is not in the catch-all's reach at all, which is the
     stronger form of the guarantee two callers depend on. An earlier
