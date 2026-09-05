@@ -18,7 +18,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from kstrl.observability import handle_ends_without_newline, read_progress_events
+from kstrl.appendio import JOURNAL_REPAIR_EVENT, append_records
+from kstrl.observability import read_progress_events
 from kstrl.verify import SCOPE_UNREADABLE_CHECK, SCOPE_UNREADABLE_ERROR_PREFIX
 
 if TYPE_CHECKING:
@@ -36,13 +37,18 @@ logger = logging.getLogger("kstrl.evolution")
 # .kstrl/archive/, so fresh journals contain v2 entries only.
 JOURNAL_SCHEMA_VERSION = 2
 
-# #312: the event_type of the row append_entries writes when it finds the
-# journal not newline-terminated. Its own type rather than a synthetic
-# component_result, for the reason _role_usage_entries gives: every
-# aggregate in this module selects on event_type, so a row of this type
-# counts towards nothing and cannot invent an outcome. It exists to be
-# grepped: it is the only durable trace that a crash tore the file.
-JOURNAL_REPAIR_EVENT = "journal_repair"
+# #312 declared JOURNAL_REPAIR_EVENT here: the event_type of the row an
+# append writes when it finds the file not newline-terminated. Its own
+# type rather than a synthetic component_result, for the reason
+# _role_usage_entries gives: every aggregate in this module selects on
+# event_type, so a row of this type counts towards nothing and cannot
+# invent an outcome. It exists to be grepped: it is the only durable
+# trace that a crash tore the file.
+#
+# #331 moved the declaration to ``kstrl.appendio``, where the six
+# appenders that can write it can all reach it. The import above is
+# what binds the name in this module, for _repair_entry which writes
+# the row and get_repair_count which counts it.
 
 # #260: the event_type of one recorded spec audit. ``decompose`` writes
 # these rows and :meth:`EvolutionJournal.get_spec_audits` selects on
@@ -1657,39 +1663,21 @@ class EvolutionJournal:
         #312: a crash mid-write leaves a tail with no newline, and an
         append onto that tail concatenates the two into one unparseable
         line, so the tolerant reader drops the NEW entry as well. The
-        cost is measured, not assumed, and it is not always one entry: a
-        tail that lost only its newline is a COMPLETE record, and
-        concatenating onto it destroys that record too. Writing a
-        newline first repairs the tail into a line of its own, which
-        drops a genuine fragment (unavoidable, it was never written) and
-        RECOVERS a record that lost only its terminator.
+        mechanism and the repair now live in ``kstrl.appendio``, which
+        #331 hoisted them into when five more appenders were measured
+        with the same defect; the ``"a+b"`` open, the probe, the single
+        write and the encoding are all described there.
 
-        Healing forward rather than raising, because the caller is a
-        record-keeper: refusing to append would answer the loss of one
-        record by losing every later one. So the repair is recorded
-        instead, twice, per "if it's worth deciding, it's worth
-        recording" - a ``JOURNAL_REPAIR_EVENT`` row in the file itself,
-        which is what ``ks evolve --status`` counts and an operator
-        greps months later, and a warning on this module's logger for
-        whoever is watching now. The row is durable where the log line
-        is not: the process that tore the file is exactly the process
-        whose stderr nobody kept.
+        What stays here is the POLICY, which is what differs per file.
+        This journal repairs with a ``JOURNAL_REPAIR_EVENT`` row rather
+        than a bare pad, per "if it's worth deciding, it's worth
+        recording": the row is what ``ks evolve --status`` counts and an
+        operator greps months later, and it is durable where the logger
+        warning below is not, because the process that tore the file is
+        exactly the process whose stderr nobody kept.
 
         An empty append writes nothing, so it repairs nothing: there is
         no entry to protect and the next real append will do it.
-
-        ONE file description does the probe and the append, in
-        ``"a+b"``, and the repair row plus the whole batch go in ONE
-        ``write``. Neither is an optimisation. The single description is
-        what removes the window in which the path could be replaced or a
-        symlink retargeted between the two, and what makes a journal
-        this process cannot READ raise out of the open rather than being
-        probed as "not torn" and appended to blind; the single write is
-        what stops another appender landing between the newline that
-        isolates a torn fragment and the entries the repair was for. It
-        costs the text-mode ``encoding="utf-8"``, so the bytes are
-        encoded explicitly instead, which is the same two-sided contract
-        stated at the other end.
 
         Both are enforced by ``tests/test_journal_write_boundary.py``,
         which counts descriptors and writes. Round 2 of review on #327
@@ -1748,12 +1736,11 @@ class EvolutionJournal:
         """
         path = self.config.journal_path
         path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "a+b") as handle:
-            repairing = bool(entries) and handle_ends_without_newline(handle)
-            payload = "".join(_journal_line(entry) for entry in entries)
-            if repairing:
-                payload = "\n" + _journal_line(_repair_entry()) + payload
-            handle.write(payload.encode("utf-8"))
+        repairing = append_records(
+            path,
+            "".join(_journal_line(entry) for entry in entries),
+            repair=_journal_line(_repair_entry()),
+        )
         if repairing:
             logger.warning(
                 "evolution journal did not end in a newline, so a crash tore it: "

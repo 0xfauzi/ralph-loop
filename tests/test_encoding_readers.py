@@ -76,6 +76,8 @@ from tests.helpers.encodingwalk import package_scan, reported_sites, spells_a_to
 #: about what it left out.
 EXPECTED_READ_SPELLINGS: dict[str, int] = {
     "agents/codex.py": 1,
+    # The "a+b" append open, moved here from evolution.py by #331.
+    "appendio.py": 1,
     "agents/logging.py": 1,
     "atomicio.py": 1,
     "autonomy.py": 1,
@@ -86,7 +88,7 @@ EXPECTED_READ_SPELLINGS: dict[str, int] = {
     "decisions.py": 1,
     "decompose.py": 2,
     "events.py": 2,
-    "evolution.py": 4,
+    "evolution.py": 3,
     "factory.py": 6,
     "feature_cmd.py": 2,
     "feedforward.py": 8,
@@ -284,8 +286,11 @@ EXPECTED_UNDECIDED: tuple[str, ...] = (
 
 
 EXPECTED_DECIDED_OUT: tuple[str, ...] = (
+    # The journal's "a+b" probe-and-append. Binary, so no codec applies;
+    # #331 moved it from evolution.py to appendio.open_for_append, where
+    # six appenders now share it.
+    "appendio.py open",
     "atomicio.py os.open",
-    "evolution.py open",
     "factory.py EvolutionJournal.open",
     "pipeline.py EvolutionJournal.open",
     "tui/runs.py open",
