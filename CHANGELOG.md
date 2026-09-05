@@ -13,6 +13,22 @@ stage, runtime feedback, and an earned-autonomy ladder). See
 
 ### Fixed
 
+- `dead_code` no longer reports a pass when nothing was measured. One row
+  covered two phases - a ruff F401/F811/F841 auto-fix that ran and a vulture
+  scan that did not - so nine states in which one of them measured nothing
+  still produced `dead_code  pass`, and `kstrl/review.py` copied that row into
+  the LLM code reviewer's verification summary as `dead_code: PASS`. The row is
+  now two: `dead_code_ruff` for the ruff phase and `dead_code` for the vulture
+  or `[verify] dead_code_command` scan. A phase that could not run appends no
+  row and is recorded under `not_measured` with its reason (`tool_missing`,
+  `no_target`, `timed_out`, `command_failed`), the rule #306 set for
+  `mutation_testing`, so a real ruff measurement is no longer discarded along
+  with an absent vulture one and an adversarial reviewer is no longer told a
+  scan passed that never happened. `[verify] dead_code_cleanup` still owns both
+  phases. `ks sense --json` schema 2 -> 3: an absent `dead_code` row now also
+  means "asked for, measured nothing", and `dead_code_ruff` is a new name in
+  `checks`.
+
 - `kstrl.toml` and the `KSTRL_*` environment are now resolved once, at
   command entry, before a command constructs anything. They used to be
   parsed lazily, by whichever config dataclass first needed its section,

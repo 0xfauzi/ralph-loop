@@ -83,12 +83,14 @@ def test_sense_passes_on_clean_tree(tmp_path: Path) -> None:
     result, document = _sense_json(root)
 
     assert result.exit_code == 0, result.output
-    # 2, not 1 (#306). The literal is pinned deliberately: this document
-    # is a published surface, and the bump is the only thing that tells
-    # a reader an ABSENT check row no longer means "turned off in
-    # kstrl.toml" - it can now also mean "asked for, measured nothing",
-    # which `not_measured` below disambiguates.
-    assert document["schema_version"] == 2
+    # 3, not 2 (#335); 2, not 1, was #306. The literal is pinned
+    # deliberately: this document is a published surface, and the bump
+    # is the only thing that tells a reader an ABSENT check row no
+    # longer means "turned off in kstrl.toml" - it can now also mean
+    # "asked for, measured nothing", which `not_measured` below
+    # disambiguates. #335 extended that to the dead-code gate and added
+    # a new row name, `dead_code_ruff`, to `checks`.
+    assert document["schema_version"] == 3
     assert document["path"] == str(root)
     assert document["passed"] is True
     # Present and empty on a tree where every enabled check measured
@@ -206,7 +208,7 @@ def test_sense_exit_2_on_missing_path(tmp_path: Path) -> None:
     assert result.exit_code == 2
     assert result.stderr.startswith("error:")
     document = json.loads(result.stdout)
-    assert document["schema_version"] == 2
+    assert document["schema_version"] == 3
     assert "error" in document
     assert missing in document["error"]
 

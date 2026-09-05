@@ -3582,14 +3582,20 @@ def status(
 #: "absent means disabled" is wrong about a v2 document, which is why
 #: this is a bump and not a silent addition.
 #:
-#: Scoped to that one check on purpose, because that is all v2
-#: delivers. ``not_measured`` is not yet a complete index of every
-#: check that did not run: ``check_dead_code`` still reports three
-#: non-measurements as passing rows, and ``require_self_critique`` with
-#: no ``progress_file_path`` and no PRD emits neither a row nor a gap.
-#: Both predate this and both are follow-ups on #306; a reader must not
-#: read an empty array as "everything enabled was measured".
-SENSE_SCHEMA_VERSION = 2
+#: 3 (#335): the same two changes for the dead-code gate, by v2's own
+#: rule. ``check_dead_code`` fused a ruff auto-fix phase and a vulture
+#: scan into one row, so an absent ``dead_code`` row still meant only
+#: "turned off"; now it also means "asked for, measured nothing". And a
+#: NEW row name appears in ``checks``, ``dead_code_ruff``, which is the
+#: ruff half answering for itself. A v2 reader is wrong about a v3
+#: document on both counts.
+#:
+#: Still not a complete index of every check that did not run:
+#: ``require_self_critique`` with no ``progress_file_path`` and no PRD
+#: emits neither a row nor a gap. That predates this and is a follow-up
+#: on #306; a reader must not read an empty array as "everything
+#: enabled was measured".
+SENSE_SCHEMA_VERSION = 3
 
 
 def _sense_document(path: Path, base: str, result: VerificationResult) -> dict[str, Any]:
@@ -3707,13 +3713,18 @@ def sense(
     policy / adequacy / dead-code / mutation checks from kstrl.toml),
     run by hand with no PRD, no branch, no worktree and no agent spend.
 
+    [verify] dead_code_cleanup produces two rows, `dead_code_ruff` for
+    the ruff F401/F811/F841 phase and `dead_code` for the vulture or
+    [verify] dead_code_command scan, so a phase that could not run does
+    not take the other one's answer with it (#335).
+
     The measurement is read-only. It runs against your live checkout,
     not a worktree kstrl owns, so it writes nothing to .kstrl/ and never
-    edits, stages, commits or leaves bytecode: the dead-code check
-    reports what it would remove instead of removing it, and mutation
-    testing cannot run at all because mutmut works by rewriting source.
-    The exception is the project's OWN configured test / typecheck /
-    lint commands, which are your programs and write their own caches.
+    edits, stages, commits or leaves bytecode: `dead_code_ruff` reports
+    what it would remove instead of removing it, and mutation testing
+    cannot run at all because mutmut works by rewriting source. The
+    exception is the project's OWN configured test / typecheck / lint
+    commands, which are your programs and write their own caches.
 
     A check that could not run gets NO row: it is reported under
     not_measured with the reason, never as a passing check (#306).
