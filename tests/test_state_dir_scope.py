@@ -59,7 +59,7 @@ from kstrl.statedir import (
     state_dir_carve_out,
 )
 from kstrl.ui.plain import PlainUI
-from kstrl.verify import _diff_scope_details, check_dead_code, check_diff_scope
+from kstrl.verify import _diff_scope_details, check_dead_code_ruff, check_diff_scope
 from tests.helpers import astwalk
 from tests.test_loop import MockAgent
 
@@ -744,7 +744,7 @@ class TestPhase1KeepsSeeingTheStateDir:
     ) -> None:
         """The one path that could have committed it for the agent.
 
-        ``check_dead_code`` auto-commits ruff's fixes so the tree stays
+        ``check_dead_code_ruff`` auto-commits ruff's fixes so the tree stays
         clean for later checks. Under ``use_worktrees=False`` it runs
         with ``cwd`` at the PROJECT ROOT, so the ``git add -A`` it used
         to issue swept kstrl's own live journals onto the component
@@ -763,7 +763,7 @@ class TestPhase1KeepsSeeingTheStateDir:
         (repo / "src" / "app.py").write_text("import os\nVALUE = 1\n")
         (repo / "src" / "new.py").write_text("VALUE = 2\n")
 
-        check_dead_code(repo, "main", command=None, timeout=60)
+        check_dead_code_ruff(repo, timeout=60)
 
         committed = _git(repo, "show", "--name-only", "--format=", "HEAD").split()
         assert not any(f.startswith(".kstrl/") for f in committed), committed

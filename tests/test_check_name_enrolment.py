@@ -203,6 +203,8 @@ EXPECTED_CATEGORIES = {
     "bad_patterns": "verification",
     "self_critique": "verification",
     "dead_code": "verification",
+    # #335: the ruff half of the split dead-code gate.
+    "dead_code_ruff": "verification",
     "mutation_testing": "verification",
     "prd_stories": "verification",
     "verification": "verification",
@@ -659,6 +661,12 @@ class TestEveryCheckNameIsEnrolled:
         # name and cannot fail on one it cannot see. Measured on that
         # branch before the fix.
         assert "mutation_testing" in names, "check-name constant in the defining module"
+        # #335 split one dead-code row in two, and both names are now
+        # module constants in verify.py rather than repeated literals.
+        # Pinned beside mutation_testing for the same reason: the walk
+        # resolves module constants, so a rewrite to a function-local
+        # would take both names out of the census silently.
+        assert {"dead_code", "dead_code_ruff"} <= names, "both dead-code phases"
 
     def test_every_emitted_name_is_enrolled(self) -> None:
         """#315 emptied the grandfathered set, so this has no exceptions

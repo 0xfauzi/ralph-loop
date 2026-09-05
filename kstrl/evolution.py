@@ -423,6 +423,10 @@ _CATEGORY_BY_CHECK = {
     "bad_patterns": "verification",
     "self_critique": "verification",
     "dead_code": "verification",
+    # #335 split the fused dead-code row in two: `dead_code` stayed on
+    # the vulture-or-dead_code_command phase and this is the ruff
+    # F401/F811/F841 phase beside it.
+    "dead_code_ruff": "verification",
     "mutation_testing": "verification",
     "prd_stories": "verification",
     "verification": "verification",

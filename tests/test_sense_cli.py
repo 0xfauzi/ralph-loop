@@ -8,10 +8,13 @@ command through ``CliRunner`` and reads the ``--json`` document back.
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
+import pytest
 from click.testing import CliRunner, Result
 
 from kstrl.cli import cli
@@ -294,12 +297,78 @@ def test_sense_never_edits_stages_or_commits(tmp_path: Path) -> None:
     assert git("status", "--porcelain", cwd=root) == status_before
     assert "unrelated.txt" in status_before
     assert (root / "src" / "b.py").read_text() == b_before
-    # The dead-code sensor reported rather than removed. Its verdict is
-    # left open on purpose: whether vulture is installed in the running
-    # environment decides that, and this test is about the tree, not the
-    # verdict.
-    dead_code = _check(document, "dead_code")
-    assert "not removed" in dead_code["message"] or "Skipped" in dead_code["message"]
+    # What the two dead-code phases REPORTED is asserted in
+    # test_sense_reports_the_dead_code_phases_separately below, which
+    # needs ruff on PATH to have a measurement to read. This test is
+    # about the tree, so it stays unconditional.
+    assert document["checks"]
+
+
+@pytest.mark.skipif(shutil.which("ruff") is None, reason="needs ruff on PATH")
+def test_sense_reports_the_dead_code_phases_separately(tmp_path: Path) -> None:
+    """#335 end to end, on a command where one phase can measure and the
+    other cannot.
+
+    ``check_dead_code`` fused the ruff auto-fix and the vulture scan
+    into one row, so with vulture absent ``ks sense`` printed
+    ``dead_code  pass  ruff reports 1 auto-removable, not removed;
+    vulture not installed`` - and ``build_review_prompt`` handed the
+    same row to an adversarial reviewer as ``dead_code: PASS``. Omitting
+    the fused row would have thrown away the ruff measurement with it,
+    which is why the fix is a split and not an omission. Both halves are
+    asserted: the ruff row with its real message, and a reason for the
+    scan that did not happen.
+
+    ``shutil.which`` is patched for ``vulture`` ONLY, and delegates
+    everything else to the real one: the CLI runs in-process here, so a
+    blanket patch would take ruff and the operator's own commands down
+    with it.
+    """
+    root = _dead_code_repo(tmp_path)
+    real_which = shutil.which
+
+    def which(name: str, *args: Any, **kwargs: Any) -> str | None:
+        return None if name == "vulture" else real_which(name, *args, **kwargs)
+
+    with patch("shutil.which", side_effect=which):
+        result, document = _sense_json(root)
+
+    assert result.exit_code == 0, result.output
+    ruff_phase = _check(document, "dead_code_ruff")
+    assert ruff_phase["passed"] is True
+    assert "auto-removable, not removed" in ruff_phase["message"]
+    assert [c for c in document["checks"] if c["name"] == "dead_code"] == []
+    assert document["not_measured"] == [
+        {
+            "check": "dead_code",
+            "reason": "tool_missing",
+            "detail": (
+                "vulture is not on PATH and no [verify] dead_code_command is set, "
+                "so nothing scanned for dead code"
+            ),
+        }
+    ]
+    # Still a pass: a check that measured nothing neither passes nor
+    # fails, so the sidecar cannot become a gate by the back door.
+    assert document["passed"] is True
+
+
+@pytest.mark.skipif(shutil.which("ruff") is None, reason="needs ruff on PATH")
+def test_sense_table_names_the_dead_code_scan_it_did_not_run(tmp_path: Path) -> None:
+    """The terminal half. Most operators read the table, not the JSON."""
+    root = _dead_code_repo(tmp_path)
+    real_which = shutil.which
+
+    def which(name: str, *args: Any, **kwargs: Any) -> str | None:
+        return None if name == "vulture" else real_which(name, *args, **kwargs)
+
+    with patch("shutil.which", side_effect=which):
+        result = _invoke("--root", str(root), "--ui", "plain", "--no-color")
+
+    assert result.exit_code == 0, result.output
+    assert "dead_code  not measured" in result.output
+    assert "vulture is not on PATH" in result.output
+    assert "sense: PASS" in result.output
 
 
 def test_sense_leaves_no_bytecode_or_lint_cache(tmp_path: Path) -> None:
