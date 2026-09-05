@@ -87,8 +87,17 @@ EXPECTED_SPELLINGS: frozenset[tuple[str, str]] = frozenset(
         # Divergence's own reasons for a trip.
         ("kstrl/divergence.py", "concern"),
         ("kstrl/divergence.py", "criterion"),
-        # An autonomy demotion record, not a component failure.
-        ("kstrl/factory.py", "demotion"),
+        # An autonomy demotion record, not a component failure. It moved
+        # out of factory.py in #232, when the demotion-apply block became
+        # autonomy.apply_demotion; this row moving is the guard doing the
+        # job the comment above claims for it.
+        ("kstrl/autonomy.py", "demotion"),
+        # #232's two new demotion triggers, both inbox dedupe keys in the
+        # same family as pipeline's below. "calibration:<baseline ts>" is
+        # also the run id the compare command demotes under, since a
+        # comparison is not a factory run and has none of its own.
+        ("kstrl/calibration_ladder.py", "calibration"),
+        ("kstrl/factory.py", "health"),
         # Finding metadata: CWE and OWASP ids, and the keys a finding
         # serialises its own fields under.
         ("kstrl/findings.py", "adequacy"),
