@@ -29,6 +29,7 @@ optional.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -37,9 +38,18 @@ import pytest
 from kstrl.appendio import JOURNAL_REPAIR_EVENT
 from tests.helpers.journal import lose_the_newline, tear
 
+skip_as_root = pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0,
+    reason="root ignores the mode bits this test sets",
+)
+
 
 def lines_of(path: Path) -> list[bytes]:
     return path.read_bytes().split(b"\n")
+
+
+def repair_rows(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [e for e in entries if e.get("event") == JOURNAL_REPAIR_EVENT]
 
 
 class TestProgressLogSurvivesATornTail:
@@ -196,6 +206,106 @@ class TestProgressLogSurvivesATornTail:
 
         state, _source = load_run_state(tmp_path, run_id="r1")
         assert {cid: c.status for cid, c in state.components.items()} == {"c1": "completed"}
+
+
+class TestQueueJournalSurvivesATornTail:
+    """``Queue._journal``, read by ``ks queue show``.
+
+    No lock here either. Callers hold ``queue_lock`` by convention
+    around the transition this narrates, and ``_journal`` itself has
+    never taken one; adding one inside would nest a second lock under
+    the first for no measured gain.
+    """
+
+    def queue_at(self, tmp_path: Path) -> Any:
+        from kstrl.workqueue import Queue
+
+        return Queue(tmp_path / "queue")
+
+    def add(self, queue: Any, item_id: str) -> None:
+        from kstrl.workqueue import JournalEntry
+
+        queue._journal(
+            JournalEntry(
+                ts="2026-09-05T00:00:00Z",
+                item_id=item_id,
+                from_state="",
+                to_state="queued",
+            )
+        )
+
+    def test_the_transition_after_a_torn_fragment_survives(self, tmp_path: Path) -> None:
+        queue = self.queue_at(tmp_path)
+        self.add(queue, "a")
+        tear(queue.journal_path)
+        self.add(queue, "b")
+
+        assert [e.get("item_id") for e in queue.journal_entries()] == [
+            "a",
+            None,
+            "b",
+        ]
+
+    def test_a_transition_that_lost_its_newline_is_recovered(self, tmp_path: Path) -> None:
+        queue = self.queue_at(tmp_path)
+        self.add(queue, "a")
+        self.add(queue, "b")
+        lose_the_newline(queue.journal_path)
+        self.add(queue, "c")
+
+        assert [e.get("item_id") for e in queue.journal_entries() if e.get("item_id")] == [
+            "a",
+            "b",
+            "c",
+        ]
+
+    def test_the_repair_row_carries_no_item_id(self, tmp_path: Path) -> None:
+        """So a per-item history never shows it.
+
+        ``ks queue show <id>`` filters on ``item_id``, and a repair row
+        that borrowed the id of whichever item happened to be next
+        would appear in that item's history as something that happened
+        to it. The whole-journal read still returns it, which is where
+        an operator looking for the incident would go.
+        """
+        queue = self.queue_at(tmp_path)
+        self.add(queue, "a")
+        tear(queue.journal_path)
+        self.add(queue, "b")
+
+        assert repair_rows(queue.journal_entries())
+        assert [e.get("item_id") for e in queue.journal_entries("b")] == ["b"]
+        assert queue.journal_entries("a") == queue.journal_entries("a")
+
+    def test_an_untorn_journal_is_appended_to_byte_for_byte(self, tmp_path: Path) -> None:
+        queue = self.queue_at(tmp_path)
+        self.add(queue, "a")
+        before = queue.journal_path.read_bytes()
+        self.add(queue, "b")
+        after = queue.journal_path.read_bytes()
+
+        assert after.startswith(before)
+        assert b"\n\n" not in after
+        assert JOURNAL_REPAIR_EVENT.encode() not in after
+
+    @skip_as_root
+    def test_a_journal_that_cannot_be_written_still_warns(self, tmp_path: Path) -> None:
+        """``_journal`` swallowed ``OSError`` before this change and still does.
+
+        The directory is the truth and the journal is the narration, so
+        a failed append must not undo a rename that already happened.
+        The ``"a+b"`` open widens what can fail (a journal this process
+        cannot READ now raises where it used to be appended to blind),
+        which is why this is pinned rather than assumed.
+        """
+        queue = self.queue_at(tmp_path)
+        self.add(queue, "a")
+        queue.journal_path.chmod(0o200)
+        try:
+            with pytest.warns(RuntimeWarning, match="journal append failed"):
+                self.add(queue, "b")
+        finally:
+            queue.journal_path.chmod(0o600)
 
 
 class TestJsonlSinkSurvivesATornTail:

@@ -74,6 +74,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import IO, Any
 
+from kstrl.appendio import JOURNAL_REPAIR_EVENT, append_records
 from kstrl.atomicio import atomic_write_text
 from kstrl.statedir import (
     CONTROL_PAUSE,
@@ -582,6 +583,19 @@ class JournalEntry:
         }
 
 
+def _journal_repair_entry() -> dict[str, Any]:
+    """The row :meth:`Queue._journal` writes on finding a torn tail.
+
+    Deliberately NOT a :class:`JournalEntry`: it is not a transition,
+    it has no item and no states, and giving it the transition shape
+    would make it one to every reader that walks the journal. It
+    carries ``ts`` and ``event`` and nothing else, so
+    ``journal_entries(item_id)`` filters it out by the same
+    ``item_id`` check it already applies.
+    """
+    return {"ts": _iso(_utc_now()), "event": JOURNAL_REPAIR_EVENT}
+
+
 def atomic_write(target: Path, content: str) -> None:
     """Write ``content`` to ``target`` atomically, creating its directory.
 
@@ -852,12 +866,38 @@ class Queue:
         the narration. Losing a line is visible (journal replay vs a
         directory scan disagree); rolling back a committed rename would
         be silent.
+
+        #331: through ``appendio``, which repairs an unterminated tail
+        before appending onto it. Without that, a crash mid-write cost
+        the NEXT transition as well as the torn one, measured through
+        :meth:`journal_entries`: ``['a']`` where a and b were both
+        recorded. The ``"a+b"`` open widens what can fail - a journal
+        this process can write but not read is refused rather than
+        appended to blind - and the ``OSError`` handler below is what
+        that widening lands in, unchanged.
+
+        The repair row carries NO ``item_id``. Measured: that keeps it
+        out of ``journal_entries(item_id)``, which is what ``ks queue
+        show <id>`` renders, so a repair does not appear in one item's
+        history as something that happened to it. The whole-journal
+        read still returns it, which is where an operator looking for
+        the incident would go.
+
+        No lock. The callers hold ``queue_lock`` around the transition
+        this narrates, and this method has never taken one; a lock here
+        would nest a second under the first for no measured gain, and
+        the journal is one file with one writer (#330's argument for
+        the descriptor being its own lock does not apply either, because
+        the exclusion the callers already hold covers it).
         """
         self.path.mkdir(parents=True, exist_ok=True)
         line = json.dumps(entry.to_dict(), ensure_ascii=False)
         try:
-            with open(self.journal_path, "a", encoding="utf-8") as handle:
-                handle.write(line + "\n")
+            append_records(
+                self.journal_path,
+                line + "\n",
+                repair=json.dumps(_journal_repair_entry(), ensure_ascii=False) + "\n",
+            )
         except OSError as exc:
             warnings.warn(
                 f"queue: journal append failed ({exc}); the transition itself succeeded",

@@ -114,7 +114,7 @@ EXPECTED_READ_SPELLINGS: dict[str, int] = {
     "tui/session.py": 1,
     "tui/tail.py": 2,
     "verify.py": 4,
-    "workqueue.py": 7,
+    "workqueue.py": 6,
 }
 
 
@@ -208,7 +208,6 @@ EXPECTED_CLEARED_READS: tuple[str, ...] = (
     "verify.py progress_path.read_text(encoding='utf-8')",
     "workqueue.py meta_path.read_text(encoding='utf-8')",
     "workqueue.py open(lock_path, 'a+', encoding='utf-8')",
-    "workqueue.py open(self.journal_path, 'a', encoding='utf-8')",
     "workqueue.py self.journal_path.read_text(encoding='utf-8')",
     "workqueue.py self.pause_path.read_text(encoding='utf-8')",
     "workqueue.py self.spec_path(item).read_text(encoding='utf-8')",
