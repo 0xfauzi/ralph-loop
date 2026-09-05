@@ -319,7 +319,10 @@ run reaches the journal only). Opt-in via
 `[autonomy] enabled` (default false) because L1 is STRICTER than today's
 defaults - it forces the merge gate on. R8.4 will enrich the demotion
 triggers with health-metric breaches; the `HEALTH_BREACH` trigger already
-exists for it to fire.
+exists for it to fire, and since
+[#232](https://github.com/0xfauzi/kstrl/issues/232) so do the inbox kind,
+the config key and the call site, so R8.4 supplies `kstrl/health.py` and
+nothing else.
 
 **Review corrections (PR #174).** Seven findings, five of them P1, all
 closed before merge. Four were substantive holes rather than polish:
@@ -512,6 +515,28 @@ unmeasured EWMA limit must not demote on task-mix noise. The trigger
 R8.2 pre-wired stays dormant until then; this makes the standing
 "no assumed thresholds" rule (top of this doc) an explicit gate between
 the two stages rather than an implied one.
+
+**The seam landed ahead of the emitter**
+([#232](https://github.com/0xfauzi/kstrl/issues/232)). `ItemKind.HEALTH_BREACH`,
+the `[autonomy] demote_on_health_breach` key (default false) and the call site
+in `factory._record_health_breaches` are in place. They read
+`kstrl.health.health_breaches(root_dir)` when that module exists and are inert
+while it does not, so stage 2 is this module plus the recorded replay rather
+than a second round of wiring. `ks autonomy replay` stays the advisory mode for
+these rules: it reports what would have fired and never mutates ladder state, so
+a candidate rule set is scored against real history before it is allowed to
+demote anything.
+
+**False-alarm arithmetic, stated before the rule set is chosen.** One point
+beyond three sigma fires by chance about once in 370 observations; all four
+Western Electric rules together, about once in 92
+([reference](https://handwiki.org/wiki/Western_Electric_rules)). With
+`demote_on_health_breach = true` a false alarm costs one autonomy level plus
+`DEMOTION_COOLDOWN_RUNS = 10` decisive runs of locked re-promotion. #232 also
+suppresses a health demotion while a cool-down is running, so a persistent false
+trend cannot walk the ladder to L1 one run at a time; that bounds the damage, it
+does not excuse a rule set nobody replayed. Pick the rules with these two
+numbers in front of you.
 
 **Why.** Demotion triggers need trend detection over run metrics, and the
 operator needs an evidence surface. The journal and `experiments.tsv` record

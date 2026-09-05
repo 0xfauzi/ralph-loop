@@ -575,6 +575,14 @@ KEY_DESCRIPTIONS: dict[tuple[str, str], str] = {
     ("policy", "deploy"): "reserved for the R8.7 release gate; stored + hashed",
     ("autonomy", "enabled"): "derive run permissions from the ladder level (opt-in)",
     ("autonomy", "max_level"): "hard ceiling: never run above this level (1-4)",
+    ("autonomy", "demote_on_calibration_regression"): (
+        "demote one level when `calibration compare` finds a regression "
+        "(an inbox item is opened either way)"
+    ),
+    ("autonomy", "demote_on_health_breach"): (
+        "demote one level on an R8.4 health control-limit breach "
+        "(an inbox item is opened either way)"
+    ),
     ("inbox", "enabled"): "record exceptions awaiting a human decision",
     ("inbox", "open_item_cap"): "open items after which queue intake pauses; 0 = unbounded",
     ("inbox", "snooze_hours"): "default snooze TTL in hours; snoozed items return",

@@ -11,6 +11,30 @@ stage, runtime feedback, and an earned-autonomy ladder). See
 [`docs/dark-factory-roadmap.md`](docs/dark-factory-roadmap.md) and the
 [R8 milestone](https://github.com/0xfauzi/kstrl/milestone/1).
 
+### Added
+
+- Two of the autonomy ladder's five declared demotion triggers now fire.
+  `DemotionTrigger` has listed `CALIBRATION_REGRESSION` and
+  `HEALTH_BREACH` since R8.2 and neither had an emitter, so a factory
+  getting quietly worse without breaching the policy envelope kept its
+  level, and a calibration regression a human had already measured
+  changed nothing. `python -m kstrl.calibration compare` takes a
+  `--root` and, when the ladder is enabled, opens a `calibration_drift`
+  inbox item on a regression; `[autonomy] demote_on_calibration_regression`
+  (env `KSTRL_AUTONOMY_DEMOTE_ON_CALIBRATION`) additionally revokes one
+  level, once per new baseline however often the comparison is re-run.
+  With the ladder off it says so on stdout rather than doing nothing
+  quietly. The R8.4 half is the seam only: a new `health_breach` inbox
+  kind and `[autonomy] demote_on_health_breach` (env
+  `KSTRL_AUTONOMY_DEMOTE_ON_HEALTH`), inert until `kstrl/health.py`
+  exists and suppressed while a cool-down is running. Both switches
+  default off, because every threshold in the ladder is still an
+  unmeasured placeholder. Every automatic demotion now goes through one
+  `autonomy.apply_demotion`, so the state save, the journal entry, the
+  run event and the inbox notice cannot drift apart per trigger.
+  Compare's exit codes are unchanged, except that a `kstrl.toml` that
+  will not load now exits 2 instead of being read as "ladder off".
+
 ### Fixed
 
 - `kstrl.toml` and the `KSTRL_*` environment are now resolved once, at

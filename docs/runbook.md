@@ -190,6 +190,8 @@ To stop it failing components, set `[divergence] mode = "advisory"` (the default
 
 **Resolve**: either revert the prompt change or update the fixture's `must_detect` if the change deliberately narrowed scope. Do not just unskip the test: a calibration regression is the signal you wrote the system to produce.
 
+**With the autonomy ladder on**: `python -m kstrl.calibration compare <old> <new> --root <repo>` also opens a `calibration_drift` inbox item, deduped on the new baseline's timestamp so re-reading the report does not add rows. With `[autonomy] demote_on_calibration_regression = true` it additionally demotes one level, trigger `calibration_regression`, once per new baseline however often the comparison is re-run. With the ladder off it prints `autonomy ladder disabled; regression recorded in the report only`, so the absence of an item is stated rather than silent. The exit code is unchanged either way (0 pass, 1 regression); 2 now also covers a `kstrl.toml` that will not load, because "the config is broken" must not read as "the ladder is off".
+
 ## The dashboard (TUI)
 
 `ks factory` on a terminal runs the embedded dashboard by default

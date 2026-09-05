@@ -298,6 +298,9 @@ flag_assertionless_tests = true    # report tests that assert nothing
 [autonomy]
 enabled = false
 max_level = 4                      # hard local ceiling: refuse to run above this level
+# Advisory first: an inbox item always; demotion only when true.
+demote_on_calibration_regression = false
+demote_on_health_breach = false
 
 # Phase 1 approved fixtures (R7.2): PRD-defined input/output pairs run as an
 # oracle independent of agent-authored tests. Opt-in: fixtures execute
