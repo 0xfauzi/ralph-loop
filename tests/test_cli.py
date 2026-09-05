@@ -615,6 +615,39 @@ def _spec_at(root: Path) -> Path:
     return spec
 
 
+def _invoke_spec_command(
+    command: str,
+    root: Path,
+    *extra: str,
+    project_name: str = "test",
+) -> Result:
+    """Drive `decompose` or `factory` down the --spec path.
+
+    One copy of the argv for the same reason `_halting_decompose` is
+    one copy: two classes assert about what the CLI hands
+    `decompose_spec`, and a second flag list would let them drift about
+    what invoking the command means.
+    """
+    return CliRunner().invoke(
+        cli,
+        [
+            command,
+            "--spec",
+            str(_spec_at(root)),
+            "--project-name",
+            project_name,
+            "--root",
+            str(root),
+            "--agent-cmd",
+            "true",
+            "--ui",
+            "plain",
+            "--no-color",
+            *extra,
+        ],
+    )
+
+
 class TestBaseBranchFlagDefaults:
     """#259: --base-branch defaults to detection, not the literal `main`.
 
@@ -622,32 +655,12 @@ class TestBaseBranchFlagDefaults:
     literal default without even the detection call.
     """
 
-    def _invoke(self, command: str, root: Path, *extra: str) -> Result:
-        return CliRunner().invoke(
-            cli,
-            [
-                command,
-                "--spec",
-                str(_spec_at(root)),
-                "--project-name",
-                "test",
-                "--root",
-                str(root),
-                "--agent-cmd",
-                "true",
-                "--ui",
-                "plain",
-                "--no-color",
-                *extra,
-            ],
-        )
-
     def test_decompose_detects_when_flag_is_absent(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         seen = _halting_decompose(monkeypatch)
         root = _repo_on(tmp_path, "master")
-        assert self._invoke("decompose", root).exit_code == 2
+        assert _invoke_spec_command("decompose", root).exit_code == 2
         assert seen["base_branch"] == "master"
 
     def test_factory_detects_when_flag_is_absent(
@@ -655,7 +668,7 @@ class TestBaseBranchFlagDefaults:
     ) -> None:
         seen = _halting_decompose(monkeypatch)
         root = _repo_on(tmp_path, "master")
-        assert self._invoke("factory", root).exit_code == 2
+        assert _invoke_spec_command("factory", root).exit_code == 2
         assert seen["base_branch"] == "master"
 
     def test_explicit_flag_still_wins(
@@ -663,7 +676,7 @@ class TestBaseBranchFlagDefaults:
     ) -> None:
         seen = _halting_decompose(monkeypatch)
         root = _repo_on(tmp_path, "master")
-        assert self._invoke("factory", root, "--base-branch", "trunk").exit_code == 2
+        assert _invoke_spec_command("factory", root, "--base-branch", "trunk").exit_code == 2
         assert seen["base_branch"] == "trunk"
 
 
@@ -679,30 +692,6 @@ class TestBlankProjectName:
     `factory` had a body check that rejected `""` and passed `"   "`.
     """
 
-    def _invoke(
-        self,
-        command: str,
-        root: Path,
-        project_name: str,
-    ) -> Result:
-        return CliRunner().invoke(
-            cli,
-            [
-                command,
-                "--spec",
-                str(_spec_at(root)),
-                "--project-name",
-                project_name,
-                "--root",
-                str(root),
-                "--agent-cmd",
-                "true",
-                "--ui",
-                "plain",
-                "--no-color",
-            ],
-        )
-
     @pytest.mark.parametrize("command", ["decompose", "factory"])
     @pytest.mark.parametrize("project_name", ["", "   ", "\t"])
     def test_a_blank_name_exits_two_and_names_the_option(
@@ -715,7 +704,7 @@ class TestBlankProjectName:
         seen = _halting_decompose(monkeypatch)
         root = _repo_on(tmp_path, "master")
 
-        result = self._invoke(command, root, project_name)
+        result = _invoke_spec_command(command, root, project_name=project_name)
 
         assert result.exit_code == 2
         assert "--project-name" in result.output
@@ -733,5 +722,5 @@ class TestBlankProjectName:
         seen = _halting_decompose(monkeypatch)
         root = _repo_on(tmp_path, "master")
 
-        assert self._invoke("decompose", root, " x ").exit_code == 2
+        assert _invoke_spec_command("decompose", root, project_name=" x ").exit_code == 2
         assert seen["project_name"] == " x "

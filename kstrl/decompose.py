@@ -1692,9 +1692,9 @@ def _excluded_projects(
     by_project: dict[str, list[str]] = {}
     last_seen: dict[str, str] = {}
     for entry in audits:
-        project = entry_str(entry, "project")
         if _audit_bucket(entry, project_name) != "other":
             continue
+        project = entry_str(entry, "project")
         by_project.setdefault(project, []).append(entry_str(entry, "spec_file"))
         # Only a timestamp that exists replaces one that exists. Round 2
         # of review: assigning unconditionally let one trailing entry
