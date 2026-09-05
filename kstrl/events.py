@@ -36,11 +36,23 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, ClassVar, Final, Protocol, TextIO
+from typing import IO, Any, ClassVar, Final, Protocol
 
+from kstrl.appendio import JOURNAL_REPAIR_EVENT, append_terminated, open_for_append
 from kstrl.observability import ProgressLog
 
 SCHEMA_VERSION: Final = 2
+
+#: What the ``detail`` of a :class:`JournalRepaired` row says. One
+#: sentence, spelled once, because the same fact is stated by the
+#: evolution journal's own repair row and the two must not drift into
+#: two different accounts of the same incident.
+_REPAIR_DETAIL: Final = (
+    "the preceding line was not newline-terminated when this sink "
+    "opened the file, so a write was interrupted. It is either a torn "
+    "fragment that was never readable or a complete event that lost "
+    "only its newline; both are on their own line now."
+)
 
 _ENVELOPE_FIELDS: Final = frozenset({"ts", "run_id", "component", "source", "seq"})
 
@@ -669,6 +681,30 @@ class AutonomyLevelApplied(Event):
 
 
 @dataclass(frozen=True, kw_only=True)
+class JournalRepaired(Event):
+    """#331: this file's tail was not newline-terminated when a sink
+    opened it, so a crash interrupted a write, and a newline was written
+    before this event to stop the unterminated tail swallowing it.
+
+    A REGISTERED event rather than a raw appended line, which is the
+    whole reason this class exists. A raw line decodes to
+    ``UnknownEvent`` and is counted in ``RunState.unknown_events``, and
+    "this build does not understand it" is false for a row this build
+    wrote deliberately. As a registered type it is understood and
+    inert: ``reducer.apply`` falls through every isinstance branch for
+    it and advances only the clock, so no component, phase or count
+    moves.
+
+    The envelope is empty (``run_id`` "", ``source`` at its default).
+    The sink sits BELOW the bus that stamps those fields, and it repairs
+    at open time, before the run has told it anything.
+    """
+
+    type: ClassVar[str] = JOURNAL_REPAIR_EVENT
+    detail: str = ""
+
+
+@dataclass(frozen=True, kw_only=True)
 class Log(Event):
     """The escape hatch for imperative narration (the old UI protocol).
 
@@ -837,22 +873,66 @@ class CallbackSink:
 
 class JsonlSink:
     """Append-only JSONL writer; one line per event, flushed, guarded by
-    a lock so heartbeat threads can share it with the main thread."""
+    a lock so heartbeat threads can share it with the main thread.
+
+    #331: the handle is opened ``"a+b"`` and the tail is probed ONCE,
+    at the first emit. Without that probe a crash mid-write cost the
+    next event as well as the torn one, measured through ``read_events``
+    and ``reducer.fold``: ``['factory_started']`` where two events were
+    written, and no components at all in the folded state.
+
+    Once per sink, not once per event, is the reason
+    ``handle_ends_without_newline`` takes a HANDLE. This sink holds one
+    open for a whole run; re-probing would pay a seek and a read on
+    every event and would write a second repair row for a tear it had
+    already repaired.
+
+    No lock on the file. One process owns each of these files: the
+    orchestrator owns ``events.jsonl`` and each worker owns its own
+    ``engineer.jsonl``. The threading lock below is about threads
+    sharing this object, which is a different question and predates
+    this change.
+    """
 
     def __init__(self, path: Path, *, mkdir: bool = True) -> None:
         self.path = path
         if mkdir:
             path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
-        self._fh: TextIO | None = None
+        self._fh: IO[bytes] | None = None
+        self._repaired = False
 
     def emit(self, event: Event) -> None:
-        line = event.to_json_line()
+        line = event.to_json_line() + "\n"
         with self._lock:
             if self._fh is None:
-                self._fh = open(self.path, "a", encoding="utf-8")
-            self._fh.write(line + "\n")
+                # First emit: open, probe and write in one call, so the
+                # repair row and the event it protects land in ONE
+                # write and nothing can get between them.
+                self._fh = open_for_append(self.path)
+                self._repaired = append_terminated(
+                    self._fh,
+                    line,
+                    repair=JournalRepaired(detail=_REPAIR_DETAIL).to_json_line() + "\n",
+                )
+            else:
+                # Every later emit writes straight through. The probe is
+                # not repeated: this handle has been at the end of the
+                # file since the first emit, so nothing can have torn it
+                # without this process being dead.
+                self._fh.write(line.encode("utf-8"))
             self._fh.flush()
+
+    @property
+    def repaired(self) -> bool:
+        """Whether this sink found an unterminated tail when it opened.
+
+        The live signal. The durable one is the row in the file, which
+        is what an operator greps months later; this is for whoever is
+        watching now, and is False until the first emit because that is
+        when the file is opened.
+        """
+        return self._repaired
 
     def close(self) -> None:
         with self._lock:

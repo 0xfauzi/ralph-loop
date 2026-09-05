@@ -28,11 +28,18 @@ optional.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from kstrl.appendio import JOURNAL_REPAIR_EVENT
 from tests.helpers.journal import lose_the_newline, tear
+
+
+def lines_of(path: Path) -> list[bytes]:
+    return path.read_bytes().split(b"\n")
 
 
 class TestProgressLogSurvivesATornTail:
@@ -189,3 +196,161 @@ class TestProgressLogSurvivesATornTail:
 
         state, _source = load_run_state(tmp_path, run_id="r1")
         assert {cid: c.status for cid, c in state.components.items()} == {"c1": "completed"}
+
+
+class TestJsonlSinkSurvivesATornTail:
+    """``events.JsonlSink``, the v2 event log the reducer and TUI read.
+
+    The only appender of the six that holds its handle open across a
+    whole run, which is what ``handle_ends_without_newline`` taking a
+    HANDLE was designed for: it probes ONCE, at the first emit, and
+    every later emit writes bytes straight through.
+
+    A typed ``JournalRepaired`` event rather than a raw line, because a
+    raw line decodes to ``UnknownEvent`` and "unknown" is false for a
+    row this build wrote deliberately. ``reducer.apply`` falls through
+    every isinstance branch for it and touches only the clock.
+    """
+
+    def sink_at(self, path: Path) -> Any:
+        from kstrl.events import JsonlSink
+
+        return JsonlSink(path)
+
+    def emit(self, sink: Any, component: str) -> None:
+        from kstrl.events import ComponentStarted
+
+        sink.emit(ComponentStarted(component=component))
+
+    def names_in(self, path: Path) -> list[str]:
+        from kstrl.events import read_events
+
+        return [e.type for e in read_events(path)]
+
+    def test_the_event_after_a_torn_fragment_survives(self, tmp_path: Path) -> None:
+        path = tmp_path / "events.jsonl"
+        sink = self.sink_at(path)
+        self.emit(sink, "c1")
+        sink.close()
+        tear(path)
+
+        reopened = self.sink_at(path)
+        self.emit(reopened, "c2")
+        reopened.close()
+
+        assert self.names_in(path) == [
+            "component_started",
+            JOURNAL_REPAIR_EVENT,
+            "component_started",
+        ]
+
+    def test_an_event_that_lost_its_newline_is_recovered(self, tmp_path: Path) -> None:
+        path = tmp_path / "events.jsonl"
+        sink = self.sink_at(path)
+        self.emit(sink, "c1")
+        self.emit(sink, "c2")
+        sink.close()
+        lose_the_newline(path)
+
+        reopened = self.sink_at(path)
+        self.emit(reopened, "c3")
+        reopened.close()
+
+        assert self.names_in(path).count("component_started") == 3
+
+    def test_the_probe_happens_once_per_sink_not_once_per_event(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """The reason the handle-taking form exists.
+
+        A sink that re-probed would pay a seek and a read on every
+        event in the run, and would write a second repair row for a
+        tear it had already repaired. Counted by shadowing the module's
+        ``open``, the same way the write-boundary test does.
+        """
+        import kstrl.appendio as appendio_mod
+        from kstrl.events import JsonlSink
+
+        path = tmp_path / "events.jsonl"
+        opens: list[str] = []
+        real_open = open
+
+        def counting_open(file: Any, mode: str = "r", *args: Any, **kwargs: Any) -> Any:
+            if isinstance(file, (str, Path)) and Path(file) == path:
+                opens.append(mode)
+            return real_open(file, mode, *args, **kwargs)
+
+        path.write_bytes(b'{"event":"x"')  # a torn tail waiting for the first emit
+
+        with pytest.MonkeyPatch.context() as patched:
+            patched.setattr(appendio_mod, "open", counting_open, raising=False)
+            sink = JsonlSink(path)
+            self.emit(sink, "c1")
+            self.emit(sink, "c2")
+            self.emit(sink, "c3")
+            sink.close()
+
+        assert opens == ["a+b"]
+        assert self.names_in(path).count(JOURNAL_REPAIR_EVENT) == 1
+
+    def test_the_repair_row_is_not_an_unknown_event(self, tmp_path: Path) -> None:
+        """``fold`` counts unknown events, and this is not one of them.
+
+        A raw appended line would decode to ``UnknownEvent`` and show
+        up in that count as an event this build did not recognise,
+        which is the wrong thing to tell an operator about a row this
+        build wrote on purpose.
+        """
+        from kstrl.events import read_events
+        from kstrl.reducer import fold
+
+        path = tmp_path / "events.jsonl"
+        sink = self.sink_at(path)
+        self.emit(sink, "c1")
+        sink.close()
+        tear(path)
+        reopened = self.sink_at(path)
+        self.emit(reopened, "c2")
+        reopened.close()
+
+        state = fold(read_events(path))
+        assert state.unknown_events == 0
+        assert set(state.components) == {"c1", "c2"}
+
+    def test_an_untorn_log_is_appended_to_byte_for_byte(self, tmp_path: Path) -> None:
+        path = tmp_path / "events.jsonl"
+        sink = self.sink_at(path)
+        self.emit(sink, "c1")
+        before = path.read_bytes()
+        self.emit(sink, "c2")
+        after = path.read_bytes()
+        sink.close()
+
+        assert after.startswith(before)
+        assert b"\n\n" not in after
+        assert JOURNAL_REPAIR_EVENT.encode() not in after
+
+    def test_every_line_is_still_one_json_object(self, tmp_path: Path) -> None:
+        """The format contract the reducer rests on, checked on bytes.
+
+        Binary writes replaced text writes here, so a line that grew a
+        stray ``\\r`` or lost its encoding would still pass the reader
+        tests above on this platform.
+        """
+        path = tmp_path / "events.jsonl"
+        sink = self.sink_at(path)
+        self.emit(sink, "c1")
+        sink.close()
+        tear(path)
+        reopened = self.sink_at(path)
+        self.emit(reopened, "c2")
+        reopened.close()
+
+        payload = [line for line in lines_of(path) if line.strip()]
+        assert len(payload) == 4
+        # Index 1 is the torn fragment, isolated on a line of its own
+        # and not parseable by anything. That is the point: it was never
+        # a record. The other three are.
+        for index in (0, 2, 3):
+            assert isinstance(json.loads(payload[index].decode("utf-8")), dict)
