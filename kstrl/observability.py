@@ -12,6 +12,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
+from kstrl.appendio import JOURNAL_REPAIR_EVENT, append_records
+
 
 class ProgressSink(Protocol):
     """Observer of progress-log events (R7.4).
@@ -124,13 +126,29 @@ class ProgressLog:
             event["component"] = component_id
         if data:
             event["data"] = data
-        # utf-8 pinned to match the reader below. ``json.dumps`` leaves
-        # ensure_ascii at its default, so what lands here is pure ASCII
-        # today and the locale cannot corrupt it; naming the encoding is
-        # what keeps that true if a field ever carries a raw string
-        # (#291's two-sided contract, #320's sweep).
-        with open(self._path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(event) + "\n")
+        # #331: through appendio, which repairs an unterminated tail
+        # before appending onto it. Without that, a crash mid-write
+        # costs THIS event as well as the torn one, measured through
+        # the reader below: ``['alpha']`` where alpha and beta were
+        # written, and ``reducer.load_run_state`` leaving a component
+        # ``running`` when the lost row was its ``component_completed``.
+        #
+        # utf-8 is pinned inside the helper, matching the reader below.
+        # ``json.dumps`` leaves ensure_ascii at its default, so what
+        # lands here is pure ASCII today and the locale cannot corrupt
+        # it (#291's two-sided contract, #320's sweep).
+        repaired = append_records(
+            self._path,
+            json.dumps(event) + "\n",
+            repair=json.dumps(self._repair_event()) + "\n",
+        )
+        if repaired:
+            self._warn(
+                f"progress log {self._path} did not end in a newline, so a "
+                f"crash tore it. A newline and a {JOURNAL_REPAIR_EVENT} row "
+                f"were written before this event, so the unterminated tail "
+                f"cannot swallow the events after it."
+            )
         # R7.4: sink fan-out AFTER the journal write - the JSONL line is
         # the source of truth and must land even if every sink dies. A
         # sink exception warns and never propagates into the run.
@@ -141,6 +159,36 @@ class ProgressLog:
                 self._warn(
                     f"progress sink {type(sink).__name__} failed on {event_type}: {exc} (non-fatal)"
                 )
+
+    def _repair_event(self) -> dict[str, Any]:
+        """The row :meth:`emit` writes when it finds an unterminated tail.
+
+        Progress-log shaped, so the file stays one schema: ``ts``,
+        ``event`` and the run it was found during. Carries NO
+        ``component``, which is what keeps it out of every aggregate:
+        ``summarize_events`` records the timestamp and skips any event
+        without one, so a repair row cannot invent activity for a
+        component that did nothing. ``latest_run_id`` is unaffected
+        because the row names the run that is already the latest.
+
+        It does NOT go to the sinks. A sink is an observer of the RUN,
+        and this row is about the FILE; a Linear sink that received it
+        would post about a torn journal onto whichever component's
+        issue happened to be open.
+        """
+        event: dict[str, Any] = {"ts": _iso_now(), "event": JOURNAL_REPAIR_EVENT}
+        if self._run_id:
+            event["run_id"] = self._run_id
+        event["data"] = {
+            "detail": (
+                "the preceding line was not newline-terminated when this "
+                "event was written, so a write was interrupted. It is "
+                "either a torn fragment that was never readable or a "
+                "complete event that lost only its newline; both are on "
+                "their own line now."
+            )
+        }
+        return event
 
     def factory_started(self, project_name: str, component_count: int) -> None:
         self.emit(
