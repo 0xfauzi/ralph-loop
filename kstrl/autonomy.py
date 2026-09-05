@@ -632,15 +632,36 @@ class AutonomyConfig:
     #: local ceiling for operators who want the ladder's bookkeeping
     #: without its upper levels.
     max_level: int = int(AutonomyLevel.L4_DEPLOY)
+    #: Demote one level when ``python -m kstrl.calibration compare`` finds
+    #: a regression. Advisory first (#232): a regression always opens a
+    #: ``calibration_drift`` inbox item while the ladder is enabled, and
+    #: revokes a level only when this is true. Off by default because
+    #: every ladder threshold is still an unmeasured placeholder.
+    demote_on_calibration_regression: bool = False
+    #: Demote one level on an R8.4 health control-limit breach. Advisory
+    #: first for the same reason, and additionally suppressed while a
+    #: cool-down is running: a breach is a windowed trend, so it persists
+    #: across runs and would otherwise cost a level per run.
+    demote_on_health_breach: bool = False
 
     @classmethod
     def from_env(cls) -> AutonomyConfig:
         defaults = cls()
         enabled_raw = os.environ.get("KSTRL_AUTONOMY_ENABLED")
         max_raw = os.environ.get("KSTRL_AUTONOMY_MAX_LEVEL")
+        calibration_raw = os.environ.get("KSTRL_AUTONOMY_DEMOTE_ON_CALIBRATION")
+        health_raw = os.environ.get("KSTRL_AUTONOMY_DEMOTE_ON_HEALTH")
         return cls(
             enabled=defaults.enabled if enabled_raw is None else enabled_raw == "1",
             max_level=defaults.max_level if max_raw is None else int(max_raw),
+            demote_on_calibration_regression=(
+                defaults.demote_on_calibration_regression
+                if calibration_raw is None
+                else calibration_raw == "1"
+            ),
+            demote_on_health_breach=(
+                defaults.demote_on_health_breach if health_raw is None else health_raw == "1"
+            ),
         )
 
     @classmethod
@@ -654,11 +675,30 @@ class AutonomyConfig:
         defaults = cls()
         enabled = bool(section["enabled"]) if "enabled" in section else defaults.enabled
         max_level = int(section["max_level"]) if "max_level" in section else defaults.max_level
+        demote_calibration = (
+            bool(section["demote_on_calibration_regression"])
+            if "demote_on_calibration_regression" in section
+            else defaults.demote_on_calibration_regression
+        )
+        demote_health = (
+            bool(section["demote_on_health_breach"])
+            if "demote_on_health_breach" in section
+            else defaults.demote_on_health_breach
+        )
         if "KSTRL_AUTONOMY_ENABLED" in os.environ:
             enabled = os.environ["KSTRL_AUTONOMY_ENABLED"] == "1"
         if "KSTRL_AUTONOMY_MAX_LEVEL" in os.environ:
             max_level = int(os.environ["KSTRL_AUTONOMY_MAX_LEVEL"])
-        return cls(enabled=enabled, max_level=max_level)
+        if "KSTRL_AUTONOMY_DEMOTE_ON_CALIBRATION" in os.environ:
+            demote_calibration = os.environ["KSTRL_AUTONOMY_DEMOTE_ON_CALIBRATION"] == "1"
+        if "KSTRL_AUTONOMY_DEMOTE_ON_HEALTH" in os.environ:
+            demote_health = os.environ["KSTRL_AUTONOMY_DEMOTE_ON_HEALTH"] == "1"
+        return cls(
+            enabled=enabled,
+            max_level=max_level,
+            demote_on_calibration_regression=demote_calibration,
+            demote_on_health_breach=demote_health,
+        )
 
     def __post_init__(self) -> None:
         valid = {int(level) for level in AutonomyLevel}
