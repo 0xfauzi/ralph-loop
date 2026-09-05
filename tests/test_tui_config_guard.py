@@ -78,7 +78,10 @@ EXPECTED_RUNTIMEERROR_SPELLINGS: dict[str, int] = {
     "inbox.py": 1,
     "intake_github.py": 1,
     "pr.py": 4,  # no subclass: four bare raises
-    "serve.py": 1,
+    # One bare raise, plus six from the R10.7 open-PR bound (#228):
+    # count_open_kstrl_prs converts each of its five failure shapes into
+    # a RuntimeError, and check_open_pr_bound catches that one type.
+    "serve.py": 7,
     "statedir.py": 2,  # two subclasses
     "workqueue.py": 1,
 }

@@ -347,11 +347,13 @@ class TestTheWalkAgainstTheRealPackage:
         assert found.seen == ("procgroup.py os.getpgid",)
 
     def test_the_spawn_sweep_reproduces_the_timeout_audit_count(self) -> None:
-        """68 spawn sites, the same number the private resolver in
+        """69 spawn sites: the 68 the private resolver in
         ``tests/test_timeout_enforcement.py`` found before it was
-        migrated, plus ten expressions this walk will not pretend to have
-        decided. Ten rows is the price of the rule, and it is what a guard
-        pins instead of being silently narrower than it sounds."""
+        migrated, plus one - ``serve.py`` gained the ``gh pr list`` behind
+        the R10.7 open-PR bound (#228). Plus ten expressions this walk
+        will not pretend to have decided. Ten rows is the price of the
+        rule, and it is what a guard pins instead of being silently
+        narrower than it sounds."""
         spawns = frozenset(
             {
                 "subprocess.run",
@@ -362,7 +364,7 @@ class TestTheWalkAgainstTheRealPackage:
             }
         )
         found = package_calls(spawns)
-        assert len(found.seen) == 68
+        assert len(found.seen) == 69
         assert found.without_line_numbers().undecided == tuple(
             sorted(
                 [
