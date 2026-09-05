@@ -320,6 +320,24 @@ class TestScaffoldContract:
         written = {p for p in tmp_path.rglob("*") if p.is_file()}
         assert written == {entry.path for entry in plan_scaffold(tmp_path)}
 
+    def test_ks_init_scaffolds_golden_patterns(self, tmp_path: Path) -> None:
+        """R10.8. The file is scaffolded once and then belongs to the
+        operator: a second init must not revert what they wrote into it."""
+        golden = tmp_path / "scripts" / "kstrl" / "golden-patterns.md"
+
+        code, _ = run_init_capturing(tmp_path)
+
+        assert code == 0
+        assert golden.exists()
+        assert "## Follow these" in golden.read_text(encoding="utf-8")
+
+        edited = "# Golden patterns\n\n## Follow these\n\n- atomic writes: kstrl/atomicio.py\n"
+        golden.write_text(edited, encoding="utf-8")
+        code, _ = run_init_capturing(tmp_path)
+
+        assert code == 0
+        assert golden.read_text(encoding="utf-8") == edited
+
     def test_plan_stops_calling_gitignore_an_append_once_init_ran(self, tmp_path: Path) -> None:
         (tmp_path / ".gitignore").write_text("secrets.env\n")
 

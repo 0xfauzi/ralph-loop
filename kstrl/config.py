@@ -233,6 +233,20 @@ def component_harness_paths(
     )
 
 
+#: Every ``[paths]`` string key: (kstrl.toml key, env var, KstrlConfig
+#: field). One row, not a hand-copied branch in each of the TOML overlay,
+#: the env overlay and ``KstrlConfig.anchored``. tests/test_config_toml.py
+#: checks each name against the real fields, because ``setattr`` on a typo
+#: invents an attribute instead of raising.
+PATH_KEYS: tuple[tuple[str, str, str], ...] = (
+    ("prompt", "PROMPT_FILE", "prompt_file"),
+    ("prd", "PRD_FILE", "prd_file"),
+    ("progress", "PROGRESS_FILE", "progress_file"),
+    ("codebase_map", "CODEBASE_MAP_FILE", "codebase_map_file"),
+    ("golden_patterns", "KSTRL_GOLDEN_PATTERNS_FILE", "golden_patterns_file"),
+)
+
+
 @dataclass
 class KstrlConfig:
     """Configuration for the kstrl agentic loop."""
@@ -262,6 +276,9 @@ class KstrlConfig:
     # $progress_path) call resolved_progress_file(root_dir).
     progress_file: Path | None = None
     codebase_map_file: Path = field(default_factory=lambda: Path("scripts/kstrl/codebase_map.md"))
+    golden_patterns_file: Path = field(
+        default_factory=lambda: Path("scripts/kstrl/golden-patterns.md")
+    )  # R10.8: operator-authored, read into every engineer prompt
     sleep_seconds: float = 2.0
     interactive: bool = False
     allowed_paths: list[str] = field(default_factory=list)
@@ -291,16 +308,24 @@ class KstrlConfig:
     ascii_only: bool = False
 
     @classmethod
+    def anchored(cls, root_dir: Path) -> KstrlConfig:
+        """Defaults with every default file path resolved against ``root_dir``.
+        from_env, from_toml, load and config_report.kstrl_config_defaults held
+        a copy of these assignments each, so a path added to three of the four
+        differed silently by entry point. Anchors the FIELD default, not a
+        second copy of the string; progress_file needs no case, being None."""
+        config = cls()
+        for _key, _env, field_name in PATH_KEYS:
+            if (default := getattr(config, field_name)) is not None:
+                setattr(config, field_name, root_dir / default)
+        return config
+
+    @classmethod
     def from_env(cls, root_dir: Path | None = None) -> KstrlConfig:
         """Load configuration from environment variables only."""
         if root_dir is None:
             root_dir = Path.cwd()
-        config = cls()
-        # Default file paths are resolved against root_dir so the config is
-        # immediately usable regardless of cwd at the call site.
-        config.prompt_file = root_dir / "scripts/kstrl/prompt.md"
-        config.prd_file = root_dir / "scripts/kstrl/prd.json"
-        config.codebase_map_file = root_dir / "scripts/kstrl/codebase_map.md"
+        config = cls.anchored(root_dir)
         _apply_env_overrides(config, root_dir)
         return config
 
@@ -309,10 +334,7 @@ class KstrlConfig:
         """Load configuration from a kstrl.toml file (no env overlay)."""
         if root_dir is None:
             root_dir = toml_path.parent if toml_path.is_absolute() else Path.cwd()
-        config = cls()
-        config.prompt_file = root_dir / "scripts/kstrl/prompt.md"
-        config.prd_file = root_dir / "scripts/kstrl/prd.json"
-        config.codebase_map_file = root_dir / "scripts/kstrl/codebase_map.md"
+        config = cls.anchored(root_dir)
         if toml_path.exists():
             _apply_toml_overrides(config, toml_path, root_dir)
         return config
@@ -334,11 +356,7 @@ class KstrlConfig:
         if toml_path is None:
             toml_path = resolve_config_file(root_dir)
 
-        config = cls()
-        config.prompt_file = root_dir / "scripts/kstrl/prompt.md"
-        config.prd_file = root_dir / "scripts/kstrl/prd.json"
-        config.codebase_map_file = root_dir / "scripts/kstrl/codebase_map.md"
-
+        config = cls.anchored(root_dir)
         if toml_path.exists():
             _apply_toml_overrides(config, toml_path, root_dir)
         _apply_env_overrides(config, root_dir)
@@ -709,14 +727,9 @@ def _apply_toml_overrides(
 
     paths = data.get("paths")
     if isinstance(paths, dict):
-        if isinstance(paths.get("prompt"), str) and paths["prompt"]:
-            config.prompt_file = _resolve_path(paths["prompt"], root_dir)
-        if isinstance(paths.get("prd"), str) and paths["prd"]:
-            config.prd_file = _resolve_path(paths["prd"], root_dir)
-        if isinstance(paths.get("progress"), str) and paths["progress"]:
-            config.progress_file = _resolve_path(paths["progress"], root_dir)
-        if isinstance(paths.get("codebase_map"), str) and paths["codebase_map"]:
-            config.codebase_map_file = _resolve_path(paths["codebase_map"], root_dir)
+        for toml_key, _env_var, field_name in PATH_KEYS:
+            if isinstance(value := paths.get(toml_key), str) and value:
+                setattr(config, field_name, _resolve_path(value, root_dir))
         allowed = paths.get("allowed")
         if isinstance(allowed, list):
             config.allowed_paths = [str(p) for p in allowed if isinstance(p, str)]
@@ -750,14 +763,9 @@ def _apply_env_overrides(config: KstrlConfig, root_dir: Path) -> None:
     """
     if "MAX_ITERATIONS" in os.environ:
         config.max_iterations = int(os.environ["MAX_ITERATIONS"])
-    if "PROMPT_FILE" in os.environ:
-        config.prompt_file = _resolve_path(os.environ["PROMPT_FILE"], root_dir)
-    if "PRD_FILE" in os.environ:
-        config.prd_file = _resolve_path(os.environ["PRD_FILE"], root_dir)
-    if "PROGRESS_FILE" in os.environ:
-        config.progress_file = _resolve_path(os.environ["PROGRESS_FILE"], root_dir)
-    if "CODEBASE_MAP_FILE" in os.environ:
-        config.codebase_map_file = _resolve_path(os.environ["CODEBASE_MAP_FILE"], root_dir)
+    for _toml_key, env_var, field_name in PATH_KEYS:
+        if env_var in os.environ:
+            setattr(config, field_name, _resolve_path(os.environ[env_var], root_dir))
     if "SLEEP_SECONDS" in os.environ:
         config.sleep_seconds = float(os.environ["SLEEP_SECONDS"])
     if "INTERACTIVE" in os.environ:

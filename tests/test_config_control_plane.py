@@ -624,7 +624,7 @@ EXPECTED_SCAFFOLD_SECTIONS = {
 EXPECTED_SCAFFOLD_KEYS = {
     "agent": {"type", "command", "model", "reasoning_effort"},
     "run": {"max_iterations", "sleep_seconds", "interactive"},
-    "paths": {"prompt", "prd", "progress", "codebase_map", "allowed"},
+    "paths": {"prompt", "prd", "progress", "codebase_map", "golden_patterns", "allowed"},
     "git": {"branch", "auto_checkout"},
     "ui": {"ascii"},
     "factory": {

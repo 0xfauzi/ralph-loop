@@ -74,6 +74,7 @@ SHOW_SECTIONS: list[tuple[str, list[tuple[str, str]]]] = [
             ("prd", "prd_file"),
             ("progress", "progress_file"),
             ("codebase_map", "codebase_map_file"),
+            ("golden_patterns", "golden_patterns_file"),
             ("allowed", "allowed_paths"),
         ],
     ),
@@ -186,11 +187,7 @@ def format_row_value(section: str, key: str, value: Any) -> str:
 
 def kstrl_config_defaults(root_dir: Path) -> KstrlConfig:
     """Built-in KstrlConfig defaults with paths anchored like load()."""
-    config = KstrlConfig()
-    config.prompt_file = root_dir / "scripts/kstrl/prompt.md"
-    config.prd_file = root_dir / "scripts/kstrl/prd.json"
-    config.codebase_map_file = root_dir / "scripts/kstrl/codebase_map.md"
-    return config
+    return KstrlConfig.anchored(root_dir)
 
 
 def _phase_sections() -> list[tuple[str, Any, list[str]]]:

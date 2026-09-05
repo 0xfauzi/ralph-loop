@@ -217,6 +217,33 @@ Edit this list to match your repo. During the understanding loop, mark items as 
 (New notes append below; keep older notes for history.)
 """
 
+# R10.8. Deliberately NOT named *_PROMPT and NOT enrolled in
+# SCAFFOLDED_TEMPLATES. The ledger's own guards scope it to *_PROMPT
+# constants written to *prompt.md files (tests/test_prompt_staleness.py),
+# and the precedent for a scaffolded body the operator replaces and the
+# engineer reads verbatim is CLAUDE.md and codebase_map.md: neither is
+# enrolled or ledgered. H3b exists so a bump of a HARNESS-owned body
+# reaches projects; this is a skeleton, and an unedited skeleton means
+# the operator wrote no patterns, not that the harness drifted.
+DEFAULT_GOLDEN_PATTERNS = """# Golden patterns
+
+Operator-authored. What a good change looks like in this repository. Loaded
+into every engineer prompt. Keep it short: the budget is about 1500 tokens
+and the loader truncates past that.
+
+## Follow these (with a file to copy from)
+
+- <pattern>: see `<path/to/exemplar.py>`
+
+## Avoid these
+
+- <anti-pattern and why>
+
+## When unsure
+
+- <which existing module to imitate>
+"""
+
 DEFAULT_FEATURE_UNDERSTAND = """# Feature Understand Notes
 
 This file captures feature-specific understanding tied to one PRD.
@@ -431,6 +458,7 @@ DEFAULT_KSTRL_TOML = """\
 # inside that component's allowedPaths.
 # progress = "scripts/kstrl/progress.txt"
 # codebase_map = "scripts/kstrl/codebase_map.md"
+# golden_patterns = "scripts/kstrl/golden-patterns.md"
 # allowed = []                     # e.g. ["scripts/kstrl/", "src/"]
 
 [git]
@@ -1033,6 +1061,7 @@ def run_init(directory: Path, ui: UI, *, upgrade_prompts: bool = False) -> int:
     _create_if_missing(kstrl_dir / "prd.json", json.dumps(DEFAULT_PRD, indent=2) + "\n", ui)
     _create_if_missing(kstrl_dir / "progress.txt", DEFAULT_PROGRESS, ui)
     _create_if_missing(kstrl_dir / "codebase_map.md", DEFAULT_CODEBASE_MAP, ui)
+    _create_if_missing(kstrl_dir / "golden-patterns.md", DEFAULT_GOLDEN_PATTERNS, ui)
     _create_if_missing(kstrl_dir / "understand_prompt.md", DEFAULT_UNDERSTAND_PROMPT, ui)
     _create_if_missing(
         kstrl_dir / "feature_understand_prompt.md",

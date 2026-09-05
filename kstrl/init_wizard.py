@@ -66,6 +66,7 @@ def plan_scaffold(root: Path) -> list[ScaffoldEntry]:
         kstrl_dir / "prd.json",
         kstrl_dir / "progress.txt",
         kstrl_dir / "codebase_map.md",
+        kstrl_dir / "golden-patterns.md",
         kstrl_dir / "understand_prompt.md",
         kstrl_dir / "feature_understand_prompt.md",
         root / "CLAUDE.md",
