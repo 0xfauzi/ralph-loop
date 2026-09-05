@@ -18,13 +18,14 @@ from __future__ import annotations
 import json
 import subprocess
 from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
 from kstrl.config import KstrlConfig
-from kstrl.factory import ComponentResult, FactoryConfig, run_factory
+from kstrl.factory import ComponentResult, FactoryConfig, FactoryResult, run_factory
 from kstrl.findings import Finding, render_findings_markdown
 from kstrl.git import GitDiffError, get_diff_content
 from kstrl.manifest import Component, Manifest
@@ -34,7 +35,12 @@ from kstrl.review import (
     parse_review_output,
     run_review,
 )
-from kstrl.security import SecurityConfig, SecurityMode, parse_security_output
+from kstrl.security import (
+    SecurityConfig,
+    SecurityMode,
+    SecurityResult,
+    parse_security_output,
+)
 from kstrl.ui.plain import PlainUI
 from kstrl.verify import CheckResult, VerificationResult, VerifyConfig
 from tests.conftest import ReviewRepo
@@ -528,6 +534,94 @@ def _read_events(log_path: Path) -> list[dict[str, object]]:
     ]
 
 
+@dataclass
+class _BudgetRun:
+    """What a `_run_with_budget` call produced, so the R10.5 tests can
+    assert on the manifest, the run result, the call counts and the
+    files the run wrote without unpacking a five-element tuple."""
+
+    root: Path
+    manifest: Manifest
+    result: FactoryResult
+    review_calls: int
+    security_calls: int
+    log_path: Path
+
+    def component(self, comp_id: str) -> Component:
+        comp = self.manifest.get_component(comp_id)
+        assert comp is not None, comp_id
+        return comp
+
+    def journal_entry(self, comp_id: str) -> dict[str, object]:
+        """The evolution-journal `component_result` row for one
+        component. `EvolutionConfig.enabled` defaults to True, so the
+        factory writes this file for every run these fixtures make."""
+        path = self.root / ".kstrl" / "evolution.jsonl"
+        entries = [
+            json.loads(line)
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        matches = [
+            e
+            for e in entries
+            if e.get("event_type") == "component_result" and e.get("component_id") == comp_id
+        ]
+        assert len(matches) == 1, matches
+        return matches[0]
+
+
+def _run_with_budget(
+    tmp_path: Path,
+    comp_ids: list[str],
+    **overrides: object,
+) -> _BudgetRun:
+    """Run the factory over `comp_ids` with the reviewer, the security
+    reviewer and the engineer all stubbed to pass, so the only thing
+    that can end a component is the adversarial-budget cap.
+
+    The reviewer stubs are what make `max_adversarial_calls` the
+    variable under test: every component would otherwise pass every
+    gate, so a component that does not complete did so because the cap
+    was spent (R10.5, #226)."""
+    root = _scaffold(tmp_path, comp_ids)
+    manifest = _make_manifest(comp_ids)
+    log_path = tmp_path / "progress.jsonl"
+    config = _factory_config(progress_log_path=log_path, **overrides)
+    with (
+        patch(
+            "kstrl.factory._run_component",
+            side_effect=lambda comp_id, *a, **k: ComponentResult(
+                comp_id, success=True, iterations=1
+            ),
+        ),
+        patch(
+            "kstrl.factory.run_review",
+            return_value=ReviewResult(passed=True, mode="hard"),
+        ) as mock_review,
+        patch(
+            "kstrl.factory.run_security_review",
+            return_value=SecurityResult(passed=True, mode="hard"),
+        ) as mock_security,
+        patch("kstrl.git.get_diff_content", return_value=""),
+    ):
+        result = run_factory(
+            manifest,
+            config,
+            _base_config(root),
+            PlainUI(no_color=True),
+            root,
+        )
+    return _BudgetRun(
+        root=root,
+        manifest=manifest,
+        result=result,
+        review_calls=mock_review.call_count,
+        security_calls=mock_security.call_count,
+        log_path=log_path,
+    )
+
+
 class TestFactorySkipTraces:
     def test_mode_skip_emits_finding_and_journal_event(
         self,
@@ -574,11 +668,20 @@ class TestFactorySkipTraces:
         self,
         tmp_path: Path,
     ) -> None:
+        """The R1.2 skip trace for an exhausted adversarial budget.
+
+        This test read `review_mode="hard"` until R10.5 (#226), which is
+        the documented breaking change: hard mode no longer downgrades
+        to a skip when the budget is spent, it halts the component
+        (`test_hard_mode_budget_exhausted_halts_component` below covers
+        that). Advisory mode still produces the skip trace this test
+        exists for, so the mode moved and the assertions did not.
+        """
         root = _scaffold(tmp_path, ["comp-a", "comp-b"])
         manifest = _make_manifest(["comp-a", "comp-b"])
         log_path = tmp_path / "progress.jsonl"
         config = _factory_config(
-            review_mode="hard",
+            review_mode="advisory",
             max_adversarial_calls=1,
             progress_log_path=log_path,
         )
@@ -615,6 +718,125 @@ class TestFactorySkipTraces:
             and e["data"]["phase"] == "review"  # type: ignore[index]
             for e in events
         )
+
+    # -----------------------------------------------------------------
+    # R10.5 (#226): an exhausted adversarial budget halts a hard-mode
+    # component instead of merging it on mechanical checks alone.
+    # -----------------------------------------------------------------
+
+    def test_hard_mode_budget_exhausted_halts_component(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """comp-a spends the one call; comp-b's hard-mode review has no
+        budget left and refuses rather than downgrading to a skip."""
+        run = _run_with_budget(
+            tmp_path,
+            ["comp-a", "comp-b"],
+            review_mode="hard",
+            max_adversarial_calls=1,
+        )
+        assert run.review_calls == 1
+        assert "comp-a" in run.result.completed
+        comp_b = run.component("comp-b")
+        assert "comp-b" not in run.result.completed
+        assert comp_b.status == "failed"
+        assert comp_b.failed_phase == "review"
+        assert comp_b.failed_check == "adversarial_budget"
+        infra = [f for f in comp_b.findings if f.is_infrastructure_error]
+        assert [f.phase for f in infra] == ["review"]
+        # FAIL, not RETRY_OR_FAIL: a retry cannot recover budget, so the
+        # component must not burn engineer iterations against the wall.
+        assert comp_b.retries == 0
+        # Nothing was skipped, so nothing claims it was.
+        assert not any(f.is_phase_skip and f.phase == "review" for f in comp_b.findings)
+
+    def test_advisory_mode_budget_exhausted_still_skips(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Advisory never blocks, so the exhausted budget still degrades
+        to a recorded skip and the component completes."""
+        run = _run_with_budget(
+            tmp_path,
+            ["comp-a", "comp-b"],
+            review_mode="advisory",
+            max_adversarial_calls=1,
+        )
+        comp_b = run.component("comp-b")
+        assert "comp-b" in run.result.completed
+        assert comp_b.status == "completed"
+        assert any(f.is_phase_skip and f.phase == "review" for f in comp_b.findings)
+        assert not any(f.is_infrastructure_error for f in comp_b.findings)
+
+    def test_security_hard_mode_budget_exhausted_halts(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Phase 2.5 follows the same rule as Phase 2.
+
+        The cap is 2, not the issue's 1: comp-a's advisory review takes
+        the first call and comp-a's own security takes the second, so a
+        cap of 1 would strand comp-a's security rather than comp-b's.
+        With 2, comp-b sees an advisory review skip and then a hard
+        security refusal.
+        """
+        run = _run_with_budget(
+            tmp_path,
+            ["comp-a", "comp-b"],
+            review_mode="advisory",
+            max_adversarial_calls=2,
+            security_config=SecurityConfig(mode=SecurityMode.HARD.value),
+        )
+        assert run.review_calls == 1
+        assert run.security_calls == 1
+        assert "comp-a" in run.result.completed
+        comp_b = run.component("comp-b")
+        assert "comp-b" not in run.result.completed
+        assert comp_b.status == "failed"
+        assert comp_b.failed_phase == "security"
+        assert comp_b.failed_check == "adversarial_budget"
+        infra = [f for f in comp_b.findings if f.is_infrastructure_error]
+        assert [f.phase for f in infra] == ["security"]
+        # The advisory review before it still records its skip.
+        assert any(f.is_phase_skip and f.phase == "review" for f in comp_b.findings)
+        entry = run.journal_entry("comp-b")
+        assert entry["failed_check"] == "adversarial_budget"
+        assert "security:budget-exhausted" in entry["failure_signatures"]  # type: ignore[operator]
+
+    def test_unbounded_default_unchanged(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """`max_adversarial_calls = 0` is the default and means
+        unbounded, so the refusal is unreachable for a default config."""
+        run = _run_with_budget(
+            tmp_path,
+            ["comp-a", "comp-b", "comp-c"],
+            review_mode="hard",
+            max_adversarial_calls=0,
+        )
+        assert run.review_calls == 3
+        assert set(run.result.completed) == {"comp-a", "comp-b", "comp-c"}
+        for comp in run.manifest.components:
+            assert comp.status == "completed"
+            assert not any(f.is_infrastructure_error for f in comp.findings)
+
+    def test_budget_exhausted_signature_reaches_journal(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """The halt is legible to the evolution journal, which is what a
+        later run reads to see which sensor stopped the component."""
+        run = _run_with_budget(
+            tmp_path,
+            ["comp-a", "comp-b"],
+            review_mode="hard",
+            max_adversarial_calls=1,
+        )
+        entry = run.journal_entry("comp-b")
+        assert entry["failed_check"] == "adversarial_budget"
+        assert "review:budget-exhausted" in entry["failure_signatures"]  # type: ignore[operator]
 
     def test_single_pr_knowledge_skip_leaves_trace(
         self,

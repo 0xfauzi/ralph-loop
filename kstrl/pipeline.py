@@ -89,7 +89,7 @@ from kstrl.review import (
 )
 from kstrl.sandbox import SandboxConfig
 from kstrl.scope import RunScope
-from kstrl.security import SecurityMode, SecurityResult
+from kstrl.security import SecurityConfig, SecurityMode, SecurityResult
 from kstrl.verify import (
     SCOPE_UNREADABLE_CHECK,
     CheckResult,
@@ -2910,6 +2910,150 @@ class ComponentPipeline:
             signatures=[f"{phase}:coverage-unverified:{reason}"],
         )
 
+    def _budget_refusal(
+        self,
+        comp: Component,
+        *,
+        phase: str,
+        banner: str,
+        role: str,
+    ) -> PhaseFailure:
+        """R10.5 (#226): the wall a hard-mode adversarial phase hits when
+        ``max_adversarial_calls`` is spent before it runs.
+
+        FAIL, never RETRY_OR_FAIL: the budget only shrinks, so a retry
+        would burn engineer iterations against the same wall. The
+        infrastructure Finding is the record in the findings stream and
+        the PR body; ``check="adversarial_budget"`` and the
+        ``<phase>:budget-exhausted`` signature are the record in the
+        journal. Advisory mode never reaches here: it keeps the
+        recorded skip, because advisory never blocks.
+        """
+        cap = self.factory_config.max_adversarial_calls
+        error = (
+            f"{role} infrastructure error: adversarial LLM budget ({cap}) "
+            "exhausted before the phase ran; hard mode refuses to merge unreviewed"
+        )
+        self.ui.err(f"  {banner} FAILED for {comp.id}: {error}")
+        self._add_findings(
+            comp,
+            [
+                Finding.infrastructure_error(
+                    phase=phase,
+                    explanation=(
+                        f"adversarial LLM budget ({cap}) exhausted before "
+                        f"{phase}; hard mode refuses to merge unreviewed"
+                    ),
+                )
+            ],
+        )
+        return PhaseFailure(
+            action=FailureAction.FAIL,
+            error=error,
+            phase=phase,
+            check="adversarial_budget",
+            signatures=[f"{phase}:budget-exhausted"],
+        )
+
+    def _review_did_not_run(
+        self,
+        comp: Component,
+        wt_path: Path,
+        skip_reason: str | None,
+        budget_downgraded: bool,
+    ) -> ReviewPhaseResult:
+        """Phase 2's tail for a review that was not executed: record the
+        skip, then let the R10.3 set-point gate decide whether the
+        component may proceed without one.
+
+        Lifted out of ``_phase_review`` unchanged by #226, which added a
+        branch above it and would otherwise have grown that method's
+        branching past the ratchet.
+        """
+        comp.review_passed = None
+        self._record_phase_skip(
+            comp,
+            "review",
+            skip_reason or "review skipped",
+        )
+        # R10.3: this return is BEFORE the set-point gate, so a
+        # component whose reviewer never ran would otherwise
+        # complete with a story still claiming done and nothing
+        # having checked it - the gate failing open, silently, at
+        # exactly the moment the budget ran out. Only the budget
+        # downgrade fails here: an explicit review_mode = "skip"
+        # is the operator's decision, and run_factory already warns
+        # at startup that the gate cannot fire under it.
+        #
+        # FAIL, not RETRY_OR_FAIL: retrying cannot recover budget,
+        # so a retry would burn engineer iterations against a
+        # deterministic wall.
+        #
+        # #226 narrowed who reaches here: hard mode now refuses at the
+        # budget wall instead of downgrading, so ``budget_downgraded``
+        # is only ever true for an advisory reviewer.
+        if (
+            budget_downgraded
+            and self._setpoint_blocking()[0]
+            and self._has_unconfirmed_claim(comp, wt_path)
+        ):
+            error = (
+                "Set-point agreement cannot be confirmed: the "
+                "reviewer never ran (adversarial LLM budget "
+                f"({self.factory_config.max_adversarial_calls}) "
+                "exhausted) and a story is still marked passes=true"
+            )
+            self.ui.err(f"  Phase 2 FAILED for {comp.id}: {error}")
+            return ReviewPhaseResult(
+                ran=False,
+                skip_reason=skip_reason,
+                failure=PhaseFailure(
+                    action=FailureAction.FAIL,
+                    error=error,
+                    phase="review",
+                    check="setpoint",
+                    signatures=["review:setpoint-budget-exhausted"],
+                ),
+            )
+        return ReviewPhaseResult(ran=False, skip_reason=skip_reason)
+
+    def _security_budget_wall(
+        self,
+        comp: Component,
+        sec_config: SecurityConfig,
+    ) -> SecurityPhaseResult:
+        """Phase 2.5's exhausted-budget branch, both modes.
+
+        The mode split lives here rather than beside the budget check in
+        ``_phase_security`` so that check stays closed over
+        ``SecurityMode``: every non-hard mode reaching an exhausted
+        budget takes the recorded skip, which is what it did before
+        #226. ``SecurityConfig.__post_init__`` rejects any mode outside
+        skip|advisory|hard, and skip already returned above.
+        """
+        if sec_config.mode == SecurityMode.HARD.value:
+            # R10.5 (#226): same rule as Phase 2. Hard mode refuses to
+            # merge a component no security reviewer looked at.
+            return SecurityPhaseResult(
+                ran=False,
+                failure=self._budget_refusal(
+                    comp,
+                    phase="security",
+                    banner="Phase 2.5",
+                    role="Security review",
+                ),
+            )
+        self.ui.warn(f"  Phase 2.5 SKIPPED for {comp.id}: adversarial LLM budget exhausted")
+        self._record_phase_skip(
+            comp,
+            "security",
+            "adversarial LLM budget exhausted",
+        )
+        return SecurityPhaseResult(
+            ran=False,
+            skip_reason="adversarial LLM budget exhausted",
+        )
+
     def _review_failure(
         self,
         comp: Component,
@@ -3021,6 +3165,32 @@ class ComponentPipeline:
         if review_mode == ReviewMode.SKIP:
             review_skip_reason = "review disabled (mode=skip)"
         elif not self.adversarial_budget_ok():
+            # R10.5 (#226): hard mode refuses to merge unreviewed. The
+            # reviewer is the sensor doing most of the catching, so an
+            # exhausted budget must not shed it and let the component
+            # through on mechanical checks alone. Nothing is skipped
+            # and no event is invented for it (doctrine 6): the
+            # Finding and the PhaseFailure are the record.
+            #
+            # The mode split is INSIDE the budget check, not a second
+            # condition beside it, so the check stays closed over
+            # ReviewMode: a mode added later falls into the downgrade
+            # below (today's behaviour) instead of falling past both
+            # branches and out of the budget check entirely. Phase 2.5
+            # has the same shape for the same reason.
+            if review_mode == ReviewMode.HARD:
+                comp.review_passed = False
+                return ReviewPhaseResult(
+                    ran=False,
+                    failure=self._budget_refusal(
+                        comp,
+                        phase="review",
+                        banner="Phase 2",
+                        role="Review",
+                    ),
+                )
+            # Advisory never blocks, so an exhausted budget still
+            # downgrades to a recorded skip (R1.2 trace, R10.3 gate).
             self.ui.warn(
                 f"  Phase 2 SKIPPED for {comp.id}: "
                 f"adversarial LLM budget "
@@ -3032,48 +3202,12 @@ class ComponentPipeline:
             review_mode = ReviewMode.SKIP
             budget_downgraded = True
         if review_mode == ReviewMode.SKIP:
-            comp.review_passed = None
-            self._record_phase_skip(
+            return self._review_did_not_run(
                 comp,
-                "review",
-                review_skip_reason or "review skipped",
+                wt_path,
+                review_skip_reason,
+                budget_downgraded,
             )
-            # R10.3: this return is BEFORE the set-point gate, so a
-            # component whose reviewer never ran would otherwise
-            # complete with a story still claiming done and nothing
-            # having checked it - the gate failing open, silently, at
-            # exactly the moment the budget ran out. Only the budget
-            # downgrade fails here: an explicit review_mode = "skip"
-            # is the operator's decision, and run_factory already warns
-            # at startup that the gate cannot fire under it.
-            #
-            # FAIL, not RETRY_OR_FAIL: retrying cannot recover budget,
-            # so a retry would burn engineer iterations against a
-            # deterministic wall.
-            if (
-                budget_downgraded
-                and self._setpoint_blocking()[0]
-                and self._has_unconfirmed_claim(comp, wt_path)
-            ):
-                error = (
-                    "Set-point agreement cannot be confirmed: the "
-                    "reviewer never ran (adversarial LLM budget "
-                    f"({self.factory_config.max_adversarial_calls}) "
-                    "exhausted) and a story is still marked passes=true"
-                )
-                self.ui.err(f"  Phase 2 FAILED for {comp.id}: {error}")
-                return ReviewPhaseResult(
-                    ran=False,
-                    skip_reason=review_skip_reason,
-                    failure=PhaseFailure(
-                        action=FailureAction.FAIL,
-                        error=error,
-                        phase="review",
-                        check="setpoint",
-                        signatures=["review:setpoint-budget-exhausted"],
-                    ),
-                )
-            return ReviewPhaseResult(ran=False, skip_reason=review_skip_reason)
 
         from kstrl.agents import get_agent
 
@@ -3444,16 +3578,7 @@ class ComponentPipeline:
                 skip_reason="security review disabled (mode=skip)",
             )
         if not self.adversarial_budget_ok():
-            self.ui.warn(f"  Phase 2.5 SKIPPED for {comp.id}: adversarial LLM budget exhausted")
-            self._record_phase_skip(
-                comp,
-                "security",
-                "adversarial LLM budget exhausted",
-            )
-            return SecurityPhaseResult(
-                ran=False,
-                skip_reason="adversarial LLM budget exhausted",
-            )
+            return self._security_budget_wall(comp, sec_config)
         self.adversarial_budget_consume()
         from kstrl.agents import get_agent as _get_sec_agent
 
