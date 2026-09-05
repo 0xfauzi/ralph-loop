@@ -603,6 +603,10 @@ KEY_DESCRIPTIONS: dict[tuple[str, str], str] = {
         "serve",
         "allow_uncovered_cost",
     ): "run unattended even when no adapter reports cost, making the budget unenforceable",
+    (
+        "serve",
+        "max_open_prs",
+    ): "scheduled admission stops while this many kstrl-authored PRs are open; 0 = no bound",
     ("queue", "max_attempts"): "execution attempts per queue item before it is poisoned",
     (
         "queue",

@@ -42,6 +42,21 @@ def _no_spend(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+@pytest.fixture(autouse=True)
+def _no_open_prs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hold the R10.7 open-PR bound open for this whole module.
+
+    Nothing here is about flow control, but `max_open_prs` defaults to 1
+    and a `tmp_path` is not a git checkout, so the real counter fails and
+    the gate refuses - correctly, since an unknown number of open PRs is
+    not zero. Stubbing the COUNTER rather than the gate keeps the gate
+    itself in the code path these tests execute. The bound's own
+    behaviour, including its presence in `serve_cycle`, is asserted in
+    `tests/test_flow_control.py`.
+    """
+    monkeypatch.setattr("kstrl.serve.count_open_kstrl_prs", lambda root: 0)
+
+
 class TestServeHelp:
     def test_the_command_is_registered(self) -> None:
         result = CliRunner().invoke(cli, ["--help"])
@@ -91,7 +106,13 @@ class TestDryRun:
 
     def test_dry_run_reports_every_gate(self, tmp_path: Path) -> None:
         result = _invoke(["serve", "--dry-run"], tmp_path)
-        for gate in ("poison breaker", "cost coverage", "budget", "inbox cap"):
+        for gate in (
+            "poison breaker",
+            "cost coverage",
+            "budget",
+            "inbox cap",
+            "open-PR bound",
+        ):
             assert gate in result.output
 
     def test_dry_run_reports_safe_mode_above_the_gates(

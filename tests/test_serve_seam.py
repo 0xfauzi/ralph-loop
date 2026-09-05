@@ -118,6 +118,21 @@ exec "$@"
 """
 
 
+@pytest.fixture(autouse=True)
+def _no_open_prs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hold the R10.7 open-PR bound open for this whole module.
+
+    Nothing here is about flow control, but `max_open_prs` defaults to 1
+    and a `tmp_path` is not a git checkout, so the real counter fails and
+    the gate refuses - correctly, since an unknown number of open PRs is
+    not zero. Stubbing the COUNTER rather than the gate keeps the gate
+    itself in the code path these tests execute. The bound's own
+    behaviour, including its presence in `serve_cycle`, is asserted in
+    `tests/test_flow_control.py`.
+    """
+    monkeypatch.setattr("kstrl.serve.count_open_kstrl_prs", lambda root: 0)
+
+
 def _write_executable(path: Path, body: str) -> Path:
     path.write_text(body, encoding="utf-8")
     path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)

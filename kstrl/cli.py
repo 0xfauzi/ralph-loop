@@ -5244,6 +5244,7 @@ def serve(
         check_budget,
         check_cost_coverage,
         check_inbox_cap,
+        check_open_pr_bound,
         check_poison_breaker,
         consecutive_poison_count,
         factory_lock_held,
@@ -5357,6 +5358,9 @@ def serve(
             ("cost coverage", check_cost_coverage(ledger, config)),
             ("budget", check_budget(ledger, config)),
             ("inbox cap", check_inbox_cap(root_dir)),
+            # Last, matching serve_cycle: the only gate that reaches the
+            # network, and the only one a dry run can make slow.
+            ("open-PR bound", check_open_pr_bound(config, root_dir)),
         ):
             if admission.allowed:
                 ui_impl.info(f"  gate {label}: ok")

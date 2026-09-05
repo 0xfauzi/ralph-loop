@@ -69,6 +69,7 @@ from pathlib import Path
 from typing import Any, Final, Protocol
 
 from kstrl.agents.base import ARCHITECT_COMPONENT, ARCHITECT_ROLE
+from kstrl.pr import GH_TIMEOUT, PR_FOOTER_MARKER
 from kstrl.procdispose import drain_or_abandon
 from kstrl.procgroup import (
     pid_is_alive,
@@ -273,6 +274,10 @@ class ServeConfig:
     #: Run unattended even when a configured budget cannot be enforced
     #: because no adapter reports cost. Explicit opt-out of the guard.
     allow_uncovered_cost: bool = False
+    #: Scheduled admission stops while this many kstrl-authored PRs are
+    #: open. 0 disables the bound. Manual `ks factory` / `ks run` are
+    #: unaffected: a human typing the command is the authorisation.
+    max_open_prs: int = 1
 
     def __post_init__(self) -> None:
         if self.poll_interval_seconds <= 0:
@@ -289,6 +294,8 @@ class ServeConfig:
             raise ServeError(
                 f"serve.factory_timeout_seconds must be >= 0, got {self.factory_timeout_seconds}"
             )
+        if self.max_open_prs < 0:
+            raise ServeError(f"serve.max_open_prs must be >= 0, got {self.max_open_prs}")
 
     @classmethod
     def from_env(cls) -> ServeConfig:
@@ -299,6 +306,7 @@ class ServeConfig:
         caffeinate = os.environ.get("KSTRL_SERVE_CAFFEINATE")
         timeout = os.environ.get("KSTRL_SERVE_FACTORY_TIMEOUT")
         uncovered = os.environ.get("KSTRL_SERVE_ALLOW_UNCOVERED_COST")
+        open_prs = os.environ.get("KSTRL_SERVE_MAX_OPEN_PRS")
         return cls(
             poll_interval_seconds=(defaults.poll_interval_seconds if poll is None else float(poll)),
             daily_budget_usd=(defaults.daily_budget_usd if budget is None else float(budget)),
@@ -312,6 +320,7 @@ class ServeConfig:
             allow_uncovered_cost=(
                 defaults.allow_uncovered_cost if uncovered is None else uncovered == "1"
             ),
+            max_open_prs=(defaults.max_open_prs if open_prs is None else int(open_prs)),
         )
 
     @classmethod
@@ -342,6 +351,7 @@ class ServeConfig:
             defaults.factory_timeout_seconds,
         )
         uncovered = _bool("allow_uncovered_cost", defaults.allow_uncovered_cost)
+        open_prs = _int("max_open_prs", defaults.max_open_prs)
 
         if "KSTRL_SERVE_POLL_INTERVAL" in os.environ:
             poll = float(os.environ["KSTRL_SERVE_POLL_INTERVAL"])
@@ -355,6 +365,11 @@ class ServeConfig:
             timeout = float(os.environ["KSTRL_SERVE_FACTORY_TIMEOUT"])
         if "KSTRL_SERVE_ALLOW_UNCOVERED_COST" in os.environ:
             uncovered = os.environ["KSTRL_SERVE_ALLOW_UNCOVERED_COST"] == "1"
+        # `get` with the toml value as the default rather than the `in
+        # os.environ` branch its five siblings use, and only because this
+        # method sits one branch under the cyclomatic ratchet. Same
+        # semantics: int() of an int is that int, of a string parses it.
+        open_prs = int(os.environ.get("KSTRL_SERVE_MAX_OPEN_PRS", open_prs))
 
         return cls(
             poll_interval_seconds=poll,
@@ -363,6 +378,7 @@ class ServeConfig:
             caffeinate=caffeinate,
             factory_timeout_seconds=timeout,
             allow_uncovered_cost=uncovered,
+            max_open_prs=open_prs,
         )
 
 
@@ -1932,6 +1948,90 @@ def check_inbox_cap(root_dir: Path) -> Admission:
     )
 
 
+def count_open_kstrl_prs(cwd: Path, *, limit: int = 100) -> int:
+    """Open PRs whose body carries :data:`PR_FOOTER_MARKER` (R10.7).
+
+    Runs ``gh pr list --state open --limit <limit> --json number,body``
+    under ``GH_TIMEOUT`` and counts bodies containing the marker. Raises
+    ``RuntimeError`` on any gh failure, timeout, missing binary or
+    unparseable output: the caller decides what a failed count means,
+    and an unknown number of open PRs is not zero.
+
+    The marker rather than a label, because it identifies every PR kstrl
+    has ever opened, including the ones that predate the bound.
+    """
+    argv = ["gh", "pr", "list", "--state", "open", "--limit", str(limit), "--json", "number,body"]
+    try:
+        result = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, timeout=GH_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"gh pr list timed out after {GH_TIMEOUT}s") from None
+    except OSError as exc:
+        raise RuntimeError(f"gh pr list could not start: {exc}") from exc
+    if result.returncode != 0:
+        raise RuntimeError(f"gh pr list failed: {result.stderr.strip() or result.stdout.strip()}")
+    try:
+        rows = json.loads(result.stdout)
+    except ValueError as exc:
+        raise RuntimeError(f"gh pr list returned unparseable JSON: {exc}") from exc
+    if not isinstance(rows, list):
+        raise RuntimeError(f"gh pr list returned {type(rows).__name__}, expected a list")
+    return sum(
+        1
+        for row in rows
+        if isinstance(row, dict) and PR_FOOTER_MARKER in str(row.get("body") or "")
+    )
+
+
+def check_open_pr_bound(
+    config: ServeConfig,
+    root_dir: Path,
+    *,
+    counter: Callable[[Path], int] | None = None,
+) -> Admission:
+    """Flow control: refuse admission while max_open_prs kstrl PRs are open.
+
+    Skipped (allowed) when ``max_open_prs`` is 0, or when the factory
+    will not open PRs at all (``[factory] create_prs = false``), because
+    then there is nothing to bound. A failed count refuses admission
+    with the error in the reason: an unknown number of open PRs is not
+    zero.
+
+    Both refusals are WAITS, not pauses. ``pause_reason`` stays empty so
+    the daemon re-checks next cycle: an open PR lifts the refusal by
+    being merged or closed, which needs no operator action on the queue.
+
+    ``counter`` exists so tests inject a fake without putting a ``gh``
+    on PATH; it is resolved inside the body rather than as a default
+    argument so patching the module-level name reaches it.
+    """
+    from kstrl.factory import FactoryConfig
+
+    if config.max_open_prs == 0:
+        return Admission(allowed=True, reason="open-PR bound disabled")
+    if not FactoryConfig.load(root_dir).create_prs:
+        return Admission(
+            allowed=True,
+            reason="open-PR bound not applicable (create_prs = false)",
+        )
+    count_fn = counter if counter is not None else count_open_kstrl_prs
+    try:
+        count = count_fn(root_dir)
+    except RuntimeError as exc:
+        return Admission(
+            allowed=False,
+            reason=f"cannot count open kstrl PRs: {exc}",
+        )
+    if count < config.max_open_prs:
+        return Admission(
+            allowed=True,
+            reason=f"{count} of {config.max_open_prs} kstrl PRs open",
+        )
+    return Admission(
+        allowed=False,
+        reason=(f"{count} kstrl PR(s) open (bound {config.max_open_prs}); waiting for review"),
+    )
+
+
 def factory_lock_held(root_dir: Path) -> bool:
     """Whether a factory run already owns this root.
 
@@ -2190,6 +2290,48 @@ def _pause_queue(
     return admission.pause_reason or admission.reason
 
 
+def _wait_gate_refusal(
+    root_dir: Path,
+    config: ServeConfig,
+    obs: ServeObserver,
+) -> str:
+    """The gates that make the cycle WAIT, in evaluation order, or "".
+
+    These three sit outside the ``gates`` tuple and share a shape: none
+    pauses the queue, none files an inbox item, none charges the item an
+    attempt. Each is a condition that clears itself, so the cycle skips
+    and re-checks on the next poll.
+
+    Order is cost. The inbox cap reads one local file, the factory lock
+    takes one flock, and the open-PR bound reaches GitHub, so the bound
+    is evaluated last and only once the other two admit. That is also
+    why these are not members of the ``gates`` tuple: it is built
+    eagerly, so every element is evaluated before the loop reads the
+    first refusal, and a ``gh`` call per poll behind an already-refusing
+    budget is a cost with no purchaser (R10.7).
+    """
+    inbox_gate = check_inbox_cap(root_dir)
+    if not inbox_gate.allowed:
+        obs.warn(inbox_gate.reason)
+        return inbox_gate.reason
+
+    if factory_lock_held(root_dir):
+        # Not a failure and not the item's fault: something else owns the
+        # repo. Wait rather than charging an attempt. This is a courtesy
+        # check only - it cannot make exit 2 unambiguous, which is why
+        # classify_run reads the child's output instead (#186 F6).
+        reason = "a factory run already holds this root"
+        obs.info(reason)
+        return reason
+
+    pr_gate = check_open_pr_bound(config, root_dir)
+    if not pr_gate.allowed:
+        obs.warn(pr_gate.reason)
+        return pr_gate.reason
+
+    return ""
+
+
 def serve_cycle(
     root_dir: Path,
     *,
@@ -2332,19 +2474,9 @@ def serve_cycle(
         result.skipped = admission.reason
         return result
 
-    inbox_gate = check_inbox_cap(root_dir)
-    if not inbox_gate.allowed:
-        obs.warn(inbox_gate.reason)
-        result.skipped = inbox_gate.reason
-        return result
-
-    if factory_lock_held(root_dir):
-        # Not a failure and not the item's fault: something else owns the
-        # repo. Wait rather than charging an attempt. This is a courtesy
-        # check only - it cannot make exit 2 unambiguous, which is why
-        # classify_run reads the child's output instead (#186 F6).
-        result.skipped = "a factory run already holds this root"
-        obs.info(result.skipped)
+    waiting = _wait_gate_refusal(root_dir, cfg, obs)
+    if waiting:
+        result.skipped = waiting
         return result
 
     # 5. Claim exactly one item.
