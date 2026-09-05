@@ -26,7 +26,7 @@ from kstrl.autonomy import (
     AutonomyLevel,
     AutonomyState,
     DemotionTrigger,
-    commit_transition,
+    apply_demotion,
     flag_bundle_for,
     manual_override_notes,
     resolve_runtime_level,
@@ -77,7 +77,6 @@ from kstrl.findings import POLICY_CATEGORY_PREFIX
 from kstrl.fixtures import FixturesConfig
 from kstrl.git import fetch_base_branch, resolve_base_ref
 from kstrl.guards import ScopeHazard, scope_entry_hazard
-from kstrl.inbox import Inbox, InboxConfig, ItemKind
 from kstrl.interaction import InteractionChannel
 from kstrl.knowledge import (
     KnowledgeConfig,
@@ -2767,7 +2766,6 @@ def _record_autonomy_outcome(
     when it started.
     """
     state = AutonomyState.load(root_dir)
-    before = state.level
 
     by_id = {comp.id: comp for comp in manifest.components}
 
@@ -2805,46 +2803,15 @@ def _record_autonomy_outcome(
             )
         return
 
-    record = state.demote(
+    apply_demotion(
+        root_dir,
         DemotionTrigger.POLICY_VIOLATION,
         f"policy violation in {', '.join(sorted(violations))}",
         evidence={"components": sorted(violations), "run_id": run_id},
-    )
-    if record is None:
-        # Already at the floor: nothing to revoke, but the violation is
-        # still counted so it blocks the next promotion.
-        state.save(root_dir)
-        ui.warn(
-            f"Autonomy: policy violation recorded ({len(violations)} "
-            "component(s)); already at L1, nothing to revoke"
-        )
-        return
-    commit_transition(state, record, root_dir, bus=bus, run_id=run_id)
-    # R8.2 promised this and R8.3 delivers it: a demotion is exactly the
-    # boundary condition an over-the-loop operator must see, and the
-    # triggering evidence is perishable - it belongs on the item.
-    try:
-        inbox_config = InboxConfig.load(root_dir)
-        if inbox_config.enabled:
-            Inbox(root_dir, inbox_config).add(
-                ItemKind.DEMOTION_NOTICE,
-                f"Autonomy demoted L{record.from_level} -> L{record.to_level}",
-                detail=record.reason,
-                run_id=run_id,
-                dedupe_key=f"demotion:{run_id}:{record.to_level}",
-                evidence={
-                    "trigger": record.trigger,
-                    "from_level": record.from_level,
-                    "to_level": record.to_level,
-                    **record.evidence,
-                },
-            )
-    except (OSError, ValueError) as exc:
-        ui.warn(f"Inbox write failed (non-fatal): {exc}")
-    ui.warn(
-        f"Autonomy DEMOTED L{before} -> L{state.level} "
-        f"({state.autonomy_level.label}) on policy violation; cool-down "
-        f"{state.cooldown_runs_remaining} decisive run(s)"
+        run_id=run_id,
+        ui=ui,
+        bus=bus,
+        state=state,
     )
 
 

@@ -55,6 +55,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from kstrl.atomicio import atomic_write_json
+from kstrl.inbox import Inbox, InboxConfig, ItemKind
 from kstrl.statedir import (
     CONTROL_AUTONOMY,
     control_file,
@@ -65,6 +66,7 @@ from kstrl.statedir import (
 
 if TYPE_CHECKING:
     from kstrl.events import EventBus
+    from kstrl.ui.base import UI
 
 STATE_SCHEMA_VERSION = 1
 
@@ -842,6 +844,74 @@ def commit_transition(
                 reason=record.reason,
             )
         )
+
+
+def apply_demotion(
+    root_dir: Path,
+    trigger: DemotionTrigger,
+    reason: str,
+    *,
+    evidence: dict[str, Any],
+    run_id: str,
+    ui: UI,
+    bus: EventBus | None = None,
+    state: AutonomyState | None = None,
+) -> Transition | None:
+    """Demote one level for ``trigger``, persist, emit, and open the notice.
+
+    Returns None when already at the floor: L1 is the safe state, so a
+    repeated trigger there is a no-op rather than an error. The state is
+    still saved on that path, because the caller's own counters (a policy
+    violation, say) were mutated before the demotion was attempted and
+    they are what blocks the next promotion.
+
+    ``state`` is for callers that already hold a mutated, unsaved state.
+    ``factory._record_autonomy_outcome`` counts the run's violations on an
+    in-memory state and then demotes; re-loading here would silently drop
+    that count. Callers with nothing pending pass nothing and this loads.
+
+    Every automatic demotion goes through this one function so the four
+    writes it performs - state, evolution journal, run event stream and
+    inbox notice - cannot drift apart per trigger. An inbox failure is
+    warned about, never fatal: losing the notice must not strand the
+    ladder with a saved demotion and no record of why.
+    """
+    if state is None:
+        state = AutonomyState.load(root_dir)
+    trigger_text = trigger.label.replace("_", " ")
+    record = state.demote(trigger, reason, evidence=evidence)
+    if record is None:
+        state.save(root_dir)
+        ui.warn(f"Autonomy: {trigger_text} recorded ({reason}); already at L1, nothing to revoke")
+        return None
+    commit_transition(state, record, root_dir, bus=bus, run_id=run_id)
+    # R8.2 promised this and R8.3 delivers it: a demotion is exactly the
+    # boundary condition an over-the-loop operator must see, and the
+    # triggering evidence is perishable - it belongs on the item.
+    try:
+        inbox_config = InboxConfig.load(root_dir)
+        if inbox_config.enabled:
+            Inbox(root_dir, inbox_config).add(
+                ItemKind.DEMOTION_NOTICE,
+                f"Autonomy demoted L{record.from_level} -> L{record.to_level}",
+                detail=record.reason,
+                run_id=run_id,
+                dedupe_key=f"demotion:{run_id}:{record.to_level}",
+                evidence={
+                    "trigger": record.trigger,
+                    "from_level": record.from_level,
+                    "to_level": record.to_level,
+                    **record.evidence,
+                },
+            )
+    except (OSError, ValueError) as exc:
+        ui.warn(f"Inbox write failed (non-fatal): {exc}")
+    ui.warn(
+        f"Autonomy DEMOTED L{record.from_level} -> L{record.to_level} "
+        f"({AutonomyLevel(record.to_level).label}) on {trigger_text}; cool-down "
+        f"{state.cooldown_runs_remaining} decisive run(s)"
+    )
+    return record
 
 
 def manual_override_notes(
