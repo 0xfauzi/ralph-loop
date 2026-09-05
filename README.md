@@ -420,6 +420,7 @@ max_consecutive_poison = 3     # consecutive poisoned items that pause the whole
 caffeinate = true              # hold caffeinate -i for each run so the machine cannot sleep mid-factory
 factory_timeout_seconds = 0.0  # kill a factory run after this long; 0 = no timeout
 allow_uncovered_cost = false   # run unattended even when no adapter reports cost, making the budget unenforceable
+max_open_prs = 1               # scheduled admission stops while this many kstrl-authored PRs are open; 0 = no bound
 
 # Continuous intake queue (R8.6)
 [queue]

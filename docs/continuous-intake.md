@@ -98,7 +98,7 @@ context. Raising the ceiling or narrowing the spec is a human decision.
 Poisoned items wait for a human. `ks queue ls --state poison` lists them;
 `ks inbox ls` carries the decision.
 
-### Four backstops, because a correct classifier is not enough
+### Five backstops, because a correct classifier is not enough
 
 A *persistent* infrastructure fault is retryable by the rules above and
 still burns money. So:
@@ -112,6 +112,31 @@ still burns money. So:
 4. **`[serve] max_consecutive_poison`** - pauses the whole queue. If the
    base branch is broken, every run fails verification, each failure is
    individually legitimate, and no per-item bound ever notices.
+5. **`[serve] max_open_prs`** - flow control on the OUTPUT rather than
+   the spend. The first four bound what the daemon starts; this one
+   bounds what it leaves behind for a human to read.
+
+### Flow control: `max_open_prs`
+
+Scheduled admission stops while `max_open_prs` kstrl-authored pull
+requests are open. The default is 1. Without a bound, a daily loop can
+generate several unreviewed pull requests in a week, producing review
+fatigue and merge conflicts. The rule: a loop may be handed only as much
+autonomy as its output can be cheaply and reliably verified.
+
+A pull request counts as kstrl-authored when its body carries the footer
+line kstrl writes on every PR it opens, which covers pull requests
+created before this bound existed. The count comes from `gh pr list` in
+the repo root, and a count that FAILS refuses admission rather than
+reading as zero.
+
+The refusal is a wait, not a pause: nothing needs to be resumed, and the
+next cycle admits work as soon as the pull request is merged or closed.
+
+**Manual `ks factory` and `ks run` bypass the bound entirely**, because a
+human typing the command is the authorisation. Only the daemon's own
+admission consults it. Set `max_open_prs = 0` to switch it off, or raise
+it if 1 chafes.
 
 ### What `daily_budget_usd` can and cannot do
 
@@ -333,6 +358,7 @@ gone - a crash, an OOM kill, a reboot - not for an ordinary lid close.
 | `serve.out.log` is empty | expected - the UI writes to stderr; read `serve.err.log` |
 | Component failed, cause unclear | an unevidenced failure now prints the component's own error; check it before suspecting the spec |
 | Every poll fails silently under launchd | `PATH` - `gh` is not findable (§4) |
+| Daemon says `N kstrl PR(s) open` | flow control is holding the queue; merge or close the PR, or set `[serve] max_open_prs = 0` |
 
 ---
 

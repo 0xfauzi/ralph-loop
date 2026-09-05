@@ -234,6 +234,8 @@ max_consecutive_poison = 3         # poisoned in a row before the queue pauses
 caffeinate = true                  # hold caffeinate -i per run (macOS); sleeps between
 factory_timeout_seconds = 0.0      # kill a run after this long; 0 = no timeout
 allow_uncovered_cost = false       # true = run unattended under an unenforceable budget
+max_open_prs = 1                   # scheduled admission stops while this many kstrl PRs are open; 0 = no bound
+                                   # manual ks factory / ks run are unaffected
 
 # GitHub Issues as the remote inbox (R8.6). An issue carrying queued_label
 # becomes a queue item; the verdict comes back as a state label and a comment.
