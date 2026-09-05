@@ -575,6 +575,46 @@ class TestResolveBaseBranch:
         assert resolve_base_branch(absent, root) == "master"
 
 
+def _halting_decompose(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
+    """Record what the CLI resolved, then halt before anything is spent.
+
+    Module-level rather than a staticmethod because two classes assert
+    about the arguments the CLI hands `decompose_spec`: #259 about the
+    base branch it resolved, #338 about the project name it let
+    through. A second copy would let them disagree about what "reached
+    decompose" means.
+    """
+    import kstrl.cli as cli_mod
+    from kstrl.decisions import SpecDecision
+    from kstrl.decompose import SpecBlockerError
+
+    seen: dict[str, object] = {}
+
+    def fake_decompose(**kwargs: object) -> None:
+        seen.update(kwargs)
+        # Halt before anything is provisioned; the assertion is on
+        # what the CLI resolved, not on what decompose does with it.
+        raise SpecBlockerError(
+            [
+                SpecDecision(
+                    issue="halt-question",
+                    question="halt",
+                    disposition="escalated",
+                    resolution="the owner must say",
+                )
+            ]
+        )
+
+    monkeypatch.setattr(cli_mod, "decompose_spec", fake_decompose)
+    return seen
+
+
+def _spec_at(root: Path) -> Path:
+    spec = root / "spec.md"
+    spec.write_text("# Spec\n")
+    return spec
+
+
 class TestBaseBranchFlagDefaults:
     """#259: --base-branch defaults to detection, not the literal `main`.
 
@@ -582,45 +622,13 @@ class TestBaseBranchFlagDefaults:
     literal default without even the detection call.
     """
 
-    @staticmethod
-    def _capture(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
-        import kstrl.cli as cli_mod
-        from kstrl.decisions import SpecDecision
-        from kstrl.decompose import SpecBlockerError
-
-        seen: dict[str, object] = {}
-
-        def fake_decompose(**kwargs: object) -> None:
-            seen.update(kwargs)
-            # Halt before anything is provisioned; the assertion is on
-            # what the CLI resolved, not on what decompose does with it.
-            raise SpecBlockerError(
-                [
-                    SpecDecision(
-                        issue="halt-question",
-                        question="halt",
-                        disposition="escalated",
-                        resolution="the owner must say",
-                    )
-                ]
-            )
-
-        monkeypatch.setattr(cli_mod, "decompose_spec", fake_decompose)
-        return seen
-
-    @staticmethod
-    def _spec(root: Path) -> Path:
-        spec = root / "spec.md"
-        spec.write_text("# Spec\n")
-        return spec
-
     def _invoke(self, command: str, root: Path, *extra: str) -> Result:
         return CliRunner().invoke(
             cli,
             [
                 command,
                 "--spec",
-                str(self._spec(root)),
+                str(_spec_at(root)),
                 "--project-name",
                 "test",
                 "--root",
@@ -637,7 +645,7 @@ class TestBaseBranchFlagDefaults:
     def test_decompose_detects_when_flag_is_absent(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        seen = self._capture(monkeypatch)
+        seen = _halting_decompose(monkeypatch)
         root = _repo_on(tmp_path, "master")
         assert self._invoke("decompose", root).exit_code == 2
         assert seen["base_branch"] == "master"
@@ -645,7 +653,7 @@ class TestBaseBranchFlagDefaults:
     def test_factory_detects_when_flag_is_absent(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        seen = self._capture(monkeypatch)
+        seen = _halting_decompose(monkeypatch)
         root = _repo_on(tmp_path, "master")
         assert self._invoke("factory", root).exit_code == 2
         assert seen["base_branch"] == "master"
@@ -653,7 +661,77 @@ class TestBaseBranchFlagDefaults:
     def test_explicit_flag_still_wins(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        seen = self._capture(monkeypatch)
+        seen = _halting_decompose(monkeypatch)
         root = _repo_on(tmp_path, "master")
         assert self._invoke("factory", root, "--base-branch", "trunk").exit_code == 2
         assert seen["base_branch"] == "trunk"
+
+
+class TestBlankProjectName:
+    """#338: an empty or whitespace-only --project-name is refused.
+
+    `""` was accepted by both commands that call `decompose_spec`, and
+    it is the one name at which the convergence accounting counted an
+    audit with no project twice. The name is refused at the boundary
+    now, before the architect runs: measured at 119 to 210 seconds
+    against a frontier model, so the cost of finding out later is real.
+
+    `factory` had a body check that rejected `""` and passed `"   "`.
+    """
+
+    def _invoke(
+        self,
+        command: str,
+        root: Path,
+        project_name: str,
+    ) -> Result:
+        return CliRunner().invoke(
+            cli,
+            [
+                command,
+                "--spec",
+                str(_spec_at(root)),
+                "--project-name",
+                project_name,
+                "--root",
+                str(root),
+                "--agent-cmd",
+                "true",
+                "--ui",
+                "plain",
+                "--no-color",
+            ],
+        )
+
+    @pytest.mark.parametrize("command", ["decompose", "factory"])
+    @pytest.mark.parametrize("project_name", ["", "   ", "\t"])
+    def test_a_blank_name_exits_two_and_names_the_option(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        command: str,
+        project_name: str,
+    ) -> None:
+        seen = _halting_decompose(monkeypatch)
+        root = _repo_on(tmp_path, "master")
+
+        result = self._invoke(command, root, project_name)
+
+        assert result.exit_code == 2
+        assert "--project-name" in result.output
+        # The halting stub records every call, so an empty dict is the
+        # proof nothing was spent rather than the proof it halted.
+        assert seen == {}
+
+    def test_a_name_with_surrounding_space_reaches_decompose_verbatim(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No silent substitution: the callback rejects or returns the
+        value unchanged. Stripping " x " to "x" would write a manifest,
+        a branch and a journal audit under a name the operator never
+        typed."""
+        seen = _halting_decompose(monkeypatch)
+        root = _repo_on(tmp_path, "master")
+
+        assert self._invoke("decompose", root, " x ").exit_code == 2
+        assert seen["project_name"] == " x "
