@@ -176,6 +176,20 @@ def mark_applied(path: Path, when: str | None = None) -> str:
     newline the helper's pad lands first, so the fragment ends up on a
     line of its own and the stamp on the next: one newline more than
     before, in a Markdown file where a blank line is a paragraph break.
+
+    THE ``"a+b"`` CONSEQUENCE, since ``appendio`` opens for update and
+    not for append alone: a proposal file this process can write but not
+    read can no longer be stamped, and the open RAISES rather than the
+    stamp going missing. Two callers and they differ, which is checked
+    rather than assumed. :func:`apply_proposal` catches ``OSError`` and
+    says the learning was appended but the proposal could not be
+    stamped, and that retrying is safe. ``cli``'s own loop does not, so
+    an unreadable proposal file ends ``ks proposals apply`` with a
+    traceback where 568bca4 stamped it. Reaching that needs a deliberate
+    chmod on a file kstrl created itself under ``.kstrl/proposals`` at
+    the umask default, with one writer. The alternative is the fail-OPEN
+    shape #327 round 1 found, where an unreadable file was reported as
+    "not torn" and appended to blind.
     """
     applied_at = when or datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     append_records(path, f"\n**Applied**: {applied_at}\n", repair="")

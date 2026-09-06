@@ -33,11 +33,13 @@ one.
 
 What is NOT shared is what each file should WRITE on finding a tear, so
 that is the caller's ``repair`` argument and nothing here has an opinion
-about it. Two callers pass "" for a bare pad, and both have a reason
+about it. Four callers pass "" for a bare pad, and each has a reason
 written at the call site: the inbox, because a repair row is counted by
 ``scan().unparseable_count()`` and would consume admission capacity
 against the #190 cap; experiments.tsv, because TSV has no marker that a
-reader would not render as a run.
+reader would not render as a run; and the two files that are prose
+rather than records, a proposal's applied stamp and the .gitignore
+block, where a repair line would be a line a person reads.
 
 ``handle_ends_without_newline`` and the ``JOURNAL_REPAIR_EVENT`` name
 moved here from ``observability`` and ``evolution`` when the second
@@ -102,7 +104,19 @@ def handle_ends_without_newline(handle: IO[bytes]) -> bool:
     it is a real trade: a file this process can write but not read stops
     being appendable. Every file routed through this module is under
     ``.kstrl/`` or the XDG control directory, created and read by the
-    same user, and each caller says so where it opens.
+    same user, with ONE exception: ``init_cmd._ensure_gitignore`` writes
+    ``.gitignore`` at the repo root, which kstrl did not create. That
+    one is safe for a reason of its own rather than by the rule, and it
+    is checked rather than assumed: ``_gitignore_state`` reads the file
+    through ``_read_text_or_none`` first and answers ``("keep", None)``
+    for one it cannot read, and ``_ensure_gitignore`` returns on that
+    answer before it reaches the append. So an unreadable .gitignore is
+    refused with a message one step earlier, where this widening would
+    refuse it with an ``OSError``.
+
+    Each caller says so where it opens. ``proposals.mark_applied`` was
+    the one that did not, for a round: the S1 routing added the call
+    after the S2 sweep wrote the clause at the other seven.
 
     Binary, which is the point: the last byte of a file torn
     mid-utf-8-sequence cannot be decoded, and a text-mode probe would
@@ -291,12 +305,15 @@ def appending(path: Path, *, lock: bool = False) -> Iterator[IO[bytes]]:
     tolerant and unlocked and unchanged.
 
     Only ``evolution.EvolutionJournal.append_entries`` asks for the lock
-    today. The other six appendio callers either hold an outer lock
+    today. The other eight appendio callers either hold an outer lock
     already (``inbox`` under ``control_lock``, ``workqueue`` under the
     caller's ``queue_lock``) or have one writer process per file
     (``progress.jsonl``, ``events.jsonl``, ``engineer.jsonl``, the E8
-    telemetry log, ``experiments.tsv``), and each says which at its call
-    site.
+    telemetry log, ``experiments.tsv``, a proposal file and
+    ``.gitignore``), and each says which at its call site. Eight rather
+    than six because #352 routed the last two that were standing on a
+    reason in the append-open guard instead; the count is the routed
+    census minus this module's own two rows and the journal.
     """
     handle = open_for_append(path)
     exclusion: AbstractContextManager[None] = _flock(handle) if lock else nullcontext()
