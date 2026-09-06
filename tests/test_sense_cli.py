@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import shutil
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -283,6 +284,21 @@ def _dead_code_repo(tmp_path: Path) -> Path:
     return root
 
 
+def _without_vulture() -> Callable[..., str | None]:
+    """``shutil.which`` with vulture hidden and everything else real.
+
+    Patched for that ONE name and delegating the rest: `ks sense` runs
+    in-process under ``CliRunner``, so a blanket patch would take ruff
+    and the operator's own commands down with it.
+    """
+    real_which = shutil.which
+
+    def which(name: str, *args: Any, **kwargs: Any) -> str | None:
+        return None if name == "vulture" else real_which(name, *args, **kwargs)
+
+    return which
+
+
 def test_sense_never_edits_stages_or_commits(tmp_path: Path) -> None:
     root = _dead_code_repo(tmp_path)
     head_before = git("rev-parse", "HEAD", cwd=root)
@@ -320,19 +336,10 @@ def test_sense_reports_the_dead_code_phases_separately(tmp_path: Path) -> None:
     which is why the fix is a split and not an omission. Both halves are
     asserted: the ruff row with its real message, and a reason for the
     scan that did not happen.
-
-    ``shutil.which`` is patched for ``vulture`` ONLY, and delegates
-    everything else to the real one: the CLI runs in-process here, so a
-    blanket patch would take ruff and the operator's own commands down
-    with it.
     """
     root = _dead_code_repo(tmp_path)
-    real_which = shutil.which
 
-    def which(name: str, *args: Any, **kwargs: Any) -> str | None:
-        return None if name == "vulture" else real_which(name, *args, **kwargs)
-
-    with patch("shutil.which", side_effect=which):
+    with patch("shutil.which", side_effect=_without_vulture()):
         result, document = _sense_json(root)
 
     assert result.exit_code == 0, result.output
@@ -359,12 +366,8 @@ def test_sense_reports_the_dead_code_phases_separately(tmp_path: Path) -> None:
 def test_sense_table_names_the_dead_code_scan_it_did_not_run(tmp_path: Path) -> None:
     """The terminal half. Most operators read the table, not the JSON."""
     root = _dead_code_repo(tmp_path)
-    real_which = shutil.which
 
-    def which(name: str, *args: Any, **kwargs: Any) -> str | None:
-        return None if name == "vulture" else real_which(name, *args, **kwargs)
-
-    with patch("shutil.which", side_effect=which):
+    with patch("shutil.which", side_effect=_without_vulture()):
         result = _invoke("--root", str(root), "--ui", "plain", "--no-color")
 
     assert result.exit_code == 0, result.output

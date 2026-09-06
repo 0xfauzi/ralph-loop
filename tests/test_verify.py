@@ -9,6 +9,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from subprocess import CompletedProcess, TimeoutExpired
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -42,6 +43,7 @@ from kstrl.verify import (
     check_typecheck,
     run_mechanical_verification,
 )
+from tests.helpers.component_prd import PASSING_STORY, write_component_prd
 from tests.helpers.tool_output import tool_output
 from tests.helpers.verify_phase import CHEAP_GATES, phase_verify_surfaces
 
@@ -808,9 +810,27 @@ class TestCheckSelfCritique:
         assert result.passed is True
 
 
+def _completed(
+    args: object = "cmd",
+    returncode: int = 0,
+    stdout: str = "",
+    stderr: str = "",
+) -> CompletedProcess[str]:
+    return CompletedProcess(args=args, returncode=returncode, stdout=stdout, stderr=stderr)
+
+
+def _which_only(*present: str) -> Callable[[str], str | None]:
+    """A ``shutil.which`` that finds exactly ``present`` and nothing else."""
+
+    def which(name: str) -> str | None:
+        return f"/usr/bin/{name}" if name in present else None
+
+    return which
+
+
 def _mutmut_completed(stdout: str) -> CompletedProcess[str]:
     """A finished ``mutmut`` invocation with ``stdout`` to parse."""
-    return CompletedProcess(args="mutmut", returncode=0, stdout=stdout, stderr="")
+    return _completed("mutmut", 0, stdout)
 
 
 #: ``CHEAP_GATES`` plus the opt-in mutation check, so the only row worth
@@ -1326,24 +1346,6 @@ def test_the_protocol_says_exactly_what_the_function_says() -> None:
     assert without_self == inspect.signature(run_mechanical_verification)
 
 
-def _completed(
-    args: object = "cmd",
-    returncode: int = 0,
-    stdout: str = "",
-    stderr: str = "",
-) -> CompletedProcess[str]:
-    return CompletedProcess(args=args, returncode=returncode, stdout=stdout, stderr=stderr)
-
-
-def _which_only(*present: str) -> Callable[[str], str | None]:
-    """A ``shutil.which`` that finds exactly ``present`` and nothing else."""
-
-    def which(name: str) -> str | None:
-        return f"/usr/bin/{name}" if name in present else None
-
-    return which
-
-
 class TestCheckDeadCode:
     """The vulture-or-custom-command phase, on its own (#335).
 
@@ -1655,7 +1657,6 @@ def _dead_code_verification(
     tools: tuple[str, ...] = ("ruff", "vulture"),
     ruff: CompletedProcess[str] | BaseException | None = None,
     detect: CompletedProcess[str] | BaseException | None = None,
-    custom: str | None = None,
     diff: list[str] | None = None,
     seen: list[str] | None = None,
     config: VerifyConfig | None = None,
@@ -1679,15 +1680,12 @@ def _dead_code_verification(
     """
     recorded = [] if seen is None else seen
 
-    def which(name: str) -> str | None:
-        return f"/usr/bin/{name}" if name in tools else None
-
-    def run(cmd: object, **_: object) -> CompletedProcess[str]:
-        text = cmd if isinstance(cmd, str) else " ".join(str(part) for part in cmd)  # type: ignore[union-attr]
+    def run(cmd: str | list[str], **_: object) -> CompletedProcess[str]:
+        text = cmd if isinstance(cmd, str) else " ".join(cmd)
         recorded.append(text)
         if text.startswith("ruff check"):
             outcome = ruff
-        elif text.startswith("vulture") or (custom is not None and text == custom):
+        elif text.startswith("vulture"):
             outcome = detect
         else:
             outcome = None
@@ -1696,7 +1694,7 @@ def _dead_code_verification(
         return outcome if outcome is not None else _completed(cmd)
 
     with (
-        patch("shutil.which", side_effect=which),
+        patch("shutil.which", side_effect=_which_only(*tools)),
         patch("kstrl.verify.run_scrubbed", side_effect=run),
         patch(
             "kstrl.verify.git.get_diff_names",
@@ -1715,29 +1713,6 @@ def _dead_code_verification(
 
 def _dead_code_rows(result: VerificationResult) -> list[str]:
     return [c.name for c in result.checks if c.name.startswith("dead_code")]
-
-
-def _dead_code_prd(root: Path) -> Path:
-    path = root / "prd.json"
-    path.write_text(
-        json.dumps(
-            {
-                "branchName": "feature",
-                "userStories": [
-                    {
-                        "id": "US-001",
-                        "title": "Story",
-                        "acceptanceCriteria": ["AC1"],
-                        "priority": 1,
-                        "passes": False,
-                        "notes": "",
-                    }
-                ],
-            }
-        ),
-        encoding="utf-8",
-    )
-    return path
 
 
 class TestDeadCodeRowsOnlyExistWhenMeasured:
@@ -1828,7 +1803,7 @@ class TestDeadCodeRowsOnlyExistWhenMeasured:
     def test_a_phase_that_did_not_run_leaves_a_gap_and_the_other_row(
         self,
         tmp_path: Path,
-        stubs: dict[str, object],
+        stubs: dict[str, Any],
         gap: tuple[str, str],
         survivor: str,
         survivor_message: str,
@@ -1848,7 +1823,7 @@ class TestDeadCodeRowsOnlyExistWhenMeasured:
         keeps its row AND its real message. Omitting the fused row would
         have satisfied the first two and thrown a real measurement away.
         """
-        result = _dead_code_verification(tmp_path, **stubs)  # type: ignore[arg-type]
+        result = _dead_code_verification(tmp_path, **stubs)
 
         assert _dead_code_rows(result) == [survivor]
         assert [(g.check, g.reason) for g in result.not_measured] == [gap]
@@ -1889,10 +1864,10 @@ class TestDeadCodeRowsOnlyExistWhenMeasured:
         assert result.passed is False
 
     def test_the_toggle_off_records_no_row_and_no_gap(self, tmp_path: Path) -> None:
-        """The line the sidecar draws: silence is a complete answer to a
-        question nobody asked, and an incomplete one to a question they
-        did. Both stubs would produce rows if the toggle were read as
-        True, so this cannot pass vacuously."""
+        """A phase the operator turned OFF records nothing at all, which
+        is what separates it from one they turned on that measured
+        nothing. Both stubs would produce rows if the toggle were read
+        as True, so this cannot pass vacuously."""
         result = _dead_code_verification(
             tmp_path,
             ruff=_completed("ruff", 0, "Found 1 error (1 fixed, 0 remaining)."),
@@ -1940,7 +1915,13 @@ class TestDeadCodeRowsOnlyExistWhenMeasured:
         )
 
         with patch("kstrl.review.git.repo_change_source", return_value="<change source>"):
-            prompt = build_review_prompt(_dead_code_prd(tmp_path), "main", result)
+            prd = write_component_prd(
+                tmp_path,
+                "prd.json",
+                branch="feature",
+                stories=[{**PASSING_STORY, "passes": False}],
+            )
+            prompt = build_review_prompt(prd, "main", result)
 
         assert "- dead_code_ruff: PASS - ruff auto-fixed 2" in prompt
         assert "- dead_code:" not in prompt

@@ -3602,9 +3602,9 @@ def _sense_document(path: Path, base: str, result: VerificationResult) -> dict[s
     """The ``ks sense --json`` document, at :data:`SENSE_SCHEMA_VERSION`.
 
     Its own function because it is a published contract and ``sense``
-    is a 200-line command: a reader checking what v2 promises should not
-    have to find it among the preflight, the base resolution and the
-    terminal rendering.
+    is a 200-line command: a reader checking what the current schema
+    promises should not have to find it among the preflight, the base
+    resolution and the terminal rendering.
     """
     return {
         "schema_version": SENSE_SCHEMA_VERSION,

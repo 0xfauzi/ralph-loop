@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import py_compile
 import re
+import shutil
 import signal
 import subprocess
 import tempfile
@@ -1979,6 +1980,20 @@ def _count_before(word: str, text: str) -> int:
     return count
 
 
+def _changed_non_test_python(base_branch: str, cwd: Path) -> list[str]:
+    """The non-test Python files in ``git diff <base>...HEAD``.
+
+    One home for the rule, because two checks act on it and both report
+    ``no_target`` when it comes back empty: the mutation gate mutates
+    exactly these files and the dead-code scan scans exactly these
+    files. Widening what counts as a test file in one place and not the
+    other would make one of the two gaps say something the other does
+    not mean.
+    """
+    changed = git.get_diff_names(base_branch, cwd)
+    return [f for f in changed if f.endswith(".py") and not f.startswith("test")]
+
+
 def check_mutation_score(
     cwd: Path,
     base_branch: str,
@@ -2040,8 +2055,6 @@ def check_mutation_score(
     skipping"), halt is not fail, and that layer is unbuilt. The sidecar
     is the third option: seen by the operator, gating nothing.
     """
-    import shutil
-
     start = time.monotonic()
 
     if not shutil.which("mutmut"):
@@ -2051,8 +2064,7 @@ def check_mutation_score(
             "mutmut is not on PATH, so [verify] mutation_testing measured nothing",
         )
 
-    changed = git.get_diff_names(base_branch, cwd)
-    py_files = [f for f in changed if f.endswith(".py") and not f.startswith("test")]
+    py_files = _changed_non_test_python(base_branch, cwd)
     if not py_files:
         return NotMeasured(
             MUTATION_TESTING_CHECK,
@@ -2114,6 +2126,21 @@ def check_mutation_score(
     )
 
 
+def _last_output_line(result: subprocess.CompletedProcess[str]) -> str:
+    """The last line a failed tool printed, capped, for a gap's detail.
+
+    stderr first because that is where a tool that could not start says
+    so, and the last line because a traceback or a usage message puts
+    the sentence a reader needs at the bottom.
+
+    Capped for the reason git.py caps its stderr at 500: this reaches
+    ``ks sense --json`` and the terminal, and one unbroken line of tool
+    output has no bound.
+    """
+    tail = (result.stderr or result.stdout).strip().splitlines()
+    return tail[-1][:500] if tail else "no output"
+
+
 def _no_counts(result: subprocess.CompletedProcess[str]) -> NotMeasured:
     """Why mutmut produced no killed or survived count.
 
@@ -2127,15 +2154,11 @@ def _no_counts(result: subprocess.CompletedProcess[str]) -> NotMeasured:
     correct no-op.
     """
     if result.returncode != 0:
-        tail = (result.stderr or result.stdout).strip().splitlines()
-        # Capped for the reason git.py caps its stderr at 500: this
-        # reaches `ks sense --json` and the terminal, and one unbroken
-        # line of tool output has no bound.
-        last = tail[-1][:500] if tail else "no output"
         return NotMeasured(
             MUTATION_TESTING_CHECK,
             NOT_MEASURED_COMMAND_FAILED,
-            f"mutmut run exited {result.returncode} and reported no counts: {last}",
+            f"mutmut run exited {result.returncode} and reported no counts: "
+            f"{_last_output_line(result)}",
         )
     return NotMeasured(
         MUTATION_TESTING_CHECK,
@@ -2223,11 +2246,9 @@ def check_dead_code_ruff(
     """Auto-remove unused imports and locals with ruff F401/F811/F841.
 
     The first half of what ``check_dead_code`` used to do in one
-    function, split out by #335. Fusing them meant one row spoke for two
-    measurements, so a ruff phase that ran and a vulture phase that did
-    not produced a single ``passed=True`` row that
-    :func:`kstrl.review.build_review_prompt` handed an adversarial
-    reviewer as ``dead_code: PASS``. Two rows, two answers.
+    function, split out by #335 because one row covering two phases
+    reported a pass for whichever of the two had not run.
+    :func:`_dead_code_checks` records the full account.
 
     Always a row when ruff ran, because zero fixes is a measurement.
     Three paths return :class:`NotMeasured` instead, and the ``reason``
@@ -2256,8 +2277,6 @@ def check_dead_code_ruff(
     inside the factory. That is the tree being reported honestly, not a
     bug - but it is a difference.
     """
-    import shutil
-
     start = time.monotonic()
 
     if not shutil.which("ruff"):
@@ -2276,20 +2295,14 @@ def check_dead_code_ruff(
             f"ruff exceeded [verify] subprocess_timeout of {timeout}s",
         )
 
-    output = result.stdout + result.stderr
     if result.returncode not in (0, 1):
-        # Capped for the reason git.py caps its stderr at 500: this
-        # reaches `ks sense --json` and the terminal, and one unbroken
-        # line of tool output has no bound.
-        tail = (result.stderr or result.stdout).strip().splitlines()
-        last = tail[-1][:500] if tail else "no output"
         return NotMeasured(
             DEAD_CODE_RUFF_CHECK,
             NOT_MEASURED_COMMAND_FAILED,
-            f"ruff check exited {result.returncode}: {last}",
+            f"ruff check exited {result.returncode}: {_last_output_line(result)}",
         )
 
-    count = _ruff_count(output, read_only=read_only)
+    count = _ruff_count(result.stdout + result.stderr, read_only=read_only)
     if read_only:
         message = f"ruff reports {count} auto-removable, not removed"
     else:
@@ -2321,8 +2334,6 @@ def _dead_code_command(
     ``test_command``, and it replaces both vulture and the diff read
     that only exists to build vulture's argument list.
     """
-    import shutil
-
     if command:
         return command
     if not shutil.which("vulture"):
@@ -2332,8 +2343,7 @@ def _dead_code_command(
             "vulture is not on PATH and no [verify] dead_code_command is set, "
             "so nothing scanned for dead code",
         )
-    changed = git.get_diff_names(base_branch, cwd)
-    py_files = [f for f in changed if f.endswith(".py") and not f.startswith("test")]
+    py_files = _changed_non_test_python(base_branch, cwd)
     if not py_files:
         return NotMeasured(
             DEAD_CODE_CHECK,
@@ -2459,14 +2469,11 @@ def _dead_code_checks(
         config.dead_code_command,
         config.subprocess_timeout,
     )
-    rows: list[CheckResult] = []
-    gaps: list[NotMeasured] = []
-    for outcome in (ruff_outcome, detect_outcome):
-        if isinstance(outcome, NotMeasured):
-            gaps.append(outcome)
-        else:
-            rows.append(outcome)
-    return rows, gaps
+    outcomes = (ruff_outcome, detect_outcome)
+    return (
+        [o for o in outcomes if isinstance(o, CheckResult)],
+        [o for o in outcomes if isinstance(o, NotMeasured)],
+    )
 
 
 def _scope_checks(
