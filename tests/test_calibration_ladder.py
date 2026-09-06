@@ -91,14 +91,14 @@ class TestCompareLadder:
         assert len(drift) == 1
         assert drift[0].occurrences == 2
 
-    def test_compare_demotes_once_for_the_samebaseline(
+    def test_compare_demotes_once_for_the_same_comparison(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         """Re-reading one measurement must not cost a second level.
 
         The compare command is human-invoked and gets re-run. Deduping on
-        the new baseline's timestamp makes the level a function of what
-        was measured, not of how often it was looked at.
+        the pair of baselines makes the level a function of what was
+        measured, not of how often it was looked at.
         """
         write_config(tmp_path, demote_on_calibration=True)
         AutonomyState(level=int(AutonomyLevel.L3_ENVELOPED_AUTO)).save(tmp_path)
