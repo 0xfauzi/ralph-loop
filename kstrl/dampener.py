@@ -454,8 +454,13 @@ def _refuse_dead_flags(
         raise DampenerUsage("--fail-on-regression does nothing without --compare-baseline")
     if output_format is not None and compare_baseline is None:
         raise DampenerUsage("--format does nothing without --compare-baseline")
-    if as_json and output_format == FORMAT_MARKDOWN:
-        raise DampenerUsage("--json and --format markdown cannot be used together")
+    if as_json and output_format is not None:
+        raise DampenerUsage(f"--json and --format {output_format} cannot be used together")
+    if as_json and write_baseline is not None:
+        # --write-baseline prints one line and writes a file. There is no JSON
+        # document for it to produce, so --json would silently do nothing,
+        # which is the same defect as the four above rather than a lesser one.
+        raise DampenerUsage("--json does nothing with --write-baseline")
 
 
 def resolve_mode(

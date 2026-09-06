@@ -318,6 +318,11 @@ def test_plain_sense_json_is_unchanged(tmp_path: Path) -> None:
             ("--compare-baseline", "--format", "markdown", "--json"),
             ("--json", "--format markdown"),
         ),
+        (
+            ("--compare-baseline", "--format", "human", "--json"),
+            ("--json", "--format human"),
+        ),
+        (("--write-baseline", "--json"), ("--json", "--write-baseline")),
         (("--write-baseline", "--fail-on-regression"), ("--fail-on-regression",)),
         (("--compare-baseline", "--force"), ("--force",)),
     ],

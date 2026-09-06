@@ -101,6 +101,21 @@ stage, runtime feedback, and an earned-autonomy ladder). See
 
 ### Added
 
+- `ks sense --write-baseline` records the current structured failure
+  signatures to `scripts/kstrl/sense-baseline.json` and
+  `ks sense --compare-baseline` reports what a branch added against it:
+  new signatures, signatures whose count rose, and signatures the branch
+  fixed. It is advisory - exit 0 whether or not it found a regression -
+  until `--fail-on-regression` is passed, and `--format markdown` renders
+  the report for a pull-request comment. A baseline signature whose check
+  produced no measurement in the current run is reported as unmeasured
+  rather than fixed, because a check that did not run cannot prove
+  anything; a sensor that timed out or whose tool is missing contributes
+  no signatures to a baseline at all. A workflow on this repository posts
+  the report on every pull request and never fails on a regression.
+  `docs/dampener.md` covers adopting it in another repository and
+  graduating it to blocking (#227).
+
 - The architect's non-blocker spec findings now reach the engineer. They
   were written to `scripts/kstrl/spec-issues.json` on every decompose and
   nothing in `kstrl/` ever opened that file: across five recorded runs
