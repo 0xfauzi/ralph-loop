@@ -81,11 +81,28 @@ def test_sources(exclude: Path | None = None) -> list[Path]:
     A guard naming the shapes it forbids in its own fixtures would
     otherwise scan itself. Never empty, for the reason above: excluding
     the caller cannot empty a directory that holds the caller.
+
+    The hazard this name carries is a MODULE PYTEST COLLECTS, not a
+    from-import: pytest collects any module-level name matching
+    ``test*``, so a from-import binds an extra "test" there and pytest
+    runs the helper as one. ``__test__ = False`` below is what makes
+    that safe rather than a rule every caller has to remember, which
+    is why the rule is stated as the hazard and not as the import
+    style. ``astwalk/__init__.py`` from-imports this name and must;
+    pytest does not collect ``tests/helpers/``. Measured in
+    ``test_event_names_have_one_home.py``: with a from-import and no
+    ``__test__``, 2 collected became 3 and the third PASSED, emitting
+    only a ``PytestReturnNotNoneWarning`` into a suite that already
+    emits eight. With ``__test__ = False`` the same from-import
+    collects 2.
     """
     skip = exclude.resolve() if exclude is not None else None
     found = [path for path in sorted(TESTS_DIR.rglob("*.py")) if path.resolve() != skip]
     assert found, _EMPTY.format(what="tests/", root=TESTS_DIR)
     return found
+
+
+test_sources.__test__ = False  # type: ignore[attr-defined]
 
 
 #: What an empty corpus means, said once. It is never a real answer: both

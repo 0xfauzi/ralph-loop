@@ -13,6 +13,9 @@ that loop:
   diffs two baseline files (v1 or v2) and applies the codified thresholds
   below. Exit code 0 = no regression, 1 = regression, 2 = usage/load error.
   This is what H2's "compare against the baseline" concretely means.
+  ``--root`` points it at a project so a regression also reaches the
+  autonomy ladder; the consequences live in ``kstrl.calibration_ladder``
+  and change no exit code except by adding 2 for an unloadable config.
 - **Kind synonyms**: the architect matcher accepts documented paraphrases of
   the spec-issue taxonomy (see ``KIND_SYNONYM_GROUPS``) so a planted issue
   reported under a sibling label is a hit, not a miss.
@@ -67,6 +70,12 @@ from typing import Any
 # ---------------------------------------------------------------------------
 
 DEFAULT_CALIBRATION_RUNS = 3
+#: What ``load_baseline`` puts in ``Baseline.timestamp`` when the file
+#: carries no ``timestamp`` key. A FILL-IN, not an identity: every such
+#: baseline shares it, so anything that keys on a baseline has to
+#: recognise it and key on something else. Named here rather than
+#: spelled twice, so the reader and the recogniser cannot disagree.
+UNKNOWN_TIMESTAMP = "unknown"
 FIXTURE_DETECTION_THRESHOLD = 0.5
 MAX_ROLE_DETECTION_DROP = 0.15
 MAX_CATEGORY_DETECTION_DROP = 0.40
@@ -401,7 +410,7 @@ def load_baseline(path: Path) -> Baseline:
     return Baseline(
         path=path,
         model=str(data.get("model", "unknown")),
-        timestamp=str(data.get("timestamp", "unknown")),
+        timestamp=str(data.get("timestamp", UNKNOWN_TIMESTAMP)),
         format_version=format_version,
         runs_per_fixture=int(data.get("runs_per_fixture", 1)),
         fixtures=tuple(fixtures),
@@ -707,6 +716,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     compare_parser.add_argument("old", type=Path, help="older baseline JSON")
     compare_parser.add_argument("new", type=Path, help="newer baseline JSON")
+    compare_parser.add_argument(
+        "--root",
+        type=Path,
+        default=None,
+        help=(
+            "project root holding kstrl.toml and the control directory, "
+            "consulted for the autonomy ladder (default: cwd)"
+        ),
+    )
     args = parser.parse_args(argv)
 
     if args.command == "compare":
@@ -718,6 +736,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 2
         comparison = compare_baselines(old, new)
         print(format_comparison(comparison))
+        # Imported here rather than at module scope so this module, the
+        # non-LLM measurement half, does not drag the control plane
+        # (autonomy, inbox, UI) into every importer of a comparison.
+        from kstrl.calibration_ladder import report_to_ladder
+
+        override = report_to_ladder(comparison, (args.root or Path.cwd()).resolve())
+        if override is not None:
+            return override
         return 0 if comparison.passed else 1
     return 2  # pragma: no cover - argparse enforces the subcommand
 

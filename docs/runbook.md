@@ -203,6 +203,12 @@ Anything less halts SOME component, but which one and at which phase depends on 
 
 **Resolve**: either revert the prompt change or update the fixture's `must_detect` if the change deliberately narrowed scope. Do not just unskip the test: a calibration regression is the signal you wrote the system to produce.
 
+**With the autonomy ladder on**: `python -m kstrl.calibration compare <old> <new> --root <repo>` also opens a `calibration_drift` inbox item, deduped on the PAIR of baselines so re-reading the report does not add rows while a different old baseline against the same new one still gets its own item. When EITHER file has no `timestamp` key, the comparison is deduped on a digest of both baselines' detection rates instead, because the fill-in value that stands in for a missing timestamp is shared by every such file and is not an identity. With `[autonomy] demote_on_calibration_regression = true` it additionally demotes one level, trigger `calibration_regression`, once per comparison however often that comparison is re-run. `[autonomy] enabled` and both new switches are refused unless they are written as unquoted booleans: `= "false"` is a string, every non-empty string is true, and a typo that arms a switch which revokes autonomy is worse than one that does not.
+
+Arguments in the wrong order are refused rather than acted on: `compare <newer> <older>` reads every recovered fixture as newly missed, so it reports a regression that is an artifact of the order. When both timestamps parse and the second file is the older one, the ladder is not consulted and the command says so.
+
+With the ladder off it prints `autonomy ladder disabled; regression recorded in the report only`, followed by the root it consulted, so a mistyped `--root` (a directory with no `kstrl.toml` loads as "disabled") does not read as "the ladder is off". The exit code is unchanged either way (0 pass, 1 regression). Exit 2 now also covers a `kstrl.toml` that will not load OR cannot be read on a regression, because "the config is broken" must not read as "the ladder is off"; a passing comparison never consults the ladder, so it never refuses on the config. Anything that fails after the config resolves (the inbox write, the demotion itself) is reported on stderr and leaves the exit code alone: the regression is the measurement's answer, and the bookkeeping does not get to change it.
+
 ## The dashboard (TUI)
 
 `ks factory` on a terminal runs the embedded dashboard by default

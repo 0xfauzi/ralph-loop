@@ -185,19 +185,40 @@ class TestAutonomy:
         assert [r.source for r in reasons] == ["autonomy"]
         assert "failing closed to L1" in reasons[0].detail
 
-    def test_degraded_reason_is_never_written_to_disk(
+    def test_a_degraded_state_is_not_written_back_at_all(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """The field is transient by construction: ``save`` builds its
-        payload key by key, not from ``asdict``. This pins that."""
+        """The stronger form of "never written to disk" (#232 round 3).
+
+        This case used to save the degraded state and assert
+        ``degraded_reason`` was absent from the payload. ``save`` now
+        refuses that write outright: a fresh L1 over damaged bytes
+        destroys the only record an operator can repair, and the next
+        load would then find a clean file, so nothing would report the
+        damage again. The refusal is RETURNED as well as warned, so a
+        caller holding a UI can put it on the surface being watched.
+        The payload half of the old claim is pinned below, on a state
+        that is actually written.
+        """
         make_autonomy_degraded(tmp_path, monkeypatch)
+        path = AutonomyState.path_for(tmp_path)
+        damaged = path.read_bytes()
 
         with pytest.warns(RuntimeWarning):
             state = AutonomyState.load(tmp_path)
         assert state.degraded_reason is not None
-        state.save(tmp_path)
+        with pytest.warns(RuntimeWarning, match="refusing to overwrite"):
+            refused = state.save(tmp_path)
+
+        assert refused is not None
+        assert path.read_bytes() == damaged
+
+    def test_degraded_reason_is_not_a_payload_key(self, tmp_path: Path) -> None:
+        """The field is transient by construction: ``save`` builds its
+        payload key by key, not from ``asdict``. This pins that."""
+        AutonomyState(level=int(AutonomyLevel.L2_GATED_MERGE)).save(tmp_path)
 
         written = json.loads(
             AutonomyState.path_for(tmp_path).read_text(encoding="utf-8"),
