@@ -46,6 +46,21 @@ stage, runtime feedback, and an earned-autonomy ladder). See
   to the ladder through `_as_int`, turning each one into a 0 without
   raising, so a run that never happened counted towards a promotion.
 
+- `ks autonomy replay` names an unreadable `experiments.tsv` instead of
+  reporting that the project has too little history. The reader returned
+  no runs on a permission or a decode error, and no runs is the same
+  state as a project that has never been run, so the operator got
+  "VERDICT: INSUFFICIENT DATA" for a file problem. The exit code is
+  still 2, because nothing was replayed either way; the line above it
+  now names the file and the error.
+
+- A repaired `experiments.tsv` write is logged. It is the one record
+  file that cannot carry a repair row, because every marker a TSV can
+  hold is a field and a row of fields is a run to its reader, so a crash
+  that tore this file and lost a run left nothing anywhere: the pad
+  leaves a short fragment, the reader drops it on width, and there is no
+  counter on that path.
+
 - The evolution journal's probe and append happen under one exclusive
   lock (POSIX). They shared a file description, which removes the
   path-level races but is not a lock, so a concurrent writer could
@@ -58,7 +73,11 @@ stage, runtime feedback, and an earned-autonomy ladder). See
   file with one writer function. Without `fcntl` there is no exclusion,
   the same degradation the control, queue and factory locks already take
   there, and `get_repair_count` and `docs/evolution-metrics.md` both say
-  which case they are describing.
+  which case they are describing. A `flock` that RAISES takes the same
+  path as a missing `fcntl`: some FUSE, 9p and DrvFs mounts answer
+  `ENOLCK` or `EINVAL`, and an unguarded acquisition made every journal
+  append raise on such a mount where it used to write the entry, so the
+  lock added to protect the record was the thing losing it.
 
 - `kstrl.toml` and the `KSTRL_*` environment are now resolved once, at
   command entry, before a command constructs anything. They used to be
