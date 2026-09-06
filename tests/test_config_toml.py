@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from kstrl.config import PATH_KEYS, ConfigError, KstrlConfig, load_toml_document
+from kstrl.config import STRING_KEYS, ConfigError, KstrlConfig, load_toml_document
 from tests.helpers.bad_toml import (
     ACTIVE_FAULTS,
     ALL_FRAGMENTS,
@@ -87,13 +87,28 @@ allowed = ["src/", "tests/"]
     assert config.allowed_paths == ["src/", "tests/"]
 
 
-def test_every_path_key_names_a_real_field() -> None:
-    """PATH_KEYS drives ``setattr``, and ``setattr`` on a typo invents an
+def test_every_string_key_names_a_real_field() -> None:
+    """STRING_KEYS drives ``setattr``, and ``setattr`` on a typo invents an
     attribute rather than raising: the overlay would then silently write
     to a field nothing reads. Dataclass fields, not ``hasattr``, because
     an earlier row's typo would already have created the attribute."""
     declared = {f.name for f in dataclasses.fields(KstrlConfig)}
-    assert declared >= {field_name for _key, _env, field_name in PATH_KEYS}
+    assert declared >= {name for _s, _k, _e, name, _p in STRING_KEYS}
+
+
+def test_every_path_field_has_a_string_keys_row() -> None:
+    """The census in the other direction, which is the likelier defect: a
+    new ``Path`` field on KstrlConfig with no row gets no kstrl.toml key,
+    no env var and no anchoring against the root, and nothing fails.
+    Equality rather than containment, so a Path field deliberately left
+    out of the overlay has to be named here instead of quietly dropping
+    out. ``f.type`` is the annotation string, since the module declares
+    ``from __future__ import annotations``."""
+    path_fields = {
+        f.name for f in dataclasses.fields(KstrlConfig) if str(f.type).startswith("Path")
+    }
+    assert path_fields, "the walk found no Path fields at all, so it proves nothing"
+    assert path_fields == {name for _s, _k, _e, name, is_path in STRING_KEYS if is_path}
 
 
 def test_from_toml_maps_git_section(tmp_path: Path) -> None:
@@ -394,47 +409,42 @@ model = "sonnet"
     assert config.model == "opus"
 
 
-def test_paths_golden_patterns_config_env_beats_toml(
+@pytest.mark.parametrize(
+    ("section", "toml_key", "env_var", "field_name", "is_path"),
+    STRING_KEYS,
+    ids=[f"{section}.{key}" for section, key, _e, _f, _p in STRING_KEYS],
+)
+def test_every_string_key_follows_the_same_precedence(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    section: str,
+    toml_key: str,
+    env_var: str,
+    field_name: str,
+    is_path: bool,
 ) -> None:
-    """R10.8's key follows the [paths] precedence: env > toml > default."""
+    """One rule for every row: env beats kstrl.toml beats the field default,
+    an empty toml value means unset rather than an error, and a path row's
+    default is anchored against the root by all three entry points.
+    Parametrized over the table rather than written against one key
+    (R10.8's), so a row added later is covered the day it is added."""
+    monkeypatch.delenv(env_var, raising=False)
+    default = getattr(KstrlConfig(), field_name)
+    unset = tmp_path / default if is_path and default is not None else default
     toml_path = tmp_path / "kstrl.toml"
-    _write_toml(
-        toml_path,
-        """
-[paths]
-golden_patterns = "from-toml/golden.md"
-""",
-    )
-    monkeypatch.delenv("KSTRL_GOLDEN_PATTERNS_FILE", raising=False)
-    assert KstrlConfig.load(tmp_path).golden_patterns_file == tmp_path / "from-toml/golden.md"
 
-    monkeypatch.setenv("KSTRL_GOLDEN_PATTERNS_FILE", "from-env/golden.md")
-    assert KstrlConfig.load(tmp_path).golden_patterns_file == tmp_path / "from-env/golden.md"
+    _write_toml(toml_path, f'\n[{section}]\n{toml_key} = ""\n')
+    assert getattr(KstrlConfig.load(tmp_path), field_name) == unset
+    assert getattr(KstrlConfig.from_env(tmp_path), field_name) == unset
+    assert getattr(KstrlConfig.from_toml(toml_path, tmp_path), field_name) == unset
 
+    _write_toml(toml_path, f'\n[{section}]\n{toml_key} = "from-toml"\n')
+    from_toml = tmp_path / "from-toml" if is_path else "from-toml"
+    assert getattr(KstrlConfig.load(tmp_path), field_name) == from_toml
 
-def test_golden_patterns_defaults_anchored_against_root(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.delenv("KSTRL_GOLDEN_PATTERNS_FILE", raising=False)
-    expected = tmp_path / "scripts/kstrl/golden-patterns.md"
-    assert KstrlConfig.load(tmp_path).golden_patterns_file == expected
-    assert KstrlConfig.from_env(tmp_path).golden_patterns_file == expected
-    assert KstrlConfig.from_toml(tmp_path / "kstrl.toml", tmp_path).golden_patterns_file == expected
-
-
-def test_an_empty_golden_patterns_key_is_ignored(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The [paths] rule for every key: empty means unset, not an error."""
-    monkeypatch.delenv("KSTRL_GOLDEN_PATTERNS_FILE", raising=False)
-    toml_path = tmp_path / "kstrl.toml"
-    _write_toml(toml_path, '\n[paths]\ngolden_patterns = ""\n')
-    expected = tmp_path / "scripts/kstrl/golden-patterns.md"
-    assert KstrlConfig.load(tmp_path).golden_patterns_file == expected
+    monkeypatch.setenv(env_var, "from-env")
+    from_env = tmp_path / "from-env" if is_path else "from-env"
+    assert getattr(KstrlConfig.load(tmp_path), field_name) == from_env
 
 
 def test_load_toml_wins_over_defaults_when_env_unset(

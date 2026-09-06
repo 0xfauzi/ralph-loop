@@ -60,14 +60,16 @@ class TestLoadOperatorFile:
         # delimiter by the file's own trailing newline.
         assert block.splitlines()[-2] == "- use atomic_write_text"
 
-    def test_empty_file_returns_empty_string(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("text", ["", "\n\n   \n", "\t\n"], ids=["empty", "blank", "tab"])
+    def test_a_file_with_no_words_in_it_returns_empty_string(
+        self,
+        tmp_path: Path,
+        text: str,
+    ) -> None:
+        """An unedited scaffold the operator emptied costs no tokens and
+        emits no delimiters, rather than a header wrapped around nothing."""
         path = tmp_path / "golden-patterns.md"
-        path.write_text("", encoding="utf-8")
-        assert load_operator_file(golden(path)) == ""
-
-    def test_whitespace_only_file_returns_empty_string(self, tmp_path: Path) -> None:
-        path = tmp_path / "golden-patterns.md"
-        path.write_text("\n\n   \n", encoding="utf-8")
+        path.write_text(text, encoding="utf-8")
         assert load_operator_file(golden(path)) == ""
 
     def test_a_file_inside_the_budget_carries_no_truncation_line(

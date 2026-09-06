@@ -24,7 +24,7 @@ from pathlib import Path
 import pytest
 
 from kstrl.factory import _run_component, _setup_worktree
-from tests.spine_utils import git, init_kstrl_repo
+from tests.spine_utils import COMPLETE_LINE, git, init_kstrl_repo
 
 pytestmark = pytest.mark.spine
 
@@ -177,7 +177,7 @@ class TestGoldenPatternsReachTheEngineer:
     agent subprocess's stdin.
     """
 
-    def _repo_with_source(self, tmp_path: Path) -> tuple[Path, Path, Path]:
+    def _repo_with_source(self, tmp_path: Path) -> tuple[Path, Path, Path, Path]:
         """A spine repo whose worktree has a module for feedforward to see.
 
         Committed on main BEFORE the worktree is cut, because feedforward
@@ -196,11 +196,9 @@ class TestGoldenPatternsReachTheEngineer:
         cap.mkdir()
         agent_bin = tmp_path / "bin" / "fake-agent"
         agent_bin.parent.mkdir()
-        agent_bin.write_text(
-            f"#!/bin/bash\ncat > '{cap}/prompt.txt'\necho '<promise>COMPLETE</promise>'\n"
-        )
+        agent_bin.write_text(f"#!/bin/bash\ncat > '{cap}/prompt.txt'\n{COMPLETE_LINE}\n")
         agent_bin.chmod(0o755)
-        return root, worktree, cap
+        return root, worktree, cap, agent_bin
 
     def _run(self, root: Path, worktree: Path, agent_bin: Path) -> None:
         _run_component(
@@ -222,11 +220,11 @@ class TestGoldenPatternsReachTheEngineer:
     def test_golden_block_absent_leaves_prefix_identical(self, tmp_path: Path) -> None:
         """With no file the engineer sees exactly what it saw before: no
         delimiter, and the three existing blocks in their existing order."""
-        root, worktree, cap = self._repo_with_source(tmp_path)
+        root, worktree, cap, agent = self._repo_with_source(tmp_path)
         assert not (worktree / GOLDEN_REL).exists()
         assert not (root / GOLDEN_REL).exists()
 
-        self._run(root, worktree, tmp_path / "bin" / "fake-agent")
+        self._run(root, worktree, agent)
 
         prompt = (cap / "prompt.txt").read_text(encoding="utf-8")
         assert "=== GOLDEN PATTERNS" not in prompt
@@ -237,14 +235,14 @@ class TestGoldenPatternsReachTheEngineer:
         )
 
     def test_golden_block_between_knowledge_and_feedforward(self, tmp_path: Path) -> None:
-        root, worktree, cap = self._repo_with_source(tmp_path)
+        root, worktree, cap, agent = self._repo_with_source(tmp_path)
         (worktree / GOLDEN_REL).parent.mkdir(parents=True, exist_ok=True)
         (worktree / GOLDEN_REL).write_text(
             "# Golden patterns\n\n## Follow these\n\n- atomic writes: see `kstrl/atomicio.py`\n",
             encoding="utf-8",
         )
 
-        self._run(root, worktree, tmp_path / "bin" / "fake-agent")
+        self._run(root, worktree, agent)
 
         prompt = (cap / "prompt.txt").read_text(encoding="utf-8")
         assert GOLDEN_MARKER in prompt
@@ -259,12 +257,12 @@ class TestGoldenPatternsReachTheEngineer:
     def test_the_root_copy_is_read_when_the_worktree_has_none(self, tmp_path: Path) -> None:
         """`ks run` sets use_worktrees=False and a project may not have
         committed the file, so the root fallback is a live path."""
-        root, worktree, cap = self._repo_with_source(tmp_path)
+        root, worktree, cap, agent = self._repo_with_source(tmp_path)
         (root / GOLDEN_REL).parent.mkdir(parents=True, exist_ok=True)
         (root / GOLDEN_REL).write_text("- from the repo root\n", encoding="utf-8")
         assert not (worktree / GOLDEN_REL).exists()
 
-        self._run(root, worktree, tmp_path / "bin" / "fake-agent")
+        self._run(root, worktree, agent)
 
         prompt = (cap / "prompt.txt").read_text(encoding="utf-8")
         assert "- from the repo root" in prompt

@@ -233,17 +233,27 @@ def component_harness_paths(
     )
 
 
-#: Every ``[paths]`` string key: (kstrl.toml key, env var, KstrlConfig
-#: field). One row, not a hand-copied branch in each of the TOML overlay,
-#: the env overlay and ``KstrlConfig.anchored``. tests/test_config_toml.py
-#: checks each name against the real fields, because ``setattr`` on a typo
-#: invents an attribute instead of raising.
-PATH_KEYS: tuple[tuple[str, str, str], ...] = (
-    ("prompt", "PROMPT_FILE", "prompt_file"),
-    ("prd", "PRD_FILE", "prd_file"),
-    ("progress", "PROGRESS_FILE", "progress_file"),
-    ("codebase_map", "CODEBASE_MAP_FILE", "codebase_map_file"),
-    ("golden_patterns", "KSTRL_GOLDEN_PATTERNS_FILE", "golden_patterns_file"),
+#: Every kstrl.toml key that overlays one KstrlConfig field from a
+#: non-empty string: (section, key, env var, field, is_path). A path row's
+#: value is resolved against the root and its field default is anchored
+#: there by ``KstrlConfig.anchored``; every other row takes the string
+#: verbatim. One row, not a hand-copied branch per key in each of the TOML
+#: overlay and the env overlay, plus a copy of the anchoring block in each
+#: entry point: a key added to some of those differed silently by the door
+#: it came in through. tests/test_config_toml.py checks the field names
+#: against the real dataclass fields, because ``setattr`` on a typo invents
+#: an attribute instead of raising. The unprefixed env names are
+#: pre-rename compatibility; a new row takes ``KSTRL_``.
+STRING_KEYS: tuple[tuple[str, str, str, str, bool], ...] = (
+    ("paths", "prompt", "PROMPT_FILE", "prompt_file", True),
+    ("paths", "prd", "PRD_FILE", "prd_file", True),
+    ("paths", "progress", "PROGRESS_FILE", "progress_file", True),
+    ("paths", "codebase_map", "CODEBASE_MAP_FILE", "codebase_map_file", True),
+    ("paths", "golden_patterns", "KSTRL_GOLDEN_PATTERNS_FILE", "golden_patterns_file", True),
+    ("agent", "type", "KSTRL_AGENT_TYPE", "agent_type", False),
+    ("agent", "command", "AGENT_CMD", "agent_cmd", False),
+    ("agent", "model", "MODEL", "model", False),
+    ("agent", "reasoning_effort", "MODEL_REASONING_EFFORT", "model_reasoning_effort", False),
 )
 
 
@@ -252,8 +262,11 @@ class KstrlConfig:
     """Configuration for the kstrl agentic loop."""
 
     max_iterations: int = 10
-    prompt_file: Path = field(default_factory=lambda: Path("scripts/kstrl/prompt.md"))
-    prd_file: Path = field(default_factory=lambda: Path("scripts/kstrl/prd.json"))
+    # Path is immutable and hashable, so dataclasses takes it as a plain
+    # default and no default_factory lambda is needed to keep instances
+    # from sharing one. anchored() rebinds rather than mutating in place.
+    prompt_file: Path = Path("scripts/kstrl/prompt.md")
+    prd_file: Path = Path("scripts/kstrl/prd.json")
     # None = UNSET, and unset is the safe default: every factory
     # component then derives its own log next to its own PRD, inside its
     # allowedPaths (see component_progress_path). Any non-None value -
@@ -275,10 +288,9 @@ class KstrlConfig:
     # Standalone callers that need a concrete path (the prompt template's
     # $progress_path) call resolved_progress_file(root_dir).
     progress_file: Path | None = None
-    codebase_map_file: Path = field(default_factory=lambda: Path("scripts/kstrl/codebase_map.md"))
-    golden_patterns_file: Path = field(
-        default_factory=lambda: Path("scripts/kstrl/golden-patterns.md")
-    )  # R10.8: operator-authored, read into every engineer prompt
+    codebase_map_file: Path = Path("scripts/kstrl/codebase_map.md")
+    # R10.8: operator-authored, read into every engineer prompt
+    golden_patterns_file: Path = Path("scripts/kstrl/golden-patterns.md")
     sleep_seconds: float = 2.0
     interactive: bool = False
     allowed_paths: list[str] = field(default_factory=list)
@@ -315,8 +327,8 @@ class KstrlConfig:
         differed silently by entry point. Anchors the FIELD default, not a
         second copy of the string; progress_file needs no case, being None."""
         config = cls()
-        for _key, _env, field_name in PATH_KEYS:
-            if (default := getattr(config, field_name)) is not None:
+        for _section, _key, _env, field_name, is_path in STRING_KEYS:
+            if is_path and (default := getattr(config, field_name)) is not None:
                 setattr(config, field_name, root_dir / default)
         return config
 
@@ -697,27 +709,17 @@ def _apply_toml_overrides(
     """
     data = load_toml_document(toml_path)
 
-    agent = data.get("agent")
-    if isinstance(agent, dict):
-        agent_type = agent.get("type")
-        if isinstance(agent_type, str) and agent_type:
-            config.agent_type = agent_type
-        command = agent.get("command")
-        if isinstance(command, str) and command:
-            config.agent_cmd = command
-        model = agent.get("model")
-        if isinstance(model, str) and model:
-            config.model = model
-        reasoning = agent.get("reasoning_effort")
-        if isinstance(reasoning, str) and reasoning:
-            config.model_reasoning_effort = reasoning
-        budget = agent.get("budget_usd")
-        if isinstance(budget, (int, float)) and not isinstance(budget, bool):
-            if budget > 0:
-                config.agent_budget_usd = float(budget)
+    for section, toml_key, _env_var, field_name, is_path in STRING_KEYS:
+        block = data.get(section)
+        if isinstance(block, dict) and isinstance(value := block.get(toml_key), str) and value:
+            setattr(config, field_name, _resolve_path(value, root_dir) if is_path else value)
 
-    run = data.get("run")
-    if isinstance(run, dict):
+    if isinstance(agent := data.get("agent"), dict):
+        budget = agent.get("budget_usd")
+        if isinstance(budget, (int, float)) and not isinstance(budget, bool) and budget > 0:
+            config.agent_budget_usd = float(budget)
+
+    if isinstance(run := data.get("run"), dict):
         if "max_iterations" in run:
             config.max_iterations = int(run["max_iterations"])
         if "sleep_seconds" in run:
@@ -725,17 +727,12 @@ def _apply_toml_overrides(
         if "interactive" in run:
             config.interactive = bool(run["interactive"])
 
-    paths = data.get("paths")
-    if isinstance(paths, dict):
-        for toml_key, _env_var, field_name in PATH_KEYS:
-            if isinstance(value := paths.get(toml_key), str) and value:
-                setattr(config, field_name, _resolve_path(value, root_dir))
+    if isinstance(paths := data.get("paths"), dict):
         allowed = paths.get("allowed")
         if isinstance(allowed, list):
             config.allowed_paths = [str(p) for p in allowed if isinstance(p, str)]
 
-    git_section = data.get("git")
-    if isinstance(git_section, dict):
+    if isinstance(git_section := data.get("git"), dict):
         if "branch" in git_section:
             branch = git_section["branch"]
             # Only treat the TOML branch as an explicit override when it
@@ -749,10 +746,8 @@ def _apply_toml_overrides(
         if "auto_checkout" in git_section:
             config.auto_checkout = bool(git_section["auto_checkout"])
 
-    ui = data.get("ui")
-    if isinstance(ui, dict):
-        if "ascii" in ui:
-            config.ascii_only = bool(ui["ascii"])
+    if isinstance(ui := data.get("ui"), dict) and "ascii" in ui:
+        config.ascii_only = bool(ui["ascii"])
 
 
 def _apply_env_overrides(config: KstrlConfig, root_dir: Path) -> None:
@@ -763,9 +758,9 @@ def _apply_env_overrides(config: KstrlConfig, root_dir: Path) -> None:
     """
     if "MAX_ITERATIONS" in os.environ:
         config.max_iterations = int(os.environ["MAX_ITERATIONS"])
-    for _toml_key, env_var, field_name in PATH_KEYS:
-        if env_var in os.environ:
-            setattr(config, field_name, _resolve_path(os.environ[env_var], root_dir))
+    for _section, _toml_key, env_var, field_name, is_path in STRING_KEYS:
+        if (raw := os.environ.get(env_var)) is not None:
+            setattr(config, field_name, _resolve_path(raw, root_dir) if is_path else raw)
     if "SLEEP_SECONDS" in os.environ:
         config.sleep_seconds = float(os.environ["SLEEP_SECONDS"])
     if "INTERACTIVE" in os.environ:
@@ -777,14 +772,6 @@ def _apply_env_overrides(config: KstrlConfig, root_dir: Path) -> None:
         config.kstrl_branch_explicit = True
     if "KSTRL_AUTO_CHECKOUT" in os.environ:
         config.auto_checkout = _parse_bool(os.environ.get("KSTRL_AUTO_CHECKOUT"))
-    if "AGENT_CMD" in os.environ:
-        config.agent_cmd = os.environ["AGENT_CMD"]
-    if "MODEL" in os.environ:
-        config.model = os.environ["MODEL"]
-    if "MODEL_REASONING_EFFORT" in os.environ:
-        config.model_reasoning_effort = os.environ["MODEL_REASONING_EFFORT"]
-    if "KSTRL_AGENT_TYPE" in os.environ:
-        config.agent_type = os.environ["KSTRL_AGENT_TYPE"]
     if "KSTRL_AGENT_BUDGET_USD" in os.environ:
         try:
             budget_value = float(os.environ["KSTRL_AGENT_BUDGET_USD"])
