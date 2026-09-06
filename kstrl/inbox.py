@@ -524,6 +524,16 @@ class Inbox:
         A repeat of a still-open item bumps its occurrence count instead of
         adding a row. A repeat of a DECIDED item opens a fresh one: you
         approved that failure once, and its recurrence is new information.
+
+        A repeat refreshes ``detail`` AND ``evidence`` together. They are
+        two descriptions of the same observation, and refreshing only the
+        prose left the structured half - the half ``ks inbox`` and the
+        TUI render, and the durable one - reporting the first occurrence
+        while the text reported the latest. Measured on a health-breach
+        item: ``detail`` said value 0.9 over 20 runs while ``evidence``
+        still said 0.4 over 8. ``title`` is deliberately NOT refreshed:
+        it is the row's label, and a repeat must not relabel a row an
+        operator has already read.
         """
         now = _utc_now()
         existing = self.find_by_dedupe_key(dedupe_key)
@@ -532,6 +542,8 @@ class Inbox:
             existing.last_seen_at = _iso(now)
             if detail:
                 existing.detail = detail
+            if evidence:
+                existing.evidence = evidence
             self._append(existing)
             return existing
         item = InboxItem(

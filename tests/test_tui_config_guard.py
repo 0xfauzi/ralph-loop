@@ -79,7 +79,12 @@ EXPECTED_RUNTIMEERROR_SPELLINGS: dict[str, int] = {
     "intake_github.py": 1,
     "pr.py": 4,  # no subclass: four bare raises
     "serve.py": 1,
-    "statedir.py": 2,  # two subclasses
+    # One since #232: ControlLockedError and ControlUnavailableError now
+    # derive from a shared ControlStateError, which is the only class in
+    # the module that spells RuntimeError. They are still kstrl's, so
+    # raise_if_defect still treats them as operator input, and the walk
+    # below follows them by subclass rather than by spelling.
+    "statedir.py": 1,
     "workqueue.py": 1,
 }
 
@@ -103,12 +108,36 @@ def _domain_subclass_names(tree: ast.Module, module: str) -> list[str]:
 
 
 def _kstrl_domain_errors() -> list[type[BaseException]]:
-    """Every ``RuntimeError`` subclass ``kstrl/`` declares, imported."""
-    return [
+    """Every ``RuntimeError`` subclass ``kstrl/`` declares, imported.
+
+    TRANSITIVELY, since #232 gave ``statedir`` a shared
+    ``ControlStateError`` base: the AST walk above finds the classes that
+    SPELL ``RuntimeError``, which is the census this file pins, and the
+    two that now derive from one of those would otherwise have dropped
+    out of the behaviour check below without any of them changing what
+    ``raise_if_defect`` does with them. ``__subclasses__`` is exact here
+    because the comprehension has already imported every module in the
+    package.
+    """
+    direct = [
         getattr(importlib.import_module(astwalk.module_name(path)), name)
         for path in astwalk.package_sources()
         for name in _domain_subclass_names(astwalk.parsed(path), astwalk.module_name(path))
     ]
+    seen: dict[str, type[BaseException]] = {}
+    pending = list(direct)
+    while pending:
+        cls = pending.pop()
+        key = f"{cls.__module__}.{cls.__qualname__}"
+        if key in seen:
+            continue
+        seen[key] = cls
+        pending.extend(
+            sub
+            for sub in cls.__subclasses__()
+            if sub.__module__.split(".")[0] == "kstrl"  # ours, not a dependency's
+        )
+    return list(seen.values())
 
 
 class _Harness(App[None]):
@@ -464,6 +493,14 @@ class TestSharedGuard:
         """
         subclasses = _kstrl_domain_errors()
         assert len(subclasses) >= 10, subclasses
+        # Closed under subclassing within kstrl: a domain error that
+        # derives from another domain error rather than from
+        # RuntimeError directly is still the operator's input, and
+        # #232 added the first two of those. Derived, not listed.
+        for cls in subclasses:
+            for descendant in cls.__subclasses__():
+                if descendant.__module__.split(".")[0] == "kstrl":
+                    assert descendant in subclasses, descendant
         for cls in subclasses:
             raise_if_defect(cls("operator input"))  # must not raise
         for defect in (RuntimeError, NotImplementedError, RecursionError):

@@ -90,6 +90,7 @@ from kstrl.review import (
 from kstrl.sandbox import SandboxConfig
 from kstrl.scope import RunScope
 from kstrl.security import SecurityMode, SecurityResult
+from kstrl.statedir import ControlStateError
 from kstrl.verify import (
     SCOPE_UNREADABLE_CHECK,
     CheckResult,
@@ -1677,7 +1678,11 @@ class ComponentPipeline:
                     item.title,
                     component_id=component,
                 )
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, ControlStateError) as exc:
+            # ControlStateError is a RuntimeError: Inbox._append takes
+            # the control lock on every write, and the (OSError,
+            # ValueError) pair the four inbox sites were written with
+            # does not catch what that lock raises.
             self.ui.warn(f"  Inbox write failed (non-fatal): {exc}")
 
     def _park_merge_pending(
