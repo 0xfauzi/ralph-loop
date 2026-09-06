@@ -1,4 +1,10 @@
-"""An enrolled journal event name is spelled once, in ``kstrl/evolution.py``.
+"""An enrolled event name is spelled once where a journal row is written or selected.
+
+That one place is ``kstrl/evolution.py``. The scope of the claim is the
+row, not the word: ``tests/`` holds 46 spellings of ``spec_issues`` that
+are the architect's own JSON key, and both layers deliberately leave
+them alone. Which corpus each layer walks is stated under TWO LAYERS
+below, and each layer's claim is exactly the corpus it walks (#337).
 
 ``spec_issues`` used to be spelled twice: a constant in ``decompose``,
 which writes the row, and a literal in ``evolution``, which selects on
@@ -18,8 +24,12 @@ already over, and ``test_evolution.py`` was at 1407 lines.
 
 TWO LAYERS, because one of them is a net and the other is a message.
 
-LAYER 1, :func:`event_name_spellings`, counts every expression in
-``kstrl/`` whose folded value IS an enrolled event name, per module. It
+LAYER 1, the predicate :func:`spells_an_enrolled_event` run through
+``astwalk.census``, counts every expression in ``kstrl/`` whose folded
+value IS an enrolled event name, per module. (:func:`event_name_spellings`
+is one row of that same census, and exists so the shape controls next
+door can ask about a single file; round 1 of review on #337 found it as
+a third raw ``ast.walk``, certifying a copy of the executed path.) It
 is the net: a row cannot be written or selected by a name the module
 never spells, so a second spelling in any shape has to appear here
 first, whatever it does with the string afterwards. It resolves nothing
@@ -57,28 +67,42 @@ run-time lookup. Constant folding answers ``None`` for all of them.
 from __future__ import annotations
 
 import ast
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 
 from kstrl.evolution import JOURNAL_REPAIR_EVENT, SPEC_ISSUES_EVENT
 
-# Reached through the module: a from-import of ``test_sources`` would be
-# collected here as a third test. Its docstring carries the measurement.
+# Reached through the module for readability rather than for safety:
+# ``test_sources`` carries ``__test__ = False``, so a from-import of it
+# would not be collected here either. Its docstring carries both
+# measurements.
 from tests.helpers import astwalk
 from tests.helpers.astwalk import (
+    REPO_ROOT,
+    TESTS_DIR,
     Sees,
     all_nodes,
     assert_census,
     bound_names,
+    census,
     folded_str,
     label,
     package_sources,
     parsed,
 )
 
-#: The journal event names that have been hoisted to a constant, and so
-#: must never be spelled as a literal in ``kstrl/`` or ``tests/`` again.
-#: Five more are still bare literals (``component_result`` nine times in
+#: The journal event names that have been hoisted to a constant. What
+#: the two layers below actually enforce about them, said as narrowly as
+#: they enforce it, because a claim wider than its walk is #337 itself:
+#: in ``kstrl/`` the name must not be spelled at all, in any shape, and
+#: layer 1's census is what says so; in ``tests/`` only the shape
+#: ATTACHED TO THE ``event_type`` COLUMN is forbidden, which is layer 2,
+#: and the 46 spellings layer 1 counts over ``tests/`` are unenforced by
+#: design. One exception, in ``tests/`` and deliberate: a pin on the
+#: WIRE value, where the literal is the assertion rather than a second
+#: spelling of it. There is exactly one, in ``test_decompose.py``, and
+#: it is written against the bytes on disk so that layer 2 does not see
+#: it. Five more names are still bare literals (``component_result`` nine times in
 #: ``evolution.py`` alone, which is exactly what layer 2 counts there,
 #: plus ``role_usage``, ``contract_result``, ``autonomy_transition`` and
 #: ``findings_superseded``); converting them is a follow-up, and
@@ -125,9 +149,18 @@ def event_name_spellings(source_file: Path) -> int:
     the bare string.
 
     Counted per module so an unrelated edit does not fail it.
+
+    ONE ROW OF ``census``, not a second implementation of it. Layer 1's
+    assertion runs ``assert_census``, which counts through
+    ``astwalk.census``; this function's only callers are the shape
+    controls in ``tests/test_event_name_shapes.py``. Round 1 of review
+    on #337 found it here as a third raw ``ast.walk``, so the controls
+    were certifying a copy of the code the guard executes rather than
+    the code itself. That is the same defect as the test-side copy of
+    the selection rule this PR deletes, one file over.
     """
-    sees = spells_an_enrolled_event()
-    return sum(1 for node in ast.walk(parsed(source_file)) if sees(node))
+    key = label(source_file)
+    return census([source_file], spells_an_enrolled_event()).get(key, 0)
 
 
 #: Every place in ``kstrl/`` that spells an enrolled event name outright,
@@ -201,8 +234,14 @@ def literal_event_names(
     on a computation that does not depend on names, and this file commits
     to five more names. The traversal is still per name, but it goes
     through ``all_nodes``, which memoises it, so the second name reuses
-    the first name's walk instead of repeating it: measured over the
-    333-module corpus, the guard test went 1.53 s to 1.1 s.
+    the first name's walk instead of repeating it.
+
+    Measured as process CPU time over the 332-module corpus this layer
+    walks, three sweeps each, parse cache warmed first so the number is
+    about the walk: 1.26-1.27 s a sweep with a raw ``ast.walk``,
+    0.75-0.76 s with the memo warm. The earlier wall-clock version of
+    this number could not be reproduced without knowing what else the
+    machine was running, which is why it is stated as CPU here.
     """
     resolved = event_type_aliases(tree) if aliases is None else aliases
     return [hit for node in all_nodes(tree) for hit in _hits_at(node, event_name, resolved)]
@@ -492,10 +531,21 @@ def event_type_aliases(tree: ast.Module) -> frozenset[str]:
     that function makes too: a name bound to a read anywhere means "the
     event type" everywhere in the file. That over-reports rather than
     under-reports, and over-reporting is the direction a guard is allowed
-    to be wrong in. Measured: 1 of 127 modules in ``kstrl/`` binds any
-    alias at all.
+    to be wrong in.
+
+    Measured over the corpus this function now runs on, by running it
+    (#337 round 1: the earlier sentence gave the ``kstrl/`` number only,
+    which was two thirds short of the walk). ``kstrl/``: 1 of 129
+    modules binds any alias, 6 names, all in ``evolution.py``.
+    ``tests/``: 4 of 204 modules, 10 names, in ``test_factory.py``,
+    ``test_journal_torn_tail.py``, ``test_resume_ergonomics.py`` and
+    ``test_usage_meter.py``. Three of those names are generic
+    (``entry``, ``rows``, ``results``), so an unrelated ``entry ==
+    "<an enrolled name>"`` later in ``test_factory.py`` would read here
+    as an event-type comparison. That is the over-report direction, so
+    it costs a false positive somebody reads rather than a miss.
     """
-    nodes = list(all_nodes(tree))
+    nodes = all_nodes(tree)
     names: frozenset[str] = frozenset()
     while True:
         found = _alias_sweep(nodes, names)
@@ -504,7 +554,7 @@ def event_type_aliases(tree: ast.Module) -> frozenset[str]:
         names |= found
 
 
-def _alias_sweep(nodes: list[ast.AST], names: frozenset[str]) -> frozenset[str]:
+def _alias_sweep(nodes: Sequence[ast.AST], names: frozenset[str]) -> frozenset[str]:
     """The names ONE pass binds to a read, given what is known so far."""
     found: set[str] = set()
     for node in nodes:
@@ -528,12 +578,17 @@ def _read_hit(operand: ast.expr) -> str:
 class TestJournalEventNamesHaveOneHome:
     """#314 item 3, and #336 round 1 for the shape of the mechanism.
 
-    Two assertions, one per layer. Both are pinned inventories rather
-    than "this list is empty" alone, because an empty list is also what a
-    switched-off detector returns. The shape controls in
-    ``tests/test_event_name_shapes.py`` are what make layer 2's assertion
-    mean something: measured, every one of the twenty matcher functions
-    can be stubbed to a constant, and each stub is noticed there.
+    Two assertions, one per layer, and neither is "this list is empty"
+    alone, because an empty list is also what a switched-off detector
+    returns. They reach that differently and the difference is worth
+    stating, because round 1 of review on #337 found this docstring
+    claiming both were pinned inventories when only one is. Layer 1 IS
+    a pinned inventory, plus ``assert_census``'s own control. Layer 2 is
+    an emptiness assertion, held up by two other things: the shape
+    controls in ``tests/test_event_name_shapes.py``, where every one of
+    the twenty matcher functions was stubbed to a constant and each stub
+    noticed, and the corpus control on the assertion itself, which fails
+    if the ``tests/`` half of the walk goes missing.
     """
 
     def test_nobody_spells_an_enrolled_event_name_for_themselves(self) -> None:
@@ -574,10 +629,47 @@ class TestJournalEventNamesHaveOneHome:
         carries why. Widening the corpus found six sites in the test
         tree, three writes and three reads, across ``test_decompose.py``,
         ``test_evolution.py`` and ``test_journal_torn_tail.py``. None was
-        deliberate, so this layer needs no allowlist.
+        deliberate, so this layer needs no allowlist today.
+
+        THE CORPUS IS THE CONTROL, and it needs one because ``found ==
+        {}`` does not distinguish a clean tree from a walk that was
+        narrowed back. Measured in round 1 of review on #337: deleting
+        ``astwalk.test_sources(...)`` from the line below left this file
+        at 2 passed and the full suite at 5564 passed, byte-identical
+        counts, so the subject of this whole change was revertible with
+        the suite green. ``ruff`` does report the unused import that
+        revert leaves, but ``ruff check --fix`` is what the repo's own
+        pre-commit hook runs, and it deletes the import and hands back a
+        clean tree with the mechanism gone. So the assertion below
+        counts what it was HANDED, from the same list it iterates, which
+        is closed by construction rather than a threshold to maintain.
+
+        ``exclude=Path(__file__)`` for the reason the two peers pass it
+        (``tests/test_procgroup.py`` and ``tests/test_process_scoping.py``):
+        a guard that names the shapes it forbids should not scan itself.
+        DISCLOSED, because ``exclude`` takes one path and the exposure
+        is a sibling: ``tests/test_event_name_shapes.py`` is in this
+        corpus and its whole subject is the shapes this layer forbids.
+        It is clean today only because every control there is a source
+        STRING that ``folded_str`` folds whole. The first control
+        somebody writes as real code instead of a snippet makes this
+        assertion fail on its own positive-control file, and the only
+        green route would be to weaken the control. That is the point at
+        which this layer needs a named allowlist, and the same is true
+        from the other direction the day ``component_result`` is
+        enrolled: ``tests/test_decompose.py`` writes a deliberate legacy
+        on-disk row with it.
         """
+        sources = package_sources() + astwalk.test_sources(exclude=Path(__file__))
+        walked_tests = [path for path in sources if path.is_relative_to(TESTS_DIR)]
+        assert walked_tests, (
+            f"layer 2 was handed {len(sources)} modules and none of them is under "
+            f"{TESTS_DIR}, so this assertion covers kstrl/ only and the corpus #337 "
+            "added is gone. Nothing else in the suite fails when that happens."
+        )
+
         found: dict[str, list[str]] = {}
-        for source_file in package_sources() + astwalk.test_sources():
+        for source_file in sources:
             tree = parsed(source_file)
             aliases = event_type_aliases(tree)
             hits = [
@@ -586,7 +678,7 @@ class TestJournalEventNamesHaveOneHome:
                 for hit in literal_event_names(tree, event_name, aliases)
             ]
             if hits:
-                found[label(source_file)] = hits
+                found[label(source_file, REPO_ROOT)] = hits
 
         assert found == {}, (
             "A journal row is written or selected by a bare literal instead of the "
