@@ -178,16 +178,25 @@ def load_runs(path: Path) -> list[RunRecord]:
     concatenation against the header: the ladder then saw a run whose
     numeric columns had shifted, and ``_as_int`` turned every one of
     them into 0 without raising. That is a fabricated run in the
-    population a promotion is decided on. The shared parser drops a row
-    whose width this writer never emits.
+    population ``ks autonomy replay`` reports on. (Not in a live
+    promotion: this function has one caller, :func:`replay_file`, and
+    that command never mutates ladder state.) The shared parser drops a
+    row whose width does not fit the file's header.
+
+    MISSING is no runs; UNREADABLE is a refusal. ``OSError`` and
+    ``ValueError`` go to the caller, where 568bca4 let the ``OSError``
+    out too. Swallowing them turned a permission error or a decode
+    error into an empty population, and an empty population reads as
+    "insufficient data to calibrate anything", which is a sentence about
+    the project's history rather than about the file. CLAUDE.md, on
+    #260: make unreadable a REFUSAL, not an empty read, because an empty
+    read is a silent removal of the mechanism. ``ks autonomy replay``
+    catches both and names the cause.
     """
     if not path.exists():
         return []
     runs: list[RunRecord] = []
-    try:
-        text = path.read_text(encoding="utf-8")
-    except (OSError, ValueError):
-        return []
+    text = path.read_text(encoding="utf-8")
     for row in experiment_rows(text):
         if row.get("run_id"):
             runs.append(

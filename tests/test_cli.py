@@ -657,3 +657,26 @@ class TestBaseBranchFlagDefaults:
         root = _repo_on(tmp_path, "master")
         assert self._invoke("factory", root, "--base-branch", "trunk").exit_code == 2
         assert seen["base_branch"] == "trunk"
+
+
+class TestAutonomyReplayNamesAnUnreadableFile:
+    """#352: exit 2 with a cause, rather than exit 2 saying the history is short.
+
+    ``load_runs`` swallowed the read error and returned no runs, so an
+    encoding or permission problem printed "VERDICT: INSUFFICIENT DATA"
+    and exited 2. The code is unchanged, because nothing was replayed
+    either way; what is new is the line above it.
+    """
+
+    def test_an_undecodable_file_reports_the_cause(self, tmp_path: Path) -> None:
+        path = tmp_path / "experiments.tsv"
+        path.write_bytes(b"run_id\ttimestamp\nrun-1\xff\t2026-01-01\n")
+
+        result = CliRunner().invoke(
+            cli,
+            ["autonomy", "replay", "--experiments", str(path), "--no-color"],
+        )
+
+        assert result.exit_code == 2
+        assert "could not read the recorded run history" in result.output
+        assert "INSUFFICIENT DATA" not in result.output

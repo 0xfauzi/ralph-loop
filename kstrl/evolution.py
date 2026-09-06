@@ -72,7 +72,7 @@ EXPERIMENTS_HEADER = (
 
 
 def experiment_rows(text: str) -> list[dict[str, Any]]:
-    """Parse experiments.tsv, dropping any row whose WIDTH this writer never emits.
+    """Parse experiments.tsv, dropping any row whose WIDTH does not fit the header.
 
     #331's read half. The write half pads an unterminated tail, but a
     file torn before that landed still has the concatenated row in it,
@@ -96,14 +96,59 @@ def experiment_rows(text: str) -> list[dict[str, Any]]:
     the writer leaves behind is one, and it is not an incident by
     itself.
 
+    THREE RESIDUALS, measured in review of #352 rather than reasoned
+    about, because "this writer never emits such a row" was the original
+    claim here and it is not true.
+
+    1. A row this writer CAN emit is dropped. ``row`` is built by
+       f-string ``\t``-joining, not by ``csv.writer``, so a tab or a
+       newline in ``project_name`` or ``common_failure`` reaches the
+       file unescaped and nothing between the CLI and the write rejects
+       one (#347's callback rejects blank and whitespace-only names, not
+       embedded tabs). Measured on one ``record_run`` each: a project
+       named ``pro\tject`` rendered a row with shifted columns before
+       this filter and renders nothing now, and ``pro\nject`` produced
+       two rows and now produces none. Dropping beats rendering shifted
+       numbers to a ladder, so the filter is still the right call; the
+       claim was the defect.
+    2. A header that is NOT a prefix of the current one silently drops
+       every row this writer appends. Measured with the first column
+       renamed: an 11-column legacy header plus a fresh 14-field row
+       returns only the legacy row. ``record_run`` never rewrites a
+       disagreeing header, so in that state every new run is invisible
+       to ``ks evolve --status`` and to ``ks autonomy replay`` with
+       nothing logged.
+    3. A fragment torn INSIDE the first field survives. A concatenation
+       has ``k + 14 - 1`` fields for a fragment of ``k`` fields, which
+       is 15 or more for a tear past the first tab; a tear before it
+       gives ``k == 1`` and exactly 14, which is legal. Measured: both
+       readers return ``run_id='run-2run-3'`` with every other column
+       holding run-3's real values. ``run_id`` is column 1, so this is
+       whatever share of the row's bytes a run id occupies, not a
+       corner. New appends cannot create this state now that the writer
+       pads.
+
+    There is no counter for any of it, which is the fourth thing to
+    know: ``[]`` from here means "no runs recorded", "the header does
+    not match" and "every row was malformed" alike, and the trends tab
+    renders the same empty table for all three.
+
     Public because this file has TWO readers, not one:
     :meth:`EvolutionJournal.get_experiment_trends` renders it and
     ``autonomy_replay.load_runs`` feeds it to the autonomy ladder. Both
     used a bare ``csv.DictReader``, so a filter on only one of them
     would fix the screen and leave the ladder promoting on a run that
     does not exist.
+
+    ``newline=""`` on the buffer is what ``csv`` documents as required
+    for a stream handed to a reader. It is only half the contract here
+    and the other half is not reachable: both callers arrive with text
+    from ``Path.read_text``, which has already applied universal-newline
+    translation, and ``read_text`` grew a ``newline`` parameter in 3.13
+    while this project's floor is 3.11. So a lone ``\r`` inside a field
+    is an ``\n`` before it gets here, which residual 1 covers.
     """
-    reader = csv.reader(io.StringIO(text), delimiter="\t")
+    reader = csv.reader(io.StringIO(text, newline=""), delimiter="\t")
     try:
         header = next(reader)
     except StopIteration:
@@ -684,6 +729,31 @@ def _journal_line(entry: dict[str, Any]) -> str:
     return json.dumps(entry, separators=(",", ":")) + "\n"
 
 
+def _log_experiments_repair(repaired: bool, path: Path) -> None:
+    """Say that a torn experiments.tsv was padded, since the file cannot.
+
+    The other five appenders record a repair as a row their own reader
+    returns. This one pads bare, because every marker a TSV can carry is
+    a field and a row of fields is a run, so the log is the only place
+    the incident can go. Without it a crash that tore this file and cost
+    a run is something nothing in the product ever says: the pad leaves
+    a short fragment, ``experiment_rows`` drops it on width, and there
+    is no counter on that path either.
+
+    A function rather than an ``if`` inside :meth:`record_run` because
+    that method is at the cyclomatic ratchet's grandfathered value and
+    one more branch would push it up. It also gives the sentence one
+    home.
+    """
+    if repaired:
+        logger.warning(
+            "experiments.tsv did not end in a newline, so a crash tore it: %s. "
+            "The tail was padded onto a line of its own, so the row above this "
+            "run may be a fragment and the run it belonged to was lost.",
+            path,
+        )
+
+
 def _repair_entry() -> dict[str, Any]:
     """The row :meth:`EvolutionJournal.append_entries` writes on finding
     an unterminated tail.
@@ -993,10 +1063,15 @@ class EvolutionJournal:
             # A BARE PAD, no marker row. Every marker a TSV can carry is
             # a field, and a row of fields is a RUN to this file's
             # reader; there is no shape here that reads as "not a run"
-            # the way JOURNAL_REPAIR_EVENT does in a JSONL file. The
-            # incident is surfaced on the read side instead, by
-            # get_experiment_trends dropping a row whose width is not
-            # one this writer emits.
+            # the way JOURNAL_REPAIR_EVENT does in a JSONL file.
+            #
+            # So the incident is recorded in the log rather than in the
+            # file. The pad means there is no concatenated row left for
+            # get_experiment_trends to drop, only a short fragment it
+            # drops silently, and a crash that tore this file and cost a
+            # run would otherwise be something nothing in the product
+            # ever says. That is the same argument #312 made for the
+            # journal_repair row, on the one file that cannot carry one.
             #
             # needs_header is unchanged and still asked before the
             # append: a file that is missing or empty cannot have a torn
@@ -1006,7 +1081,10 @@ class EvolutionJournal:
             # in the helper, and this is the file get_experiment_trends
             # decodes as utf-8.
             payload = (EXPERIMENTS_HEADER + "\n" if needs_header else "") + row + "\n"
-            append_records(self.config.experiments_path, payload, repair="")
+            _log_experiments_repair(
+                append_records(self.config.experiments_path, payload, repair=""),
+                self.config.experiments_path,
+            )
         except OSError as exc:
             logger.warning(
                 "experiments.tsv write failed (non-fatal): %s: %s",

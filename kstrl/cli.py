@@ -4466,12 +4466,27 @@ def autonomy_replay_cmd(
     Reports what WOULD have fired and whether the sample is large enough
     to calibrate anything. Never mutates ladder state. Exit code 2 means
     "insufficient data", so a script cannot mistake it for a green run.
+
+    An UNREADABLE experiments.tsv exits 2 as well, and this is where it
+    gets a cause. ``load_runs`` used to swallow the OSError and the
+    decode error and return no runs, which reached the operator as
+    "INSUFFICIENT DATA": a sentence about the project's history for
+    what is a permission or an encoding problem. The exit code is the
+    same because nothing was replayed either way; the difference is
+    that the line above it now names the file and the error.
     """
     from kstrl.autonomy_replay import replay_file
 
     root_dir = (root or Path.cwd()).resolve()
     ui_impl = _autonomy_ui(ui, no_color)
-    report = replay_file(experiments, root_dir)
+    try:
+        report = replay_file(experiments, root_dir)
+    except (OSError, ValueError) as exc:
+        # ValueError beside OSError because UnicodeDecodeError is one,
+        # and it escapes a fail-closed `except OSError` (CLAUDE.md,
+        # encoding is two-sided).
+        ui_impl.err(f"could not read the recorded run history: {exc}")
+        sys.exit(2)
     for line in report.render().splitlines():
         ui_impl.info(line)
     sys.exit(0 if report.sufficient_data else 2)

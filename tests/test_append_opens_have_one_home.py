@@ -19,6 +19,17 @@ whatever it does with the handle afterwards. An unfoldable mode is
 COUNTED rather than skipped, so ``os.open(p, flags)`` cannot hide in the
 gap between "not a literal" and "not an append".
 
+LAYER 3, :func:`routed_append_census`, is the other half of the same
+question and was missing until #352. Layers 1 and 2 count places an
+append handle is OBTAINED with a raw ``open``, so a new appender that
+does the right thing and calls into ``appendio`` is invisible to both.
+The exclusion that stops two writers costing each other records is an
+argument of that call, defaulting to off, and until this layer existed a
+new record file could arrive with no lock and no row anybody had to
+write. This census keys every call into ``appendio`` by scope and pins
+what it passes for ``lock``, so an omission is an unexplained row rather
+than a default.
+
 LAYER 2, :func:`unrouted_append_opens`, attributes each of layer 1's
 sites to its innermost SCOPE and demands a row in
 :data:`ALLOWED_APPEND_OPENS`. It is not a nicer message for layer 1: it
@@ -286,6 +297,74 @@ EXPECTED_APPEND_OPENS: dict[str, int] = {
 }
 
 
+#: The functions that hand out an append handle or perform an append,
+#: which is the whole of ``appendio``'s surface for a caller.
+#: ``append_terminated`` is not one: it takes a handle somebody else
+#: already obtained here, so counting it would count the same site
+#: twice.
+APPENDIO_ENTRY_POINTS = frozenset({"append_records", "appending", "open_for_append"})
+
+
+def routed_append_calls(node: ast.AST) -> bool:
+    """Layer 3's predicate: does this ONE node call into ``appendio``?"""
+    return isinstance(node, ast.Call) and leaf_name(node.func) in APPENDIO_ENTRY_POINTS
+
+
+def lock_argument(node: ast.Call) -> str:
+    """What this call passes for ``lock``, unparsed, or ``"default (False)"``.
+
+    Keyword only, because that is the signature: ``lock`` is
+    keyword-only on both ``appending`` and ``append_records``, so a
+    positional cannot reach it and there is no index to guess.
+    """
+    for keyword in node.keywords:
+        if keyword.arg == "lock":
+            return ast.unparse(keyword.value)
+    return "default (False)"
+
+
+def routed_key(source_file: Path, node: ast.AST) -> str:
+    """``module.py:scope calls callee(lock=...)``.
+
+    Named by scope rather than by line for layer 2's reason, and the
+    callee is in the key because one scope can reasonably obtain a
+    handle and append through it.
+    """
+    assert isinstance(node, ast.Call)
+    return f"{label(source_file)}: {ast.unparse(node.func)}(lock={lock_argument(node)})"
+
+
+def routed_append_census() -> dict[str, int]:
+    """Layer 3's inventory over ``kstrl/``, re-derived by RUNNING it."""
+    return census(package_sources(), routed_append_calls, key=routed_key)
+
+
+#: Layer 3's pin: every call into ``appendio`` and the exclusion it asks
+#: for. Exactly one site passes ``lock=True``, the evolution journal,
+#: and the reason each of the others does not is at its own call site:
+#: ``inbox`` is under ``control_lock``, ``workqueue`` under the caller's
+#: ``queue_lock``, and the rest have one writer process per file.
+#: ``appendio``'s own two rows are the helper passing the caller's
+#: choice through.
+#:
+#: A new record file added the RIGHT way, through ``append_records``,
+#: lands here rather than in layer 1, which is the hole this closes: it
+#: would otherwise get no exclusion and change no pinned inventory.
+EXPECTED_ROUTED_APPENDS: dict[str, int] = {
+    "appendio.py: appending(lock=lock)": 1,
+    "appendio.py: open_for_append(lock=default (False))": 1,
+    "events.py: open_for_append(lock=default (False))": 1,
+    "evolution.py: append_records(lock=True)": 1,
+    "evolution.py: append_records(lock=default (False))": 1,
+    "inbox.py: append_records(lock=default (False))": 1,
+    "init_cmd.py: append_records(lock=default (False))": 1,
+    "knowledge.py: append_records(lock=default (False))": 1,
+    "observability.py: append_records(lock=default (False))": 1,
+    "proposals.py: append_records(lock=default (False))": 1,
+    "workqueue.py: append_records(lock=default (False))": 1,
+}
+
+
 def scope_of(tree: ast.Module) -> dict[int, str]:
     """Every node in a module mapped to the qualified name of its scope.
 
@@ -421,6 +500,33 @@ class TestEveryAppendOpenHasOneHome:
             "An append-mode open outside kstrl/appendio.py with no row. Route it "
             "through kstrl.appendio.append_records, or add a row to "
             f"ALLOWED_APPEND_OPENS with a reason. Offenders: {offenders}"
+        )
+
+    def test_every_call_into_appendio_pins_the_exclusion_it_asks_for(self) -> None:
+        """Layer 3, the other half of the net.
+
+        Layers 1 and 2 see raw ``open`` calls, so an appender that is
+        routed correctly is invisible to them and its ``lock`` argument
+        defaults to off. A new record file would then get no exclusion
+        while changing no pinned inventory, which is the opposite of
+        what adding a row to ``ALLOWED_APPEND_OPENS`` is for.
+        """
+        assert_census(
+            sources=package_sources(),
+            sees=routed_append_calls,
+            key=routed_key,
+            expected=EXPECTED_ROUTED_APPENDS,
+            control=(
+                'append_records(p, line, repair="")\n',
+                "appending(p, lock=True)\n",
+                "open_for_append(p)\n",
+            ),
+            message=(
+                "The set of calls into kstrl.appendio changed. If this is a new "
+                "writer of records, decide whether it needs lock=True: without it "
+                "two writers can cost each other records and the repair count "
+                "(#330). Then add the row here with the answer."
+            ),
         )
 
     def test_every_allowed_row_names_a_site_that_still_exists(self) -> None:

@@ -18,8 +18,11 @@ the class below is moved unchanged.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
+
+import pytest
 
 from tests.helpers.journal import lose_the_newline, tear
 
@@ -71,6 +74,44 @@ class TestExperimentsTsvSurvivesATornTail:
         rows = journal.get_experiment_trends()
         assert [r["run_id"] for r in rows] == ["run-1", "run-2"]
         assert all(None not in r and None not in r.values() for r in rows)
+
+    def test_the_repair_is_logged_because_the_file_cannot_carry_a_row(
+        self,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """The bare pad is not an excuse for a silent repair (#352).
+
+        Five appenders record a repair as a row their own reader
+        returns; this one cannot, because every marker a TSV can carry
+        is a field and a row of fields is a run. Without the log line a
+        crash that tore this file and cost a run is something nothing in
+        the product ever says: the pad leaves a short fragment,
+        ``experiment_rows`` drops it on width, and no counter exists on
+        that path.
+        """
+        journal = self.journal_at(tmp_path)
+        self.record(journal, "run-1")
+        tear(journal.config.experiments_path)
+
+        with caplog.at_level(logging.WARNING, logger="kstrl.evolution"):
+            self.record(journal, "run-2")
+
+        assert [r.getMessage() for r in caplog.records if "experiments.tsv" in r.getMessage()]
+
+    def test_an_untorn_write_logs_nothing(
+        self,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """The control: a repair message on every ordinary run is noise."""
+        journal = self.journal_at(tmp_path)
+        self.record(journal, "run-1")
+
+        with caplog.at_level(logging.WARNING, logger="kstrl.evolution"):
+            self.record(journal, "run-2")
+
+        assert [r.getMessage() for r in caplog.records if "experiments.tsv" in r.getMessage()] == []
 
     def test_a_row_that_lost_its_newline_is_recovered(self, tmp_path: Path) -> None:
         journal = self.journal_at(tmp_path)

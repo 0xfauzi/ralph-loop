@@ -275,7 +275,11 @@ class TestQueueJournalSurvivesATornTail:
 
         assert repair_rows(queue.journal_entries())
         assert [e.get("item_id") for e in queue.journal_entries("b")] == ["b"]
-        assert queue.journal_entries("a") == queue.journal_entries("a")
+        # a's history is where a repair row that borrowed an id would
+        # show up, since the tear was planted right after it. This line
+        # compared one call to itself until #352 and passed for any
+        # result, including the one it exists to refuse.
+        assert [e.get("item_id") for e in queue.journal_entries("a")] == ["a"]
 
     def test_an_untorn_journal_is_appended_to_byte_for_byte(self, tmp_path: Path) -> None:
         queue = self.queue_at(tmp_path)

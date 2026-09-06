@@ -896,7 +896,15 @@ class Queue:
             append_records(
                 self.journal_path,
                 line + "\n",
-                repair=json.dumps(_journal_repair_entry(), ensure_ascii=False) + "\n",
+                # ensure_ascii at its default, unlike the entry line
+                # above it. CLAUDE.md: kstrl must not be the SOURCE of
+                # non-ASCII bytes, because #291 measured one curly quote
+                # breaking six readers under LC_ALL=C. This row's
+                # content is ASCII either way today; what the default
+                # buys is that it stays so if the helper gains a field.
+                # The entry line's setting is pre-existing and out of
+                # this class.
+                repair=json.dumps(_journal_repair_entry()) + "\n",
             )
         except OSError as exc:
             warnings.warn(

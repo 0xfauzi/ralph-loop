@@ -406,6 +406,28 @@ class TestReplay:
         assert report.total_runs == 0
         assert report.sufficient_data is False
 
+    def test_an_unreadable_experiments_file_is_a_refusal_not_no_runs(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """#352: an empty read is a silent removal of the mechanism.
+
+        A decode error and a permission error used to reach the
+        operator as "INSUFFICIENT DATA", which is a sentence about the
+        project's history rather than about the file. The exception goes
+        to the caller now, and ``ks autonomy replay`` names the cause
+        above the same exit code.
+
+        A byte that is no valid utf-8 sequence is the reachable half of
+        this on any machine; the mode-0200 half needs a permission the
+        superuser ignores, so it is not the one asserted here.
+        """
+        path = tmp_path / "experiments.tsv"
+        path.write_bytes(b"run_id\ttimestamp\nrun-1\xff\t2026-01-01\n")
+
+        with pytest.raises(ValueError):
+            load_runs(path)
+
     def test_replay_never_mutates_stored_state(self, tmp_path: Path) -> None:
         # Reading a replay is a report, never a transition.
         AutonomyState(level=int(AutonomyLevel.L2_GATED_MERGE)).save(tmp_path)
