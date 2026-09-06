@@ -452,12 +452,8 @@ DEFAULT_KSTRL_TOML = """\
 # merge_timeout = 300.0            # seconds to wait for PR merge confirmation
 # max_adversarial_calls = 0        # 0 = unbounded; caps review+security+distill LLM calls per run
 # At the cap, hard-mode review and security HALT the component with
-# failed_check=adversarial_budget rather than merging it unreviewed;
-# advisory records a phase_skipped and continues; the distiller is
-# always skipped rather than halted, since it gates nothing - but it
-# spends one call first, so budget 3 per component for hard review plus
-# hard security plus knowledge. A cap of 2 per component halts the
-# second component at security (R10.5).
+# failed_check=adversarial_budget; advisory skips, and can still fail it
+# at the set-point gate. Budget 3 calls per component (docs/runbook.md).
 # pause_before_pr_merge = false    # opt-in HITL checkpoint before each PR push+merge
 
 # Phase 1 mechanical verification. These three are the one source of truth for

@@ -765,8 +765,15 @@ took diff chunking out entirely: the reviewer now runs inside the worktree and
 reads git itself, so there is no chunking decision to make and no second path to
 match. The unchunked path was therefore the only path, and it now halts.
 Advisory mode keeps the recorded skip, and the knowledge distiller keeps its
-skip in every mode, which is the priority policy this section asked for stated
-explicitly: the merge gates halt, the non-gate sheds.
+skip in every mode. That is half of the priority policy this section asked for:
+the merge gates now halt rather than shedding themselves. The other half is not
+built. The distiller sheds only AFTER it has spent - the measured consume order
+for two components is review, security, distill, review, security, distill, so
+component A's distiller takes the call component B's security then cannot have.
+A shed that happens after the resource is consumed does not protect the gates,
+which is why an operator is asked to budget 3 calls per component rather than 2.
+Reserving the gates' calls, or taking the distiller off this counter, would make
+`2 * components` correct; #226 put the distiller out of scope and left it.
 
 ### 5.10 Ready to iterate faster
 
@@ -1015,7 +1022,7 @@ Cycle: R10, milestone [R10: Control Loop](https://github.com/0xfauzi/kstrl/miles
 | 2 | 5.3 level-triggered retry context | [#223](https://github.com/0xfauzi/kstrl/issues/223) | `[x]` |
 | 3 | 5.2 set-point agreement | [#224](https://github.com/0xfauzi/kstrl/issues/224) | `[x]` |
 | 4 | 5.9 name safe mode | [#225](https://github.com/0xfauzi/kstrl/issues/225) | `[x]` |
-| 5 | 5.9 adversarial budget: hard mode halts | [#226](https://github.com/0xfauzi/kstrl/issues/226) | `[x]` merged in #349 |
+| 5 | 5.9 adversarial budget: hard mode halts | [#226](https://github.com/0xfauzi/kstrl/issues/226) | `[x]` |
 | 6 | 5.5 dampener | [#227](https://github.com/0xfauzi/kstrl/issues/227) | `[ ]` |
 | 7 | 5.6 flow control | [#228](https://github.com/0xfauzi/kstrl/issues/228) | `[ ]` |
 | 8 | 5.4 golden patterns | [#229](https://github.com/0xfauzi/kstrl/issues/229) | `[ ]` |

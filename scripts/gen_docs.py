@@ -499,12 +499,9 @@ KEY_DESCRIPTIONS: dict[tuple[str, str], str] = {
         "max_adversarial_calls",
     ): "cap on review+security+distill LLM calls; 0 = unbounded. "
     "At the cap a hard-mode review or security phase HALTS the component "
-    "(failed_check = adversarial_budget) instead of merging it on mechanical "
-    "checks alone; an advisory phase records a phase_skipped and continues; the "
-    "distiller is always skipped rather than halted. Every phase that runs costs one call, and the "
-    "distiller spends from the same cap although it gates nothing, so hard "
-    "review plus hard security plus knowledge costs 3 per component - a cap of "
-    "2 per component halts the second one at security (R10.5)",
+    "rather than merging it unreviewed; an advisory one skips. Budget 3 calls "
+    "per component for hard review + hard security + knowledge (R10.5, "
+    "docs/runbook.md)",
     (
         "factory",
         "max_total_tokens",

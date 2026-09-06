@@ -179,16 +179,21 @@ stage, runtime feedback, and an earned-autonomy ladder). See
   dropped under budget pressure was the one doing most of the catching. The halt
   is recorded as `failed_check = adversarial_budget`, journalled as
   `review:budget-exhausted` or `security:budget-exhausted`, and carries an
-  `infrastructure_error` finding for the phase. It does not retry, because the
-  budget only shrinks. Advisory mode is unchanged and still records a
-  `phase_skipped`, and the knowledge distiller is still skipped rather than
-  halted in every mode because it is not a merge gate. Nothing changes for a
-  default configuration: `max_adversarial_calls = 0` means unbounded, so the
-  wall is unreachable unless an operator sets a cap. If you set one, budget one
-  call for every phase that runs, the distiller included even though it gates
-  nothing: hard review plus hard security plus knowledge costs 3 per component,
-  and a cap of 2 per component was measured halting the second component at
-  security (R10.5, #226).
+  `infrastructure_error` finding for the phase. It does not retry, and `ks
+  serve` now classifies such a run as the existing terminal `budget_halt`
+  verdict rather than as retryable infrastructure, so the queue item is not
+  requeued against a cap that starts again at zero. Two consequences of a halt:
+  every component depending on the halted one is skipped by the usual cascade,
+  and each halt files an inbox item. Advisory mode is unchanged and still
+  records a `phase_skipped`, and the knowledge distiller is still skipped rather
+  than halted in every mode because it is not a merge gate. Nothing changes for
+  a default configuration: `max_adversarial_calls = 0` means unbounded, so the
+  refusal is unreachable unless an operator sets a cap. If you set one, budget
+  one call for every phase that runs, the distiller included even though it
+  gates nothing: hard review plus hard security plus knowledge costs 3 per
+  component. Anything less halts something, but which component and which phase
+  depends on the component count, so see `docs/runbook.md` rather than
+  generalising from one run (R10.5, #226).
 - The retry context handed to the engineer is now level-triggered: it renders
   the failures measured in the latest attempt, lists earlier findings whose
   sensor did not run again under "Not re-measured", and replaces the rest with
