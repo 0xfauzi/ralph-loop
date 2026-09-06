@@ -1588,8 +1588,10 @@ class ExcludedHistory:
       wording claimed the whole journal.
     - ``projects`` covers every audit under some other project name.
     - ``unattributed`` covers audits whose ``project`` field is absent,
-      null or not a string. Round 2 of review found these counted by
-      neither of the other two: three audits on disk reported as one.
+      null or not a string, FOR A NON-EMPTY project name; at "" those
+      audits are this project's own, which is what :func:`_audit_bucket`
+      decides. Round 2 of review found these counted by neither of the
+      other two: three audits on disk reported as one.
 
     ``lookback`` is carried so the render can separate the two reasons
     the trend counts fewer than ``own_recorded``. An audit outside the
