@@ -116,6 +116,7 @@ from kstrl.security import (
     run_security_review,
 )
 from kstrl.shutdown import StopController
+from kstrl.statedir import ControlStateError
 from kstrl.timeout import TimeoutConfig
 from kstrl.ui.bridge import EventBridgeUI
 from kstrl.verify import (
@@ -2739,13 +2740,64 @@ class _HealthBreach(Protocol):
     yet, so the factory must not take a hard dependency on it. These five
     attributes are the whole contract between #232 and #151; anything
     else the eventual dataclass carries is invisible here.
+
+    READ-ONLY members, declared as properties rather than as the plain
+    ``metric: str`` a Protocol usually carries. A plain variable member
+    demands a SETTABLE attribute, and the record #151 is contracted to
+    supply is a ``@dataclass(frozen=True)``, whose attributes are
+    read-only: written the obvious way, this Protocol rejects the one
+    implementation it exists to describe, and would have done so at
+    exactly the moment the two changes met.
+    :func:`_health_breach_seam_accepts_the_contract` below is the guard
+    for that: it hands mypy the mandated frozen shape where a
+    ``_HealthBreach`` is expected, so ``uv run mypy kstrl/ --strict``
+    fails here rather than in #151.
     """
 
-    metric: str
-    rule: str
-    value: float
-    limit: float
-    window_runs: int
+    @property
+    def metric(self) -> str: ...
+
+    @property
+    def rule(self) -> str: ...
+
+    @property
+    def value(self) -> float: ...
+
+    @property
+    def limit(self) -> float: ...
+
+    @property
+    def window_runs(self) -> int: ...
+
+
+if TYPE_CHECKING:
+
+    @dataclass(frozen=True)
+    class _HealthBreachContract:
+        """The record #151 is contracted to supply, spelled as the issue
+        and ``docs/dark-factory-roadmap.md`` spell it."""
+
+        metric: str
+        rule: str
+        value: float
+        limit: float
+        window_runs: int
+
+    def _health_breach_seam_accepts_the_contract(
+        breach: _HealthBreachContract,
+    ) -> _HealthBreach:
+        """A static assertion, and the only guard this seam can have.
+
+        The seam reads a module ``importlib`` returns as ``Any``, so
+        nothing about the two sides is checked where they meet. This
+        function is checked: it hands mypy the FROZEN dataclass the
+        contract mandates where a ``_HealthBreach`` is expected, so a
+        Protocol that dataclass cannot satisfy fails
+        ``uv run mypy kstrl/ --strict`` here rather than in #151.
+        ``TYPE_CHECKING`` only - nothing calls it and nothing is
+        constructed.
+        """
+        return breach
 
 
 def _open_health_breach_items(
@@ -2760,13 +2812,22 @@ def _open_health_breach_items(
     Honours ``[inbox] enabled``; a failed write warns and never fails the
     run, because losing the notice must not also lose the demotion the
     caller goes on to apply.
+
+    One guard PER BREACH, not one around the loop: a failure on the third
+    of five would otherwise drop the remaining two as well, under a
+    single warning that named none of them. The warning names the breach
+    it lost, so the operator can tell which observation is missing.
     """
     try:
         inbox_config = InboxConfig.load(root_dir)
-        if not inbox_config.enabled:
-            return
-        inbox = Inbox(root_dir, inbox_config)
-        for breach in breaches:
+    except (OSError, ValueError, ControlStateError) as exc:
+        ui.warn(f"Inbox write failed (non-fatal): {exc}")
+        return
+    if not inbox_config.enabled:
+        return
+    inbox = Inbox(root_dir, inbox_config)
+    for breach in breaches:
+        try:
             inbox.add(
                 ItemKind.HEALTH_BREACH,
                 f"Health breach: {breach.metric} {breach.rule}",
@@ -2784,8 +2845,10 @@ def _open_health_breach_items(
                     "window_runs": breach.window_runs,
                 },
             )
-    except (OSError, ValueError) as exc:
-        ui.warn(f"Inbox write failed (non-fatal): {exc}")
+        except (OSError, ValueError, ControlStateError) as exc:
+            # ControlStateError is a RuntimeError, raised by the control
+            # lock Inbox._append takes on every write.
+            ui.warn(f"Inbox write failed for {breach.metric} {breach.rule} (non-fatal): {exc}")
 
 
 def _record_health_breaches(
@@ -2800,46 +2863,61 @@ def _record_health_breaches(
     """Open an inbox item per R8.4 control-limit breach, and maybe demote.
 
     Inert until ``kstrl/health.py`` exists (#151). The import guard
-    swallows exactly one thing: that module not being importable at all.
-    A ``kstrl.health`` that IS importable and has renamed
-    ``health_breaches`` raises ``AttributeError``, which reaches the
-    caller's "Autonomy state update failed" warning - a seam that
-    disarms itself silently on a rename is worse than one that is loudly
-    broken, and a bare ``except ImportError`` cannot tell the two apart.
+    swallows exactly one thing: THAT module not being importable at all,
+    which is what ``exc.name != "kstrl.health"`` decides. A
+    ``kstrl.health`` that exists and fails on a dependency the operator
+    has not installed raises ``ModuleNotFoundError`` naming that
+    dependency, and must reach the caller's "Autonomy state update
+    failed" warning rather than read as "#151 has not landed". A
+    ``kstrl.health`` that exists and has renamed ``health_breaches``
+    raises ``AttributeError`` and must do the same, so the attribute
+    lookup is INSIDE the guarded block where widening the clause can
+    swallow it and a test can see that it did. A seam that disarms itself
+    silently is worse than one that is loudly broken, and a bare
+    ``except ImportError`` cannot tell the two cases apart.
 
     Advisory first: the item is always written, the demotion happens only
     under ``[autonomy] demote_on_health_breach``. It is additionally
     suppressed while a cool-down is running, because a breach is a
     WINDOWED TREND rather than an event: it persists across runs, so an
     ungated trigger would take one level per run down to L1 before the
-    operator had read the first notice.
+    operator had read the first notice. The suppression is announced, not
+    silent: a windowed trend can hold for the whole cool-down, and an
+    unexplained still level is the failure this ladder is meant to make
+    visible.
 
     ``autonomy_config`` is the run's own snapshot, taken once at run
     start, rather than a second read here: a run must not have its
     permissions decided by one resolution of ``[autonomy]`` and its
     demotion by another.
 
-    The false-alarm arithmetic #151 must choose its rule set against, so
-    the choice is made with the cost in front of it: one point beyond
-    three sigma fires by chance about once in 370 observations, and all
-    four Western Electric rules together about once in 92
-    (https://handwiki.org/wiki/Western_Electric_rules). With demotion on,
-    one false alarm costs a level plus ``DEMOTION_COOLDOWN_RUNS``
-    decisive runs of locked re-promotion.
+    The false-alarm arithmetic #151 must choose its rule set against is
+    in ``docs/dark-factory-roadmap.md`` under R8.4, with the cost of a
+    false alarm attached. It is written there once rather than here as
+    well: two copies of an arithmetic nothing keeps in step is how one of
+    them goes wrong.
     """
     try:
         health = importlib.import_module("kstrl.health")
+        breaches_of = health.health_breaches
     except ModuleNotFoundError as exc:
         if exc.name != "kstrl.health":
             raise
         return
-    breaches: list[_HealthBreach] = list(health.health_breaches(root_dir))
+    # OUTSIDE the guard on purpose: a ModuleNotFoundError raised by
+    # #151's own code, for its own missing dependency, is that module
+    # being broken and not this one being absent.
+    breaches: list[_HealthBreach] = list(breaches_of(root_dir))
     if not breaches:
         return
     _open_health_breach_items(root_dir, breaches, run_id=run_id, ui=ui)
     if not autonomy_config.demote_on_health_breach:
         return
     if state.cooldown_runs_remaining > 0:
+        ui.warn(
+            f"Autonomy: {len(breaches)} health breach(es) recorded; not demoting during "
+            f"cool-down ({state.cooldown_runs_remaining} decisive run(s) remaining)"
+        )
         return
     first = breaches[0]
     apply_demotion(
@@ -2853,6 +2931,7 @@ def _record_health_breaches(
                     "rule": breach.rule,
                     "value": breach.value,
                     "limit": breach.limit,
+                    "window_runs": breach.window_runs,
                 }
                 for breach in breaches
             ],

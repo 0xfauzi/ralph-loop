@@ -55,9 +55,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from kstrl.atomicio import atomic_write_json
-from kstrl.inbox import Inbox, InboxConfig, ItemKind
 from kstrl.statedir import (
     CONTROL_AUTONOMY,
+    ControlStateError,
     control_file,
     control_is_external,
     control_lock,
@@ -65,6 +65,8 @@ from kstrl.statedir import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from kstrl.events import EventBus
     from kstrl.ui.base import UI
 
@@ -615,6 +617,33 @@ class AutonomyState:
         self.policy_violations_at_level += count
 
 
+def _strict_bool(section: Mapping[str, Any], key: str, default: bool) -> bool:
+    """Read one ``[autonomy]`` boolean, refusing anything that is not one.
+
+    ``bool("false")`` is True, so the ``bool(section[key])`` reading this
+    package uses everywhere else arms a switch the operator wrote
+    ``"false"`` against. The two keys that use this one revoke autonomy,
+    and a typo that ARMS a safety switch is worse than one that disarms
+    it, so a non-boolean is named and refused rather than coerced.
+
+    Deliberately local to those two keys. The coercion is repo-wide (29
+    ``bool(section[...])`` sites in ``kstrl/``, counted by grep) and
+    tightening all of them changes how existing configs load, which is
+    its own change with its own guard.
+    """
+    if key not in section:
+        return default
+    from kstrl.config import ConfigError
+
+    value = section[key]
+    if not isinstance(value, bool):
+        raise ConfigError(
+            f"[autonomy] {key} must be a boolean (true or false), got {value!r}. "
+            "A quoted value is a string, and every non-empty string reads as true."
+        )
+    return value
+
+
 @dataclass(frozen=True)
 class AutonomyConfig:
     """``[autonomy]`` config. Opt-in, like the R8.1 envelope.
@@ -675,15 +704,13 @@ class AutonomyConfig:
         defaults = cls()
         enabled = bool(section["enabled"]) if "enabled" in section else defaults.enabled
         max_level = int(section["max_level"]) if "max_level" in section else defaults.max_level
-        demote_calibration = (
-            bool(section["demote_on_calibration_regression"])
-            if "demote_on_calibration_regression" in section
-            else defaults.demote_on_calibration_regression
+        demote_calibration = _strict_bool(
+            section,
+            "demote_on_calibration_regression",
+            defaults.demote_on_calibration_regression,
         )
-        demote_health = (
-            bool(section["demote_on_health_breach"])
-            if "demote_on_health_breach" in section
-            else defaults.demote_on_health_breach
+        demote_health = _strict_bool(
+            section, "demote_on_health_breach", defaults.demote_on_health_breach
         )
         if "KSTRL_AUTONOMY_ENABLED" in os.environ:
             enabled = os.environ["KSTRL_AUTONOMY_ENABLED"] == "1"
@@ -916,12 +943,28 @@ def apply_demotion(
     warned about, never fatal: losing the notice must not strand the
     ladder with a saved demotion and no record of why.
     """
+    # Imported here rather than at module scope, matching
+    # ``commit_transition`` above: the ladder state machine is imported
+    # by config and safe-mode code that has no business pulling the
+    # inbox in with it.
+    from kstrl.inbox import Inbox, InboxConfig, ItemKind
+
     if state is None:
         state = AutonomyState.load(root_dir)
     trigger_text = trigger.label.replace("_", " ")
     record = state.demote(trigger, reason, evidence=evidence)
     if record is None:
-        state.save(root_dir)
+        if state.degraded_reason is None:
+            state.save(root_dir)
+        else:
+            # ``load`` fails closed to a fresh L1 when the stored record
+            # is damaged, and those bytes are the only thing an operator
+            # could repair. Saving here replaces them with an empty
+            # ladder, and the counters that save would carry were lost
+            # with the file they were read from.
+            ui.warn(
+                f"Autonomy: ladder state is degraded ({state.degraded_reason}); not overwriting it"
+            )
         ui.warn(f"Autonomy: {trigger_text} recorded ({reason}); already at L1, nothing to revoke")
         return None
     commit_transition(state, record, root_dir, bus=bus, run_id=run_id)
@@ -944,7 +987,11 @@ def apply_demotion(
                     **record.evidence,
                 },
             )
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, ControlStateError) as exc:
+        # ControlStateError is a RuntimeError, so the (OSError,
+        # ValueError) pair every inbox site was written with does not
+        # catch it - and Inbox._append takes the control lock on every
+        # write, which is where it comes from.
         ui.warn(f"Inbox write failed (non-fatal): {exc}")
     ui.warn(
         f"Autonomy DEMOTED L{record.from_level} -> L{record.to_level} "

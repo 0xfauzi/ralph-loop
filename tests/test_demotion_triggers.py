@@ -1,38 +1,28 @@
-"""R10.11 (#232): the demotion triggers this PR wires, and the R8.4 seam.
+"""R10.11 (#232): the one applier every automatic demotion goes through.
 
 ``DemotionTrigger`` has declared five causes since R8.2 and exactly one
-of them fired. Three things changed here, and each is pinned below:
+of them fired. ``autonomy.apply_demotion`` is the extraction that lets
+the other four fire without the four writes a demotion performs (ladder
+state, evolution journal, run event stream, inbox notice) drifting apart
+per trigger. That the extraction changed nothing is proven by two
+PRE-EXISTING tests passing unmodified -
+``test_autonomy_ladder.py::TestFactoryIntegration::
+test_policy_violation_demotes_and_journals`` and ``test_inbox.py::
+TestFactoryEmission::test_demotion_emits_notice_with_evidence`` - with
+one exception, the at-floor warning, whose text no test covered and
+which is pinned here now.
 
-- ``autonomy.apply_demotion``, one applier for every automatic demotion,
-  so the four writes a demotion performs (state, evolution journal, run
-  event stream, inbox notice) cannot drift apart per trigger. That the
-  extraction changed nothing is proven by two PRE-EXISTING tests passing
-  unmodified - ``test_autonomy_ladder.py::TestFactoryIntegration::
-  test_policy_violation_demotes_and_journals`` and ``test_inbox.py::
-  TestFactoryEmission::test_demotion_emits_notice_with_evidence``. The
-  tests here pin the applier's own contract on top of that.
-- the calibration-regression emitter on ``python -m kstrl.calibration
-  compare``: advisory always, demoting only behind
-  ``[autonomy] demote_on_calibration_regression``.
-- the health seam, inert until ``kstrl/health.py`` exists (#151) and
-  shown to fire against a monkeypatched module rather than assumed to.
-
-No LLM anywhere: the baselines are built from synthetic per-run records
-through ``calibration.build_report``, the same path a real capture uses.
+The two emitters that call it are in ``test_calibration_ladder.py`` (the
+compare command) and ``test_health_seam.py`` (the R8.4 seam); the shared
+fixtures are in ``tests/helpers/demotion.py``.
 """
 
 from __future__ import annotations
 
-import importlib.util
-import io
-import sys
 from pathlib import Path
-from types import ModuleType, SimpleNamespace
-from typing import Any
 
 import pytest
 
-from kstrl import calibration
 from kstrl.autonomy import (
     DEMOTION_COOLDOWN_RUNS,
     AutonomyConfig,
@@ -41,141 +31,10 @@ from kstrl.autonomy import (
     DemotionTrigger,
     apply_demotion,
 )
-from kstrl.calibration_ladder import LADDER_DISABLED_LINE
-from kstrl.events import EventBus
-from kstrl.factory import FactoryResult, _record_autonomy_outcome
-from kstrl.inbox import Inbox, InboxConfig, ItemKind, Priority
-from kstrl.ui.plain import PlainUI
-from tests.helpers.bad_toml import TOML_PARSE_FAULTS
-from tests.spine_utils import component, make_manifest
-
-OLD_TS = "20260901-000000"
-NEW_TS = "20260905-000000"
-
-#: (role, fixture id, category, cwe) for a full 12-fixture capture. The
-#: shape matters, not the content: two security fixtures missed in the
-#: new baseline put security at 0.60, under its 0.80 floor and a 0.40
-#: drop, and take two categories from 1.00 to 0.00. Four failures.
-_FIXTURES: tuple[tuple[str, str, str, str | None], ...] = (
-    ("security", "sec-01-sqli", "injection", "CWE-89"),
-    ("security", "sec-02-ssrf", "ssrf", "CWE-918"),
-    ("security", "sec-03-auth", "auth", "CWE-287"),
-    ("security", "sec-04-path", "path_traversal", "CWE-22"),
-    ("security", "sec-05-secret", "secrets", "CWE-798"),
-    ("reviewer", "rev-01-scope", "scope_creep", None),
-    ("reviewer", "rev-02-tests", "test_quality", None),
-    ("reviewer", "rev-03-error", "error_handling", None),
-    ("architect", "spec-01-no-error-handling", "spec_issues", None),
-    ("architect", "spec-02-ambiguous", "spec_issues", None),
-    ("architect", "spec-03-contradiction", "spec_issues", None),
-    ("architect_allowed_paths", "spec-04-paths", "allowed_paths", None),
-)
-_MISSED_IN_NEW = frozenset({"sec-04-path", "sec-05-secret"})
-_EXPECTED_FAILURES = 4
-
-
-def _records(missed: frozenset[str]) -> list[dict[str, Any]]:
-    out: list[dict[str, Any]] = []
-    for role, fixture_id, category, cwe in _FIXTURES:
-        for _ in range(3):
-            out.append(
-                {
-                    "role": role,
-                    "fixture_id": fixture_id,
-                    "category": category,
-                    "cwe": cwe,
-                    "caught": fixture_id not in missed,
-                    "error": False,
-                    "detail": "synthetic",
-                }
-            )
-    return out
-
-
-def _baseline_pair(tmp_path: Path, *, missed: frozenset[str]) -> tuple[Path, Path]:
-    """Write an old/new baseline pair; ``missed`` regresses the new one."""
-    results = tmp_path / "baselines"
-    old = calibration.save_report(
-        calibration.build_report(
-            _records(frozenset()), model="haiku", timestamp=OLD_TS, runs_per_fixture=3
-        ),
-        results,
-    )
-    new = calibration.save_report(
-        calibration.build_report(
-            _records(missed), model="haiku", timestamp=NEW_TS, runs_per_fixture=3
-        ),
-        results,
-    )
-    return old, new
-
-
-def _write_config(
-    tmp_path: Path,
-    *,
-    autonomy: bool = True,
-    demote_on_calibration: bool | None = None,
-    demote_on_health: bool | None = None,
-) -> None:
-    lines = ["[autonomy]", f"enabled = {'true' if autonomy else 'false'}"]
-    if demote_on_calibration is not None:
-        lines.append(
-            f"demote_on_calibration_regression = {'true' if demote_on_calibration else 'false'}"
-        )
-    if demote_on_health is not None:
-        lines.append(f"demote_on_health_breach = {'true' if demote_on_health else 'false'}")
-    (tmp_path / "kstrl.toml").write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-
-def _items(tmp_path: Path, kind: ItemKind | None = None) -> list[Any]:
-    items = Inbox(tmp_path, InboxConfig()).items()
-    if kind is None:
-        return list(items)
-    return [item for item in items if item.kind is kind]
-
-
-def _ui() -> tuple[PlainUI, io.StringIO]:
-    buffer = io.StringIO()
-    return PlainUI(no_color=True, file=buffer), buffer
-
-
-def _breach(
-    metric: str = "retry_rate",
-    rule: str = "WE1: 1 point beyond 3 sigma",
-) -> SimpleNamespace:
-    return SimpleNamespace(metric=metric, rule=rule, value=0.4, limit=0.3, window_runs=8)
-
-
-def _fake_health(*breaches: object, with_function: bool = True) -> ModuleType:
-    module = ModuleType("kstrl.health")
-    if with_function:
-        module.health_breaches = lambda root_dir: list(breaches)  # type: ignore[attr-defined]
-    return module
-
-
-def _compare(tmp_path: Path, old: Path, new: Path) -> int:
-    """``python -m kstrl.calibration compare`` against a project root."""
-    return calibration.main(["compare", str(old), str(new), "--root", str(tmp_path)])
-
-
-def _run_outcome(tmp_path: Path) -> str:
-    """One factory run's outcome folded into the ladder; returns the UI text.
-
-    ``autonomy_config`` is resolved here, once, exactly as
-    ``_run_factory_locked`` resolves it at run start and threads it down.
-    """
-    ui, buffer = _ui()
-    _record_autonomy_outcome(
-        root_dir=tmp_path,
-        manifest=make_manifest([component("comp-a")]),
-        factory_result=FactoryResult(completed=["comp-a"]),
-        autonomy_config=AutonomyConfig.load(tmp_path),
-        bus=EventBus(),
-        run_id="run-1",
-        ui=ui,
-    )
-    return buffer.getvalue()
-
+from kstrl.config import ConfigError
+from kstrl.inbox import ItemKind
+from kstrl.statedir import CONTROL_AUTONOMY, control_file
+from tests.helpers.demotion import inbox_items, make_ui, write_config
 
 # ---------------------------------------------------------------------------
 # 1-2: the extracted applier
@@ -191,7 +50,7 @@ class TestApplyDemotion:
         pins the record, the journal and the notice at the seam itself.
         """
         AutonomyState(level=int(AutonomyLevel.L3_ENVELOPED_AUTO)).save(tmp_path)
-        ui, _ = _ui()
+        ui, _ = make_ui()
 
         record = apply_demotion(
             tmp_path,
@@ -216,7 +75,7 @@ class TestApplyDemotion:
         assert '"event_type":"autonomy_transition"' in journal
         assert '"direction":"demote"' in journal
 
-        notices = _items(tmp_path, ItemKind.DEMOTION_NOTICE)
+        notices = inbox_items(tmp_path, ItemKind.DEMOTION_NOTICE)
         assert len(notices) == 1
         assert notices[0].title == "Autonomy demoted L3 -> L2"
         assert notices[0].dedupe_key == "demotion:r1:2"
@@ -228,7 +87,7 @@ class TestApplyDemotion:
     def test_apply_demotion_at_floor_returns_none_and_counts(self, tmp_path: Path) -> None:
         state = AutonomyState(level=int(AutonomyLevel.L1_SUPERVISED))
         state.record_policy_violation()
-        ui, buffer = _ui()
+        ui, buffer = make_ui()
 
         record = apply_demotion(
             tmp_path,
@@ -246,226 +105,90 @@ class TestApplyDemotion:
         # The passed-in state's pending count survived: that is why the
         # keyword exists, and what blocks the next promotion.
         assert reloaded.policy_violations_at_level == 1
-        assert _items(tmp_path) == []
+        assert inbox_items(tmp_path) == []
         assert "nothing to revoke" in buffer.getvalue()
 
+    def test_floor_message_names_the_trigger_and_the_reason(self, tmp_path: Path) -> None:
+        """The at-floor line, pinned because the extraction changed it.
 
-# ---------------------------------------------------------------------------
-# 3-7, 12: the calibration-regression emitter
-# ---------------------------------------------------------------------------
+        The inline factory block said "policy violation recorded (2
+        component(s))". The applier serves five triggers, so it names the
+        trigger and carries the reason, which lists the components rather
+        than counting them. Nothing covered the old string, so the change
+        was invisible to the suite; this is what makes the next one
+        visible.
+        """
+        state = AutonomyState(level=int(AutonomyLevel.L1_SUPERVISED))
+        ui, buffer = make_ui()
 
-
-class TestCompareLadder:
-    def test_compare_regression_opens_inbox_item(self, tmp_path: Path) -> None:
-        _write_config(tmp_path)
-        AutonomyState(level=int(AutonomyLevel.L2_GATED_MERGE)).save(tmp_path)
-        old, new = _baseline_pair(tmp_path, missed=_MISSED_IN_NEW)
-
-        code = _compare(tmp_path, old, new)
-
-        assert code == 1
-        drift = _items(tmp_path, ItemKind.CALIBRATION_DRIFT)
-        assert len(drift) == 1
-        assert (
-            drift[0].title == f"Calibration regression: {_EXPECTED_FAILURES} failing threshold(s)"
+        apply_demotion(
+            tmp_path,
+            DemotionTrigger.POLICY_VIOLATION,
+            "policy violation in comp-a, comp-b",
+            evidence={},
+            run_id="r1",
+            ui=ui,
+            state=state,
         )
-        assert drift[0].dedupe_key == f"calibration:{NEW_TS}"
-        assert len(drift[0].evidence["failures"]) == _EXPECTED_FAILURES
-        assert drift[0].evidence["new_baseline"] == NEW_TS
-        # Advisory tier: the level does not move without the switch.
-        assert AutonomyState.load(tmp_path).level == int(AutonomyLevel.L2_GATED_MERGE)
-        assert _items(tmp_path, ItemKind.DEMOTION_NOTICE) == []
 
-    def test_compare_regression_demotes_when_enabled(self, tmp_path: Path) -> None:
-        _write_config(tmp_path, demote_on_calibration=True)
-        AutonomyState(level=int(AutonomyLevel.L2_GATED_MERGE)).save(tmp_path)
-        old, new = _baseline_pair(tmp_path, missed=_MISSED_IN_NEW)
+        assert (
+            "Autonomy: policy violation recorded (policy violation in comp-a, comp-b); "
+            "already at L1, nothing to revoke" in buffer.getvalue()
+        )
 
-        code = _compare(tmp_path, old, new)
+    def test_at_floor_does_not_overwrite_a_degraded_state(self, tmp_path: Path) -> None:
+        """Damaged bytes are the only thing an operator could repair.
 
-        assert code == 1
-        state = AutonomyState.load(tmp_path)
-        assert state.level == int(AutonomyLevel.L1_SUPERVISED)
-        assert state.history[-1].trigger == "calibration_regression"
-        assert state.history[-1].evidence["new_baseline"] == NEW_TS
-        kinds = {item.kind for item in _items(tmp_path)}
-        assert kinds == {ItemKind.CALIBRATION_DRIFT, ItemKind.DEMOTION_NOTICE}
-
-    def test_compare_regression_dedupes_inbox_item(self, tmp_path: Path) -> None:
-        _write_config(tmp_path)
-        AutonomyState(level=int(AutonomyLevel.L2_GATED_MERGE)).save(tmp_path)
-        old, new = _baseline_pair(tmp_path, missed=_MISSED_IN_NEW)
-
-        for _ in range(2):
-            assert _compare(tmp_path, old, new) == 1
-
-        drift = _items(tmp_path, ItemKind.CALIBRATION_DRIFT)
-        assert len(drift) == 1
-        assert drift[0].occurrences == 2
-
-    def test_compare_demotes_once_for_the_same_baseline(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        """Re-reading one measurement must not cost a second level.
-
-        The compare command is human-invoked and gets re-run. Deduping on
-        the new baseline's timestamp makes the level a function of what
-        was measured, not of how often it was looked at.
+        ``load`` fails closed to a fresh L1 with a ``degraded_reason``.
+        Saving that fresh state replaces the damaged file with an empty
+        ladder, and the counters the save would carry were lost with the
+        file they came from. The factory has always done this; the
+        compare command is a human-invoked measurement and must not.
         """
-        _write_config(tmp_path, demote_on_calibration=True)
         AutonomyState(level=int(AutonomyLevel.L3_ENVELOPED_AUTO)).save(tmp_path)
-        old, new = _baseline_pair(tmp_path, missed=_MISSED_IN_NEW)
-
-        for _ in range(2):
-            assert _compare(tmp_path, old, new) == 1
-        out = capsys.readouterr().out
-
+        path = control_file(tmp_path, CONTROL_AUTONOMY)
+        path.write_text("{ not json", encoding="utf-8")
         state = AutonomyState.load(tmp_path)
-        assert state.level == int(AutonomyLevel.L2_GATED_MERGE)
-        assert len([t for t in state.history if t.direction == "demote"]) == 1
-        assert len(_items(tmp_path, ItemKind.DEMOTION_NOTICE)) == 1
-        assert f"baseline {NEW_TS} already cost a level" in out
+        assert state.degraded_reason is not None
+        ui, buffer = make_ui()
 
-    def test_compare_no_regression_writes_nothing(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        _write_config(tmp_path, demote_on_calibration=True)
-        AutonomyState(level=int(AutonomyLevel.L2_GATED_MERGE)).save(tmp_path)
-        old, new = _baseline_pair(tmp_path, missed=frozenset())
+        record = apply_demotion(
+            tmp_path,
+            DemotionTrigger.CALIBRATION_REGRESSION,
+            "security below floor",
+            evidence={},
+            run_id="r1",
+            ui=ui,
+            state=state,
+        )
 
-        code = _compare(tmp_path, old, new)
+        assert record is None
+        assert path.read_text(encoding="utf-8") == "{ not json"
+        assert "ladder state is degraded" in buffer.getvalue()
 
-        assert code == 0
-        assert LADDER_DISABLED_LINE not in capsys.readouterr().out
-        assert _items(tmp_path) == []
-        assert AutonomyState.load(tmp_path).level == int(AutonomyLevel.L2_GATED_MERGE)
+    def test_notice_honours_inbox_disabled(self, tmp_path: Path) -> None:
+        """An inbox an operator switched off is not re-opened by a demotion.
 
-    def test_compare_autonomy_disabled_writes_nothing_and_says_so(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        AutonomyState(level=int(AutonomyLevel.L2_GATED_MERGE)).save(tmp_path)
-        old, new = _baseline_pair(tmp_path, missed=_MISSED_IN_NEW)
-
-        code = _compare(tmp_path, old, new)
-
-        assert code == 1
-        assert LADDER_DISABLED_LINE in capsys.readouterr().out
-        assert _items(tmp_path) == []
-        assert AutonomyState.load(tmp_path).level == int(AutonomyLevel.L2_GATED_MERGE)
-
-    @pytest.mark.parametrize("body,fragment", TOML_PARSE_FAULTS)
-    def test_compare_unloadable_config_exits_2(
-        self,
-        tmp_path: Path,
-        capsys: pytest.CaptureFixture[str],
-        body: bytes,
-        fragment: str,
-    ) -> None:
-        """A broken config is a refusal, never a silent "ladder is off".
-
-        Parametrized on the shared #318 table rather than one hand-rolled
-        syntax error: ``report_to_ladder`` is a new config-reading seam,
-        and the three faults that each escaped a shipped handler (not
-        utf-8, a 4301-digit integer, 496 nested arrays) are exactly the
-        ones a single malformed-header fixture would never have reached.
+        The property is stated in ``apply_demotion``'s own comment and
+        was not covered: deleting the ``if inbox_config.enabled`` guard
+        left the suite green.
         """
-        (tmp_path / "kstrl.toml").write_bytes(body)
-        old, new = _baseline_pair(tmp_path, missed=_MISSED_IN_NEW)
+        write_config(tmp_path, inbox=False)
+        AutonomyState(level=int(AutonomyLevel.L3_ENVELOPED_AUTO)).save(tmp_path)
+        ui, _ = make_ui()
 
-        code = _compare(tmp_path, old, new)
+        record = apply_demotion(
+            tmp_path,
+            DemotionTrigger.POLICY_VIOLATION,
+            "policy violation in comp-a",
+            evidence={},
+            run_id="r1",
+            ui=ui,
+        )
 
-        assert code == 2
-        err = capsys.readouterr().err
-        assert err.startswith("error:")
-        assert fragment in err
-        assert _items(tmp_path) == []
-
-
-# ---------------------------------------------------------------------------
-# 8-11, 13: the R8.4 health seam
-# ---------------------------------------------------------------------------
-
-
-class TestHealthSeam:
-    def test_health_seam_inert_without_module(self, tmp_path: Path) -> None:
-        """Until #151 lands there is no kstrl.health, and nothing fires."""
-        assert "kstrl.health" not in sys.modules
-        assert importlib.util.find_spec("kstrl.health") is None
-        _write_config(tmp_path, demote_on_health=True)
-        AutonomyState(level=int(AutonomyLevel.L2_GATED_MERGE)).save(tmp_path)
-        _run_outcome(tmp_path)
-
-        assert _items(tmp_path) == []
+        assert record is not None
         assert AutonomyState.load(tmp_path).level == int(AutonomyLevel.L2_GATED_MERGE)
-
-    def test_health_module_present_but_missing_function_raises(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A renamed contract must fail loud, not disarm the seam.
-
-        The guard swallows exactly one thing: kstrl.health not existing.
-        A module that exists and does not export ``health_breaches``
-        raises AttributeError, which the factory's caller reports as
-        "Autonomy state update failed". A bare ``except ImportError``
-        would have read the rename as "#151 has not landed yet".
-        """
-        monkeypatch.setitem(sys.modules, "kstrl.health", _fake_health(with_function=False))
-        _write_config(tmp_path)
-        AutonomyState(level=int(AutonomyLevel.L2_GATED_MERGE)).save(tmp_path)
-        with pytest.raises(AttributeError):
-            _run_outcome(tmp_path)
-
-    def test_health_breach_opens_inbox_item(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setitem(sys.modules, "kstrl.health", _fake_health(_breach()))
-        _write_config(tmp_path)
-        AutonomyState(level=int(AutonomyLevel.L2_GATED_MERGE)).save(tmp_path)
-        _run_outcome(tmp_path)
-
-        breaches = _items(tmp_path, ItemKind.HEALTH_BREACH)
-        assert len(breaches) == 1
-        assert breaches[0].title == "Health breach: retry_rate WE1: 1 point beyond 3 sigma"
-        assert breaches[0].dedupe_key == "health:retry_rate:WE1: 1 point beyond 3 sigma"
-        assert breaches[0].priority is Priority.NORMAL
-        assert breaches[0].evidence["metric"] == "retry_rate"
-        assert breaches[0].evidence["window_runs"] == 8
-        # Advisory by default: a breach alone revokes nothing.
-        assert AutonomyState.load(tmp_path).level == int(AutonomyLevel.L2_GATED_MERGE)
-        assert _items(tmp_path, ItemKind.DEMOTION_NOTICE) == []
-
-    def test_health_breach_demotes_when_enabled(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setitem(sys.modules, "kstrl.health", _fake_health(_breach()))
-        _write_config(tmp_path, demote_on_health=True)
-        AutonomyState(level=int(AutonomyLevel.L2_GATED_MERGE)).save(tmp_path)
-        _run_outcome(tmp_path)
-
-        state = AutonomyState.load(tmp_path)
-        assert state.level == int(AutonomyLevel.L1_SUPERVISED)
-        assert state.history[-1].trigger == "health_breach"
-        assert _items(tmp_path, ItemKind.DEMOTION_NOTICE)
-
-    def test_health_breach_suppressed_during_cooldown(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A cooling-down ladder records the breach and holds the level.
-
-        A breach is a windowed trend, so it persists across runs. Without
-        this gate one breach costs a level per run all the way to L1
-        before the operator has read the first notice.
-        """
-        monkeypatch.setitem(sys.modules, "kstrl.health", _fake_health(_breach()))
-        _write_config(tmp_path, demote_on_health=True)
-        state = AutonomyState(level=int(AutonomyLevel.L3_ENVELOPED_AUTO))
-        state.cooldown_runs_remaining = 3
-        state.save(tmp_path)
-        _run_outcome(tmp_path)
-
-        assert _items(tmp_path, ItemKind.HEALTH_BREACH)
-        assert AutonomyState.load(tmp_path).level == int(AutonomyLevel.L3_ENVELOPED_AUTO)
-        assert _items(tmp_path, ItemKind.DEMOTION_NOTICE) == []
+        assert inbox_items(tmp_path) == []
 
 
 # ---------------------------------------------------------------------------
@@ -514,3 +237,25 @@ class TestConfigFlags:
         assert getattr(AutonomyConfig.from_env(), key) is False
         monkeypatch.setenv(env_var, "1")
         assert getattr(AutonomyConfig.from_env(), key) is True
+
+    @pytest.mark.parametrize("literal", ['"false"', '"off"', '"0"', "0"])
+    def test_quoted_boolean_is_refused(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        key: str,
+        env_var: str,
+        literal: str,
+    ) -> None:
+        """A typo that ARMS a revocation switch is worse than one that does not.
+
+        ``bool("false")`` is True, so the reading the rest of the package
+        uses turns all three quoted spellings into an armed switch. The
+        unquoted ``0`` is a TOML integer and is refused for the same
+        reason: it is not a boolean, and guessing which way it leans is
+        how the quoted ones got through.
+        """
+        monkeypatch.delenv(env_var, raising=False)
+        (tmp_path / "kstrl.toml").write_text(f"[autonomy]\n{key} = {literal}\n", encoding="utf-8")
+        with pytest.raises(ConfigError, match=f"{key} must be a boolean"):
+            AutonomyConfig.load(tmp_path)

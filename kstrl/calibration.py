@@ -70,6 +70,12 @@ from typing import Any
 # ---------------------------------------------------------------------------
 
 DEFAULT_CALIBRATION_RUNS = 3
+#: What ``load_baseline`` puts in ``Baseline.timestamp`` when the file
+#: carries no ``timestamp`` key. A FILL-IN, not an identity: every such
+#: baseline shares it, so anything that keys on a baseline has to
+#: recognise it and key on something else. Named here rather than
+#: spelled twice, so the reader and the recogniser cannot disagree.
+UNKNOWN_TIMESTAMP = "unknown"
 FIXTURE_DETECTION_THRESHOLD = 0.5
 MAX_ROLE_DETECTION_DROP = 0.15
 MAX_CATEGORY_DETECTION_DROP = 0.40
@@ -404,7 +410,7 @@ def load_baseline(path: Path) -> Baseline:
     return Baseline(
         path=path,
         model=str(data.get("model", "unknown")),
-        timestamp=str(data.get("timestamp", "unknown")),
+        timestamp=str(data.get("timestamp", UNKNOWN_TIMESTAMP)),
         format_version=format_version,
         runs_per_fixture=int(data.get("runs_per_fixture", 1)),
         fixtures=tuple(fixtures),

@@ -93,9 +93,11 @@ EXPECTED_SPELLINGS: frozenset[tuple[str, str]] = frozenset(
         # job the comment above claims for it.
         ("kstrl/autonomy.py", "demotion"),
         # #232's two new demotion triggers, both inbox dedupe keys in the
-        # same family as pipeline's below. "calibration:<baseline ts>" is
-        # also the run id the compare command demotes under, since a
-        # comparison is not a factory run and has none of its own.
+        # same family as pipeline's below. "calibration:<comparison id>"
+        # is also the run id the compare command demotes under, since a
+        # comparison is not a factory run and has none of its own. The
+        # comparison id is both baselines' timestamps, or a digest of the
+        # failure lines when either file carries no timestamp.
         ("kstrl/calibration_ladder.py", "calibration"),
         ("kstrl/factory.py", "health"),
         # Finding metadata: CWE and OWASP ids, and the keys a finding
