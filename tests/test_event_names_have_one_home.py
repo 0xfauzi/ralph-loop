@@ -236,10 +236,10 @@ def literal_event_names(
     through ``all_nodes``, which memoises it, so the second name reuses
     the first name's walk instead of repeating it.
 
-    Measured as process CPU time over the 332-module corpus this layer
+    Measured as process CPU time over the 334-module corpus this layer
     walks, three sweeps each, parse cache warmed first so the number is
-    about the walk: 1.26-1.27 s a sweep with a raw ``ast.walk``,
-    0.75-0.76 s with the memo warm. The earlier wall-clock version of
+    about the walk: 1.36-1.37 s a sweep with a raw ``ast.walk``,
+    0.80-0.81 s with the memo warm. The earlier wall-clock version of
     this number could not be reproduced without knowing what else the
     machine was running, which is why it is stated as CPU here.
     """
@@ -537,7 +537,7 @@ def event_type_aliases(tree: ast.Module) -> frozenset[str]:
     (#337 round 1: the earlier sentence gave the ``kstrl/`` number only,
     which was two thirds short of the walk). ``kstrl/``: 1 of 129
     modules binds any alias, 6 names, all in ``evolution.py``.
-    ``tests/``: 4 of 204 modules, 10 names, in ``test_factory.py``,
+    ``tests/``: 4 of 206 modules, 10 names, in ``test_factory.py``,
     ``test_journal_torn_tail.py``, ``test_resume_ergonomics.py`` and
     ``test_usage_meter.py``. Three of those names are generic
     (``entry``, ``rows``, ``results``), so an unrelated ``entry ==
