@@ -443,6 +443,21 @@ class TestOnlyHonestChecksRun:
         for name in DIFF_DEPENDENT_CHECKS:
             assert name in text
 
+    def test_the_narration_names_the_dead_code_phase_that_reads_no_diff(
+        self, tmp_path: Path
+    ) -> None:
+        """#335: `dead_code_ruff` is correctly absent from
+        DIFF_DEPENDENT_CHECKS, since ruff scans `.` and needs no base, so
+        the loop above cannot cover it. Without a line of its own the
+        split left it suppressed here with no row, no gap and nothing in
+        the report. The toggle is named as the reason because appending
+        the name to the diff sentence would state a false one."""
+        _write_kstrl_toml(tmp_path)
+        _, _, text = _drive(tmp_path)
+
+        assert "dead_code_ruff" in text
+        assert "dead_code_cleanup" in text
+
     def test_resolve_keeps_the_commands_and_drops_the_diff_checks(
         self,
         tmp_path: Path,
