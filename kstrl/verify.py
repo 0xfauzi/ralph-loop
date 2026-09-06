@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import py_compile
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -1980,7 +1981,11 @@ def _count_before(word: str, text: str) -> int:
     return count
 
 
-def _changed_non_test_python(base_branch: str, cwd: Path) -> list[str]:
+def _changed_non_test_python(
+    base_branch: str,
+    cwd: Path,
+    check: str,
+) -> list[str] | NotMeasured:
     """The non-test Python files in ``git diff <base>...HEAD``.
 
     One home for the rule, because two checks act on it and both report
@@ -1989,8 +1994,27 @@ def _changed_non_test_python(base_branch: str, cwd: Path) -> list[str]:
     files. Widening what counts as a test file in one place and not the
     other would make one of the two gaps say something the other does
     not mean.
+
+    STRICT, and that is the whole reason ``check`` is a parameter. The
+    lenient read this helper started with maps a bad base ref, a missing
+    ``origin/<base>``, a non-repository and a git timeout all onto
+    ``[]`` - ``get_diff_names``' own docstring calls that fail-OPEN -
+    and both callers turn ``[]`` into ``no_target``, the one reason
+    token that means "nothing to scan, not a fault". A git read that
+    FAILED is a fault, the tokens are machine-read off
+    ``NotMeasured.as_token``, and ``command_failed`` already exists for
+    it (#335 round 2). Returning the gap rather than raising keeps both
+    call sites' shape: they already return ``NotMeasured`` on the line
+    after this one.
     """
-    changed = git.get_diff_names(base_branch, cwd)
+    try:
+        changed = git.get_diff_names(base_branch, cwd, strict=True)
+    except git.GitDiffError as exc:
+        return NotMeasured(
+            check,
+            NOT_MEASURED_COMMAND_FAILED,
+            f"git could not read the diff against {base_branch}: {exc}",
+        )
     return [f for f in changed if f.endswith(".py") and not f.startswith("test")]
 
 
@@ -2064,7 +2088,9 @@ def check_mutation_score(
             "mutmut is not on PATH, so [verify] mutation_testing measured nothing",
         )
 
-    py_files = _changed_non_test_python(base_branch, cwd)
+    py_files = _changed_non_test_python(base_branch, cwd, MUTATION_TESTING_CHECK)
+    if isinstance(py_files, NotMeasured):
+        return py_files
     if not py_files:
         return NotMeasured(
             MUTATION_TESTING_CHECK,
@@ -2072,8 +2098,18 @@ def check_mutation_score(
             "the diff changed no non-test Python file, so there was nothing to mutate",
         )
 
-    # Run mutmut on changed files only
-    paths_arg = " ".join(py_files)
+    # Run mutmut on changed files only. Each path is shell-quoted
+    # because this command is a STRING, which `run_scrubbed` hands to
+    # /bin/sh, and the names come out of an agent-authored diff: without
+    # the quoting a file called `$(id).py` executes (#335 round 2).
+    # Quoted rather than converted to an argv list because the shell's
+    # word splitting is load-bearing here: `--paths-to-mutate=a.py b.py`
+    # reaches mutmut as one option plus one positional argument, and an
+    # argv list would send it a single option holding both paths. That
+    # is a different invocation, and mutmut is not on this machine to
+    # measure the difference, so the quoting closes the hole without
+    # changing what mutmut receives for any ordinary name.
+    paths_arg = " ".join(shlex.quote(f) for f in py_files)
     try:
         result = run_scrubbed(
             f"mutmut run --paths-to-mutate={paths_arg} --no-progress",
@@ -2136,8 +2172,14 @@ def _last_output_line(result: subprocess.CompletedProcess[str]) -> str:
     Capped for the reason git.py caps its stderr at 500: this reaches
     ``ks sense --json`` and the terminal, and one unbroken line of tool
     output has no bound.
+
+    Each side is stripped BEFORE the choice, not after: ``stderr or
+    stdout`` on the raw strings picks stderr whenever it is truthy,
+    including when it holds nothing but a newline, and then returns "no
+    output" while the sentence the reader needs sits in stdout (#335
+    round 2).
     """
-    tail = (result.stderr or result.stdout).strip().splitlines()
+    tail = (result.stderr.strip() or result.stdout.strip()).splitlines()
     return tail[-1][:500] if tail else "no output"
 
 
@@ -2174,34 +2216,92 @@ def _ruff_dead_code_command(read_only: bool) -> str:
     project can set ``fix = true`` under ``[tool.ruff]``, which turns a
     bare ``ruff check`` into a fixing run. ``--no-cache`` so not even
     ``.ruff_cache`` appears in a tree kstrl was asked only to measure.
+
+    ``--output-format=concise`` for the same reason as ``--no-fix``, and
+    it is the load-bearing one: :func:`_ruff_count` reads a summary line
+    that only the text formats print, and ``[tool.ruff] output-format =
+    "json"`` in the measured project's own ``pyproject.toml`` removes
+    it. Measured on ruff 0.16.1, the flag beats both that key and
+    ``RUFF_OUTPUT_FORMAT`` in the environment, and concise keeps the
+    ``Found N errors``, ``(M fixed, K remaining)`` and ``[*] N fixable``
+    lines this phase parses (#335 round 2).
     """
     if read_only:
-        return "ruff check --no-fix --no-cache --select F401,F811,F841 ."
-    return "ruff check --fix --select F401,F811,F841 ."
+        return "ruff check --no-fix --no-cache --output-format=concise --select F401,F811,F841 ."
+    return "ruff check --fix --output-format=concise --select F401,F811,F841 ."
 
 
-def _ruff_count(output: str, *, read_only: bool) -> int:
-    """How many findings ruff removed, or would remove.
+#: ``Found 3 errors (2 fixed, 1 remaining).`` - a fixing run's summary.
+_RUFF_FIXED = re.compile(r"Found \d+ errors? \((\d+) fixed, (\d+) remaining\)")
+#: ``[*] 2 fixable with the `--fix` option.`` - what a --no-fix run WOULD
+#: remove. Older ruff says "potentially fixable".
+_RUFF_FIXABLE = re.compile(r"\[\*\] (\d+) (?:potentially )?fixable")
+#: ``Found 3 errors.`` with no ``[*]`` line beneath it: findings exist and
+#: none of them is auto-removable.
+_RUFF_FOUND = re.compile(r"Found \d+ errors?")
+#: What ruff prints when it has nothing to report, including on a tree
+#: with no Python files in it at all.
+_RUFF_CLEAN = "All checks passed!"
+
+
+def _ruff_count(output: str, *, read_only: bool) -> int | None:
+    """How many findings ruff removed, or would remove, or ``None``.
 
     Two different numbers off two different lines, because the two modes
     print different things: a fixing run reports ``Found 3 errors (2
     fixed, 1 remaining).`` and a ``--no-fix`` run reports ``Found 3
-    errors.`` with nothing removed. Last match wins in the fixing case,
-    which is what the fused function did.
+    errors.`` followed by ``[*] 2 fixable with the `--fix` option.``
+    Last match wins in the fixing case, which is what the fused function
+    did.
+
+    ``None`` means the output matched NO shape this function knows, and
+    it is the reason this returns an optional at all. The version before
+    it returned 0 there, and 0 is also what "ruff removed nothing" says,
+    so an output kstrl could not read was reported as a clean auto-fix
+    phase - the defect class this whole change exists to close, in the
+    gate that closes it. Measured with ``output-format = "json"`` set in
+    a project's own config: ruff exits 1 with two unused imports found,
+    the summary line is absent, and the row read ``dead_code_ruff pass
+    ruff auto-fixed 0`` over a worktree ruff had just edited and nothing
+    had committed. The caller turns ``None`` into a ``command_failed``
+    gap. Recognition is POSITIVE - a known shape or nothing - so a
+    future ruff that renames its summary produces a gap rather than a
+    fabricated zero.
+
+    The read-only number is the ``[*]`` count, not the ``Found`` count.
+    They differ by the unsafe fixes: on one measured tree ``Found 3
+    errors.`` sat above ``[*] 2 fixable``, and the fixing run on the
+    same tree removed 2. Reading ``Found`` there made ``ks sense`` and
+    the factory report different numbers for the same tree while the
+    message called them "auto-removable" (#335 round 2).
     """
     if read_only:
-        found = re.search(r"Found (\d+) error", output)
-        return int(found.group(1)) if found else 0
-    count = 0
-    for line in output.splitlines():
-        if "fixed" in line.lower():
-            match = re.search(r"(\d+)\s+fix", line.lower())
-            if match:
-                count = int(match.group(1))
-    return count
+        fixable = _RUFF_FIXABLE.search(output)
+        if fixable:
+            return int(fixable.group(1))
+        if _RUFF_FOUND.search(output):
+            return 0
+        return 0 if _RUFF_CLEAN in output else None
+    fixed = _RUFF_FIXED.findall(output)
+    if fixed:
+        return int(fixed[-1][0])
+    return 0 if _RUFF_CLEAN in output else None
 
 
-def _commit_ruff_fixes(cwd: Path) -> None:
+def _ruff_remaining(output: str) -> int:
+    """Findings a fixing run located and did not remove.
+
+    Decoration, never a gate: it is on the same line the fix count comes
+    off, and 0 when that line is absent, because by then
+    :func:`_ruff_count` has already refused an output it could not read.
+    It is in the message because ``ruff auto-fixed 0`` cannot otherwise
+    tell a clean tree from a tree with three unsafe-fix ``F841``s.
+    """
+    remaining = _RUFF_FIXED.findall(output)
+    return int(remaining[-1][1]) if remaining else 0
+
+
+def _commit_ruff_fixes(cwd: Path) -> str | None:
     """Stage and commit what ruff removed, so later checks see a clean tree.
 
     Everything EXCEPT the state directory (#274 review). Under
@@ -2217,24 +2317,59 @@ def _commit_ruff_fixes(cwd: Path) -> None:
     A list, not a string: ``run_scrubbed`` only shells out for a string,
     and the ``:(exclude)`` pathspec must reach git unmangled.
 
-    A timeout here is swallowed rather than reported as a gap: the
-    measurement already happened, and the row it produced is true. What
-    is lost is the tidying, which the next check would notice for
-    itself.
+    Returns ``None`` when the commit landed and a short reason when it
+    did not, and the caller says so in the row. Neither status used to
+    be read: ``run_scrubbed`` returns a ``CompletedProcess`` and never
+    raises on a non-zero exit, so a commit refused by a repo hook, or
+    aborted for want of a ``user.email``, left ruff's deletions on disk
+    and uncommitted while the row said ``ruff auto-fixed 2``. That is
+    the shape of the defect this change exists to remove, one step
+    further in: a step that did not happen, reported as done. The
+    earlier version's excuse, that the next check would notice, does not
+    hold - ``check_diff_scope``, ``check_bad_patterns`` and
+    ``check_test_adequacy`` all run BEFORE this point in
+    :func:`run_mechanical_verification` (#335 round 2).
+
+    A timeout is a reason like the other two rather than a silent pass,
+    for the extra reason that a timeout on ``git add`` skips the commit
+    entirely.
     """
     try:
-        run_scrubbed(
+        staged = run_scrubbed(
             ["git", "add", "-A", "--", ".", f":(exclude){STATE_DIR_NAME}"],
             cwd=cwd,
             timeout=30,
         )
-        run_scrubbed(
+        if staged.returncode != 0:
+            return f"git add exited {staged.returncode}: {_last_output_line(staged)}"
+        committed = run_scrubbed(
             'git commit -m "chore: auto-remove dead code (ruff F401/F811/F841)"',
             cwd=cwd,
             timeout=30,
         )
+        if committed.returncode != 0:
+            return f"git commit exited {committed.returncode}: {_last_output_line(committed)}"
     except subprocess.TimeoutExpired:
-        pass  # Non-fatal
+        return "git add or git commit exceeded 30s"
+    return None
+
+
+def _ruff_fix_message(cwd: Path, output: str, count: int) -> str:
+    """The fixing row's message, and the tidying it is allowed to claim.
+
+    Its own function so :func:`check_dead_code_ruff` does not pay three
+    branches for the wording of one string, and so the commit and the
+    sentence describing the commit cannot drift apart.
+    """
+    message = f"ruff auto-fixed {count}"
+    remaining = _ruff_remaining(output)
+    if remaining:
+        message += f", {remaining} remaining"
+    if count > 0:
+        problem = _commit_ruff_fixes(cwd)
+        if problem is not None:
+            message += f", not committed: {problem}"
+    return message
 
 
 def check_dead_code_ruff(
@@ -2250,9 +2385,9 @@ def check_dead_code_ruff(
     reported a pass for whichever of the two had not run.
     :func:`_dead_code_checks` records the full account.
 
-    Always a row when ruff ran, because zero fixes is a measurement.
-    Three paths return :class:`NotMeasured` instead, and the ``reason``
-    token separates them:
+    Always a row when ruff ran AND said what it did, because zero fixes
+    is a measurement. Four paths return :class:`NotMeasured` instead,
+    and the ``reason`` token separates them:
 
     - ``tool_missing``: ruff is not on PATH.
     - ``timed_out``: the run exceeded ``timeout``.
@@ -2261,6 +2396,13 @@ def check_dead_code_ruff(
       anything else is a tool that did not complete. This is the path
       that most needed splitting out - a bad ``ruff.toml`` printed no
       count, parsed to zero fixes, and read as a clean auto-fix phase.
+    - ``command_failed`` again, for an exit inside 0 and 1 whose output
+      holds no shape :func:`_ruff_count` knows. Round 1 of this change
+      left that one open and it was the same defect one field over: an
+      unreadable output parsed to zero, which is also what "removed
+      nothing" says. The same token because the event is the same, a
+      ruff run that produced no measurement, and because a new reason
+      token would be new status vocabulary.
 
     ``read_only=True`` (``ks sense``, R10.1) runs the SAME rule set with
     ``--no-fix`` and reports what the factory WOULD have removed instead
@@ -2302,13 +2444,19 @@ def check_dead_code_ruff(
             f"ruff check exited {result.returncode}: {_last_output_line(result)}",
         )
 
-    count = _ruff_count(result.stdout + result.stderr, read_only=read_only)
+    output = result.stdout + result.stderr
+    count = _ruff_count(output, read_only=read_only)
+    if count is None:
+        return NotMeasured(
+            DEAD_CODE_RUFF_CHECK,
+            NOT_MEASURED_COMMAND_FAILED,
+            f"ruff check exited {result.returncode} and printed no count line: "
+            f"{_last_output_line(result)}",
+        )
     if read_only:
         message = f"ruff reports {count} auto-removable, not removed"
     else:
-        message = f"ruff auto-fixed {count}"
-        if count > 0:
-            _commit_ruff_fixes(cwd)
+        message = _ruff_fix_message(cwd, output, count)
     return CheckResult(
         name=DEAD_CODE_RUFF_CHECK,
         passed=True,
@@ -2321,7 +2469,7 @@ def _dead_code_command(
     cwd: Path,
     base_branch: str,
     command: str | None,
-) -> str | NotMeasured:
+) -> str | list[str] | NotMeasured:
     """What :func:`check_dead_code` should run, or why it cannot run.
 
     Its own function so the check does not pay a branch for a choice
@@ -2329,10 +2477,17 @@ def _dead_code_command(
     nothing to run are separated at the point where they are known
     rather than reconstructed later.
 
-    A user-supplied ``command`` wins outright and is run as given: it is
-    the operator's own program, in the same category as
-    ``test_command``, and it replaces both vulture and the diff read
-    that only exists to build vulture's argument list.
+    A user-supplied ``command`` wins outright and is run as given, and
+    as a STRING: it is the operator's own program, in the same category
+    as ``test_command``, so it is their shell line and their quoting.
+
+    vulture's is an argv LIST, which ``run_scrubbed`` runs without a
+    shell. The names in it come from ``git diff --name-only`` over a
+    diff an agent wrote, which is the least trusted input in the
+    factory, and they used to be interpolated into a shell string: a
+    changed file called ``my file.py`` split into two arguments vulture
+    could not find and FAILED the component for the wrong reason, and
+    one called ``$(id).py`` executed (#335 round 2).
     """
     if command:
         return command
@@ -2343,14 +2498,16 @@ def _dead_code_command(
             "vulture is not on PATH and no [verify] dead_code_command is set, "
             "so nothing scanned for dead code",
         )
-    py_files = _changed_non_test_python(base_branch, cwd)
+    py_files = _changed_non_test_python(base_branch, cwd, DEAD_CODE_CHECK)
+    if isinstance(py_files, NotMeasured):
+        return py_files
     if not py_files:
         return NotMeasured(
             DEAD_CODE_CHECK,
             NOT_MEASURED_NO_TARGET,
             "the diff changed no non-test Python file, so there was nothing to scan",
         )
-    return f"vulture {' '.join(py_files)} --min-confidence 80"
+    return ["vulture", *py_files, "--min-confidence", "80"]
 
 
 def check_dead_code(
@@ -2367,7 +2524,7 @@ def check_dead_code(
     ``git diff <base>...HEAD``, and findings are reported as a FAIL for
     the engineer to fix on retry.
 
-    Returns a row only when a scan happened. Four paths return
+    Returns a row only when a scan happened. Five paths return
     :class:`NotMeasured`, and each ``reason`` token is a different
     event:
 
@@ -2375,6 +2532,8 @@ def check_dead_code(
       on PATH.
     - ``no_target``: the diff changed no non-test Python file. Nothing
       to scan; not a fault.
+    - ``command_failed``: git could not read the diff at all, which is a
+      fault and is why :func:`_changed_non_test_python` reads strictly.
     - ``timed_out``: the scan exceeded ``timeout``.
     - ``command_failed``: the detector exited non-zero and printed
       nothing. Measured on vulture 2.16: exit 3 is findings, 1 is
@@ -2382,7 +2541,7 @@ def check_dead_code(
       exit is the tool failing rather than a clean tree. Before the
       split it fell through to ``no remaining dead code``.
 
-    All four used to be ``CheckResult(passed=True)``. A missing binary
+    Every one of them used to be ``CheckResult(passed=True)``. A missing binary
     is not something the engineer's next diff can fix, so none of them
     is a FAIL either: a gap is seen by the operator and gates nothing.
 
