@@ -25,6 +25,7 @@ import ast
 import importlib
 import os
 import stat
+import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -519,6 +520,25 @@ class TestSharedGuard:
         # And nothing outside RuntimeError is this rule's business.
         raise_if_defect(ValueError("a knob"))
         raise_if_defect(OSError("a file"))
+
+    def test_the_domain_walk_imports_the_whole_package(self) -> None:
+        """The property the transitive closure rests on, asserted.
+
+        ``__subclasses__`` only knows about classes that have been
+        imported, so a domain error in a module nothing pulled in is
+        invisible to the loop above. The comprehension imports one module
+        per NAME it finds, which is 11 of this package's 130; the rest
+        are imported on their own line. Without that line this walk is
+        exact only by luck of what some other test already loaded, and
+        the mutation that removes it fails here rather than nowhere.
+        """
+        _kstrl_domain_errors()
+        missing = [
+            name
+            for path in astwalk.package_sources()
+            if (name := astwalk.module_name(path)) not in sys.modules
+        ]
+        assert missing == [], missing
 
     def test_the_walk_sees_a_base_it_has_to_resolve_to_recognise(self) -> None:
         """The control: an empty subclass list and a switched-off

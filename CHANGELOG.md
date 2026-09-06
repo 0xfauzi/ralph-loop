@@ -29,8 +29,12 @@ stage, runtime feedback, and an earned-autonomy ladder). See
   (env `KSTRL_AUTONOMY_DEMOTE_ON_HEALTH`), inert until `kstrl/health.py`
   exists and suppressed - out loud - while a cool-down is running. Both
   switches default off, because every threshold in the ladder is still an
-  unmeasured placeholder, and both are refused unless written as unquoted
-  booleans, because `= "false"` would otherwise arm them. Every automatic
+  unmeasured placeholder, and they are refused unless written as unquoted
+  booleans, because `= "false"` would otherwise arm them. `[autonomy]
+  enabled` is read the same strict way for the same reason, which is a
+  behaviour change: a config that spells it `"false"` or `"0"` now
+  reports a configuration problem instead of quietly switching the ladder
+  on. Every automatic
   demotion now goes through one `autonomy.apply_demotion`, so its four
   writes cannot drift apart per trigger. Compare's exit codes are
   unchanged, except that on a regression a `kstrl.toml` that will not
@@ -47,6 +51,28 @@ stage, runtime feedback, and an earned-autonomy ladder). See
   must not relabel a row somebody has already read.
 
 ### Fixed
+
+- `.kstrl/autonomy.json` is no longer overwritten when the file it was
+  read from could not be parsed. `AutonomyState.load` fails closed to a
+  fresh L1 and records why; saving that fresh state back replaced the
+  damaged bytes, which are the only thing an operator could have
+  repaired, and the next load then found a clean file, so nothing
+  reported the damage again. The refusal now lives in
+  `AutonomyState.save`, the one function that writes that file, rather
+  than in the branches that remembered to ask, and it is reported on the
+  run's own surface every time a save is attempted until the file is
+  fixed.
+
+- An inbox write that could not take the control lock no longer takes
+  its caller down. `Inbox._append` locks on every write and raises a
+  `RuntimeError` subclass, which the `(OSError, ValueError)` pair each
+  inbox site was written with does not catch; seven sites had that hole,
+  including `ks serve`'s decision filing, the pipeline's item resolve and
+  the TUI's approve/reject/snooze, where it reached the Textual event
+  loop. A malformed `[inbox]` value is now caught too: the config casts
+  per key, so a TOML date raised `TypeError`, which is not a
+  `ValueError` either, and at the demotion notice that arrived after the
+  demotion had already been saved.
 
 - `ks decompose --project-name`, `ks factory --project-name` and
   `ks queue add --project-name` refuse an explicit empty or

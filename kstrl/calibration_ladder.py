@@ -3,9 +3,10 @@
 ``python -m kstrl.calibration compare`` measures the regression; this
 module is the consequence. It sits beside ``kstrl.calibration`` rather
 than inside it so the measurement half stays free of control-plane
-imports, and because folding it back in would not fit: measured, that is
-752 lines plus this module's 202 of body plus the 8 import lines it does
-not already have, so 962 against the repo's 800-line growth ratchet.
+imports, and because folding it back in would not fit. Measured, and
+measured the way a reader can repeat: ``kstrl/calibration.py`` is 752
+lines, and this module's body below its imports is 245, so the fold is
+at least 997 against the repo's 800-line growth ratchet.
 
 Advisory first, in two tiers. A regression always opens a
 ``calibration_drift`` inbox item when the ladder is enabled; it demotes
