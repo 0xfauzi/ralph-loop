@@ -3654,9 +3654,11 @@ class ComponentPipeline:
 
         Note for anyone tracing the retry context: this is the first
         site that builds an ``IterationContext`` on a review that
-        PASSED. Every other site builds one only on a failure path,
-        which is the asymmetry issue #247 is about. The entry is filed
-        under phase "review" so a later review reading retires it.
+        PASSED. Every other site builds one only on a failure path, and
+        that asymmetry is why #247 keeps the record of which phases ran
+        on the pipeline rather than in the context: a phase that passes
+        has no failure path to write on. The entry is filed under phase
+        "review" so a later review reading retires it.
 
         Two different failures route through here and they must not be
         recorded as the same thing. A DISAGREEMENT is a measurement: the
