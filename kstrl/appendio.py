@@ -147,7 +147,13 @@ def append_terminated(handle: IO[bytes], payload: str, *, repair: str) -> bool:
 
     ``repair`` is a full line, terminator included, that goes between
     the newline and the payload when the tail was torn, or ``""`` for a
-    bare pad. Returns True when a tear was found and repaired.
+    bare pad. Returns True when a tear was found and repaired. Its
+    terminator is required for the same reason the payload's is, and
+    for a while it was not: a repair line without a trailing newline is
+    glued to the first record, which loses that record. The check is
+    unconditional rather than on the tear path, because the tear path
+    is the one no caller exercises in ordinary running, so a caller
+    that got it wrong would find out in a torn file years later.
 
     ONE ``write``, not three, and that is not an optimisation: it is
     what stops another appender landing between the newline that
@@ -167,6 +173,8 @@ def append_terminated(handle: IO[bytes], payload: str, *, repair: str) -> bool:
     """
     if payload and not payload.endswith("\n"):
         raise ValueError("append_terminated payload must end in a newline")
+    if repair and not repair.endswith("\n"):
+        raise ValueError("append_terminated repair must end in a newline")
     if not payload:
         return False
     repaired = handle_ends_without_newline(handle)
@@ -185,17 +193,59 @@ def _flock(handle: IO[bytes]) -> Iterator[None]:
     platform yields once and returns rather than being a third branch
     inside the caller.
 
+    TWO ways the exclusion is unavailable, and both take the same path,
+    which is to append WITHOUT it. An entry must never be lost to the
+    lock that was added to protect it.
+
+    1. No ``fcntl`` module: Windows.
+    2. A ``flock`` that RAISES. It is not supported on every mount:
+       ``ENOLCK`` and ``EINVAL`` are what some FUSE, 9p and DrvFs
+       mounts answer. Measured while this call was unguarded,
+       ``append_entries`` raised ``BlockingIOError`` and left zero
+       bytes on disk, where the same call before the lock existed
+       wrote the entry. ``OSError`` exactly, not an enumeration of the
+       codes we thought of: the kernel and the filesystem own that
+       taxonomy, and #318 records three rounds of enumerating one and
+       being wrong each time.
+
+    Not a retry and not a spin: ``ENOLCK`` on a mount is a property of
+    the mount, not a transient, so a loop would burn the caller's
+    thread against a condition that will not change.
+
+    The degradation is REPORTED the way the no-``fcntl`` one is, which
+    is here and nowhere at run time. A warning per append would put a
+    line in the log for every record written on such a filesystem, and
+    the callers that would surface it are the record-keepers whose
+    output the operator is reading for something else.
+
+    BLOCKING, unconditionally, and there is no switch to ask otherwise.
+    Of the two locks above, that matches ``control_lock``'s default
+    (``blocking=True``) and NOT ``queue_lock``'s (``blocking=False``,
+    which raises ``QueueLockedError`` on contention). The alternatives
+    for a record write are dropping the record or spinning, and the
+    lock is held for one probe and one write. The residual is real and
+    is stated rather than assumed: a writer stopped inside the critical
+    section stalls every other writer on that file, where before #330
+    they could not wait at all.
+
     ``flush()`` before ``LOCK_UN`` is mandatory and is why the unlock is
     written out here rather than left to ``close()``: the handle is a
     ``BufferedRandom``, and unlocking first lets this process's bytes
-    land after the exclusion has dropped.
+    land after the exclusion has dropped. The release is NOT guarded:
+    it is reached only when the acquisition succeeded, and by then the
+    bytes are flushed, so an error there is a real anomaly with
+    something to say rather than a lost entry.
     """
     try:
         import fcntl
     except ImportError:
         yield
         return
-    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    except OSError:
+        yield
+        return
     try:
         yield
     finally:
@@ -215,10 +265,13 @@ def appending(path: Path, *, lock: bool = False) -> Iterator[IO[bytes]]:
     be created" case does not exist, because an unopenable file already
     raises ``OSError`` out of the open.
 
-    POSIX only. Without ``fcntl`` this yields no exclusion, which is the
-    same degradation ``control_lock``, ``queue_lock`` and the factory
-    lock already take on Windows. Callers that ask for a lock get one on
-    Linux and macOS and get today's behaviour elsewhere.
+    POSIX only, and best-effort even there. Without ``fcntl``, and on a
+    mount whose ``flock`` raises, this yields no exclusion and the
+    append still happens; :func:`_flock` has both cases and why they
+    take one path. That is the same degradation ``control_lock``,
+    ``queue_lock`` and the factory lock already take on Windows.
+    Callers that ask for a lock get one where the platform and the
+    filesystem provide it and get today's behaviour everywhere else.
 
     Deadlock ordering: this lock is a LEAF. Nothing reached from inside
     a ``with appending(...)`` block takes another kstrl lock, and

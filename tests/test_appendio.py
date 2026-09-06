@@ -48,6 +48,24 @@ class TestTheTerminatorIsRequired:
         with pytest.raises(ValueError, match="must end in a newline"):
             append_records(path, '{"a":1}', repair=REPAIR)
 
+    def test_an_unterminated_repair_is_refused(self, tmp_path: Path) -> None:
+        """The same rule one field over, which is where it was missing.
+
+        ``repair`` goes between the pad and the payload, so a repair
+        line with no terminator glues the repair row onto the first
+        record and loses it: exactly the defect this module exists for,
+        arrived at through the argument that is supposed to record it.
+        No caller does this today, which is the reason it needs a check
+        rather than the reason it does not: the tear path is the one no
+        caller exercises in ordinary running, so a future caller would
+        ship it and find out years later in a torn file.
+        """
+        path = tmp_path / "log.jsonl"
+        path.write_bytes(b'{"a":1}\n{"tor')
+        with pytest.raises(ValueError, match="repair must end in a newline"):
+            append_records(path, '{"b":2}\n', repair='{"repair":1}')
+        assert path.read_bytes() == b'{"a":1}\n{"tor'
+
     def test_the_refusal_happens_before_anything_lands(self, tmp_path: Path) -> None:
         """Nothing is written, so a caught ValueError leaves no half-record."""
         path = tmp_path / "log.jsonl"

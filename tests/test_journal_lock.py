@@ -32,6 +32,7 @@ minutes instead of failing.
 
 from __future__ import annotations
 
+import errno
 import json
 import multiprocessing
 import os
@@ -41,6 +42,7 @@ from typing import Any
 import pytest
 
 from kstrl.appendio import JOURNAL_REPAIR_EVENT
+from tests.helpers.journal import tear
 
 fcntl = pytest.importorskip("fcntl", reason="flock is POSIX-only, as the helper says")
 
@@ -291,3 +293,99 @@ class TestTheLockIsOnTheJournalsOwnDescriptor:
         _journal(path).append_entries([])
 
         assert path.read_bytes() == b""
+
+
+class TestAFlockThatCannotBeTakenDoesNotCostTheEntry:
+    """An entry is never lost to the lock that was added to protect it.
+
+    ``flock`` is not universally supported. On a mount that answers
+    ``ENOLCK`` or ``EINVAL`` (some FUSE, 9p and DrvFs mounts) the call
+    raises, and an unguarded acquisition turns every journal append into
+    a raise on that machine: measured before this was fixed,
+    ``append_entries`` raised and left ZERO bytes on disk, where the
+    same call at 568bca4 wrote the entry.
+
+    So a raising ``flock`` takes the SAME path as a missing ``fcntl``
+    module four lines up: the append happens, with no exclusion, and the
+    degradation is reported the way that one is, which is in the
+    docstring and nowhere at run time. Warning per append would put a
+    line in the log for every record on a filesystem where the answer
+    never changes, and a retry or a spin would burn the caller's thread
+    against a condition that is a property of the mount.
+
+    Not a retry loop, deliberately: ``ENOLCK`` on a mount is not a
+    transient.
+    """
+
+    def _flock_raises(self, monkeypatch: pytest.MonkeyPatch, errno_value: int) -> list[int]:
+        """Make every ``flock`` raise, recording the operations attempted."""
+        attempted: list[int] = []
+
+        def refusing(fd: int, operation: int) -> None:
+            attempted.append(operation)
+            raise OSError(errno_value, errno.errorcode.get(errno_value, "refused"))
+
+        monkeypatch.setattr(fcntl, "flock", refusing)
+        return attempted
+
+    def test_the_entry_is_written_byte_for_byte_without_the_lock(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        path = tmp_path / "evolution.jsonl"
+        entry = {"event_type": "component_result", "run_id": "r1"}
+        attempted = self._flock_raises(monkeypatch, errno.ENOLCK)
+
+        _journal(path).append_entries([entry])
+
+        assert path.read_bytes() == json.dumps(entry, separators=(",", ":")).encode() + b"\n"
+        assert attempted == [fcntl.LOCK_EX], (
+            "the acquisition is attempted once and the release is not, because "
+            "there is nothing held to release"
+        )
+
+    def test_a_torn_tail_is_still_repaired_without_the_lock(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The degradation is the LOCK, not the repair.
+
+        Everything the unlocked path did before #330 still happens: the
+        probe, the pad, the repair row and the count. Only the exclusion
+        against another writer is gone, which is what the no-``fcntl``
+        branch already gives up.
+        """
+        path = tmp_path / "evolution.jsonl"
+        journal = _journal(path)
+        journal.append_entries([{"event_type": "component_result", "run_id": "r1"}])
+        tear(path)
+        self._flock_raises(monkeypatch, errno.ENOLCK)
+
+        journal.append_entries([{"event_type": "component_result", "run_id": "r2"}])
+
+        run_ids, repairs, _ = _read(path)
+        assert run_ids == {"r1", "r2"}
+        assert repairs == 1
+        assert journal.get_repair_count() == 1
+
+    def test_an_unsupported_operation_degrades_the_same_way(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Any ``OSError``, not an enumeration of the ones we thought of.
+
+        The parser rule in CLAUDE.md applied to a syscall: the kernel
+        and the filesystem own this error taxonomy, and #318 recorded
+        three rounds of enumerating a taxonomy and being wrong each
+        time. ``EINVAL`` is what a mount that does not implement locking
+        answers on some platforms, ``ENOLCK`` on others.
+        """
+        path = tmp_path / "evolution.jsonl"
+        self._flock_raises(monkeypatch, errno.EINVAL)
+
+        _journal(path).append_entries([{"event_type": "component_result", "run_id": "r1"}])
+
+        assert _read(path)[0] == {"r1"}
