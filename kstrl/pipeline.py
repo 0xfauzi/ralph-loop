@@ -75,7 +75,12 @@ from kstrl.interaction import (
     UiInteractionChannel,
 )
 from kstrl.loop import UNENFORCEABLE_CALLS
-from kstrl.manifest import Component, ComponentStatus, Manifest
+from kstrl.manifest import (
+    ADVERSARIAL_BUDGET_CHECK,
+    Component,
+    ComponentStatus,
+    Manifest,
+)
 from kstrl.observability import NotifyHooks
 from kstrl.policy import PolicyConfig, count_diff_size
 from kstrl.prd import PRD
@@ -182,7 +187,9 @@ class DiffPhaseResult:
 
 @dataclass(frozen=True)
 class ReviewPhaseResult:
-    """Phase 2 outcome. ``ran=False`` records the skip reason."""
+    """Phase 2 outcome. ``ran=False`` carries a skip reason when the
+    phase was SKIPPED; the R10.5 budget refusal leaves it None, because
+    nothing was skipped and the ``failure`` is the record."""
 
     ran: bool
     skip_reason: str | None = None
@@ -192,7 +199,8 @@ class ReviewPhaseResult:
 
 @dataclass(frozen=True)
 class SecurityPhaseResult:
-    """Phase 2.5 outcome. ``ran=False`` records the skip reason."""
+    """Phase 2.5 outcome. Same rule as ``ReviewPhaseResult``: a skip
+    carries a reason, the R10.5 budget refusal carries a ``failure``."""
 
     ran: bool
     skip_reason: str | None = None
@@ -533,8 +541,11 @@ class ComponentPipeline:
 
         # E4: adversarial-call counter shared across review / security /
         # knowledge phases. When max_adversarial_calls is 0 the budget is
-        # unbounded; otherwise the LLM phase is skipped once the budget
-        # is exhausted, with an informational log line.
+        # unbounded. Otherwise, once it is exhausted: a hard-mode review
+        # or security phase REFUSES and the component fails (R10.5,
+        # #226), an advisory one is skipped with a warning and a
+        # recorded phase_skipped, and the distiller is always skipped
+        # because it gates nothing.
         self._adversarial_calls = 0
 
         # R6.4: monotonic start of each component's current attempt, so
@@ -2918,22 +2929,23 @@ class ComponentPipeline:
         banner: str,
         role: str,
     ) -> PhaseFailure:
-        """R10.5 (#226): the wall a hard-mode adversarial phase hits when
+        """R10.5 (#226): how a hard-mode adversarial phase refuses when
         ``max_adversarial_calls`` is spent before it runs.
 
         FAIL, never RETRY_OR_FAIL: the budget only shrinks, so a retry
-        would burn engineer iterations against the same wall. The
-        infrastructure Finding is the record in the findings stream and
-        the PR body; ``check="adversarial_budget"`` and the
+        would burn engineer iterations against the same exhausted cap.
+        The infrastructure Finding is the record in the findings stream
+        and the PR body; ``check=ADVERSARIAL_BUDGET_CHECK`` and the
         ``<phase>:budget-exhausted`` signature are the record in the
-        journal. Advisory mode never reaches here: it keeps the
-        recorded skip, because advisory never blocks.
+        journal, and ``ks serve`` reads the first of those to make the
+        run terminal rather than retrying it (``serve.
+        _budget_halt_outcome``). Advisory mode never reaches here: it
+        keeps the recorded skip.
         """
         cap = self.factory_config.max_adversarial_calls
-        # One sentence, two surfaces. The banner and the Finding said the
-        # same thing in two literals and had already drifted apart by one
-        # clause; the Finding carries ``phase`` as a field, so spelling the
-        # phase into its text bought nothing either.
+        # One sentence, used by the banner and by the Finding, so the two
+        # cannot drift. The Finding carries ``phase`` as a field, so the
+        # text does not name it.
         reason = (
             f"adversarial LLM budget ({cap}) exhausted before the phase ran; "
             "hard mode refuses to merge unreviewed"
@@ -2948,7 +2960,7 @@ class ComponentPipeline:
             action=FailureAction.FAIL,
             error=error,
             phase=phase,
-            check="adversarial_budget",
+            check=ADVERSARIAL_BUDGET_CHECK,
             signatures=[f"{phase}:budget-exhausted"],
         )
 
@@ -2984,11 +2996,14 @@ class ComponentPipeline:
         #
         # FAIL, not RETRY_OR_FAIL: retrying cannot recover budget,
         # so a retry would burn engineer iterations against a
-        # deterministic wall.
+        # deterministic refusal.
         #
         # #226 narrowed who reaches here: hard mode now refuses at the
-        # budget wall instead of downgrading, so ``budget_downgraded``
-        # is only ever true for an advisory reviewer.
+        # exhausted budget instead of downgrading, so
+        # ``budget_downgraded`` is only ever true for an advisory
+        # reviewer. An advisory reviewer that never ran can still FAIL
+        # the component here, which is why "advisory does not block" is
+        # not a statement this tree makes anywhere.
         if (
             budget_downgraded
             and self._setpoint_blocking()[0]
@@ -3014,18 +3029,17 @@ class ComponentPipeline:
             )
         return ReviewPhaseResult(ran=False, skip_reason=skip_reason)
 
-    def _security_budget_wall(
+    def _security_budget_branch(
         self,
         comp: Component,
         sec_config: SecurityConfig,
     ) -> SecurityPhaseResult:
         """Phase 2.5's exhausted-budget branch, both modes.
 
-        The mode split lives here rather than beside the budget check in
-        ``_phase_security`` so that check stays closed over
-        ``SecurityMode``: every non-hard mode reaching an exhausted
-        budget takes the recorded skip, which is what it did before
-        #226. ``SecurityConfig.__post_init__`` rejects any mode outside
+        Same reason the review side keeps its mode split inside the
+        budget check (see ``_phase_review``): a mode added later takes
+        the recorded skip, which is what every mode did before #226.
+        ``SecurityConfig.__post_init__`` rejects any mode outside
         skip|advisory|hard, and skip already returned above.
         """
         if sec_config.mode == SecurityMode.HARD.value:
@@ -3186,8 +3200,12 @@ class ComponentPipeline:
                         role="Review",
                     ),
                 )
-            # Advisory never blocks, so an exhausted budget still
-            # downgrades to a recorded skip (R1.2 trace, R10.3 gate).
+            # Advisory downgrades to a recorded skip instead (R1.2
+            # trace). That is not the same as "advisory cannot fail the
+            # component": under setpoint_agreement = "block" the R10.3
+            # gate in _review_did_not_run fails it a few lines below,
+            # because a reviewer that never ran cannot confirm a story
+            # the engineer marked passes=true.
             self.ui.warn(
                 f"  Phase 2 SKIPPED for {comp.id}: "
                 f"adversarial LLM budget "
@@ -3575,7 +3593,7 @@ class ComponentPipeline:
                 skip_reason="security review disabled (mode=skip)",
             )
         if not self.adversarial_budget_ok():
-            return self._security_budget_wall(comp, sec_config)
+            return self._security_budget_branch(comp, sec_config)
         self.adversarial_budget_consume()
         from kstrl.agents import get_agent as _get_sec_agent
 

@@ -15,8 +15,10 @@ not a gate. These tests prove the parser-side fixes:
 
 from __future__ import annotations
 
+import io
 import json
 import subprocess
+import traceback
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -29,6 +31,7 @@ from kstrl.factory import ComponentResult, FactoryConfig, FactoryResult, run_fac
 from kstrl.findings import Finding, render_findings_markdown
 from kstrl.git import GitDiffError, get_diff_content
 from kstrl.manifest import Component, Manifest
+from kstrl.pipeline import ComponentPipeline
 from kstrl.review import (
     ReviewMode,
     ReviewResult,
@@ -41,6 +44,7 @@ from kstrl.security import (
     SecurityResult,
     parse_security_output,
 )
+from kstrl.serve import RunOutcome, Verdict, classify_run
 from kstrl.ui.plain import PlainUI
 from kstrl.verify import CheckResult, VerificationResult, VerifyConfig
 from tests.conftest import ReviewRepo
@@ -538,7 +542,7 @@ def _read_events(log_path: Path) -> list[dict[str, object]]:
 class _BudgetRun:
     """What a `_run_with_budget` call produced, so the R10.5 tests can
     assert on the manifest, the run result, the call counts and the
-    files the run wrote without unpacking a five-element tuple."""
+    files the run wrote without unpacking a six-element tuple."""
 
     root: Path
     manifest: Manifest
@@ -546,6 +550,18 @@ class _BudgetRun:
     review_calls: int
     security_calls: int
     log_path: Path
+    #: Everything the run printed. `PlainUI` takes the stream, so this
+    #: is the run's own output rather than whatever else the process
+    #: wrote, and the banner a halted phase prints is assertable.
+    output: str
+
+    def events(self) -> list[dict[str, object]]:
+        """The progress-log rows, in order."""
+        return _read_events(self.log_path)
+
+    def component_events(self, comp_id: str) -> list[str]:
+        """The event names recorded for one component."""
+        return [str(e["event"]) for e in self.events() if e.get("component") == comp_id]
 
     def component(self, comp_id: str) -> Component:
         comp = self.manifest.get_component(comp_id)
@@ -588,6 +604,7 @@ def _run_with_budget(
     manifest = _make_manifest(comp_ids)
     log_path = tmp_path / "progress.jsonl"
     config = _factory_config(progress_log_path=log_path, **overrides)
+    stream = io.StringIO()
     with (
         patch(
             "kstrl.factory._run_component",
@@ -609,7 +626,7 @@ def _run_with_budget(
             manifest,
             config,
             _base_config(root),
-            PlainUI(no_color=True),
+            PlainUI(no_color=True, file=stream),
             root,
         )
     return _BudgetRun(
@@ -619,6 +636,7 @@ def _run_with_budget(
         review_calls=mock_review.call_count,
         security_calls=mock_security.call_count,
         log_path=log_path,
+        output=stream.getvalue(),
     )
 
 
@@ -735,6 +753,12 @@ class TestFactorySkipTraces:
             ["comp-a", "comp-b"],
             review_mode="hard",
             max_adversarial_calls=1,
+            # NOT the fixture default of 0. At max_retries=0 a
+            # RETRY_OR_FAIL routes straight to fail() and leaves retries
+            # at 0 too, so the assertion below would hold under either
+            # action and prove nothing (review of #349, S2). With 1, only
+            # FailureAction.FAIL keeps it at 0.
+            max_retries=1,
         )
         assert run.review_calls == 1
         assert "comp-a" in run.result.completed
@@ -746,10 +770,28 @@ class TestFactorySkipTraces:
         infra = [f for f in comp_b.findings if f.is_infrastructure_error]
         assert [f.phase for f in infra] == ["review"]
         # FAIL, not RETRY_OR_FAIL: a retry cannot recover budget, so the
-        # component must not burn engineer iterations against the wall.
+        # component must not burn engineer iterations against the same cap.
         assert comp_b.retries == 0
-        # Nothing was skipped, so nothing claims it was.
+        # The sentence, not just the shape. docs/runbook.md publishes it
+        # as the symptom an operator greps for, and the Finding and the
+        # banner are built from one literal so both are pinned here.
+        refusal = (
+            "adversarial LLM budget (1) exhausted before the phase ran; "
+            "hard mode refuses to merge unreviewed"
+        )
+        assert comp_b.error == f"Review infrastructure error: {refusal}"
+        assert f"Phase 2 FAILED for comp-b: Review infrastructure error: {refusal}" in run.output
+        assert infra[0].explanation == refusal
+        # The reviewer did not run, so it did not reject: review_passed
+        # is the rejection record and must not read as one. (It is False
+        # rather than None because the component is failing; the advisory
+        # path, which continues, writes None.)
+        assert comp_b.review_passed is False
+        # Nothing was skipped, so nothing claims it was - in the findings
+        # or in the progress log, where the base commit emitted a
+        # phase_skipped for review here.
         assert not any(f.is_phase_skip and f.phase == "review" for f in comp_b.findings)
+        assert "phase_skipped" not in run.component_events("comp-b")
 
     def test_advisory_mode_budget_exhausted_still_skips(
         self,
@@ -798,6 +840,17 @@ class TestFactorySkipTraces:
         assert comp_b.failed_check == "adversarial_budget"
         infra = [f for f in comp_b.findings if f.is_infrastructure_error]
         assert [f.phase for f in infra] == ["security"]
+        # Same sentence, the other role and banner. Both come from one
+        # literal in _budget_refusal, and docs/runbook.md publishes both.
+        refusal = (
+            "adversarial LLM budget (2) exhausted before the phase ran; "
+            "hard mode refuses to merge unreviewed"
+        )
+        assert comp_b.error == f"Security review infrastructure error: {refusal}"
+        assert (
+            f"Phase 2.5 FAILED for comp-b: Security review infrastructure error: {refusal}"
+            in run.output
+        )
         # The advisory review before it still records its skip.
         assert any(f.is_phase_skip and f.phase == "review" for f in comp_b.findings)
         entry = run.journal_entry("comp-b")
@@ -837,6 +890,108 @@ class TestFactorySkipTraces:
         entry = run.journal_entry("comp-b")
         assert entry["failed_check"] == "adversarial_budget"
         assert "review:budget-exhausted" in entry["failure_signatures"]  # type: ignore[operator]
+
+    def test_advisory_security_budget_exhausted_still_skips(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Phase 2.5's advisory side, which #226 moved but did not change.
+
+        The mode split inside the budget branch is the design point of
+        this change, and this is the half that must NOT halt: an
+        advisory security reviewer with no budget left records a
+        `phase_skipped` and the component completes. Without this,
+        replacing the mode check with `if True` leaves the suite green.
+        """
+        run = _run_with_budget(
+            tmp_path,
+            ["comp-a", "comp-b"],
+            review_mode="advisory",
+            max_adversarial_calls=2,
+            security_config=SecurityConfig(mode=SecurityMode.ADVISORY.value),
+        )
+        # comp-a spent both calls (review, then security).
+        assert run.review_calls == 1
+        assert run.security_calls == 1
+        comp_b = run.component("comp-b")
+        assert "comp-b" in run.result.completed
+        assert comp_b.status == "completed"
+        assert comp_b.failed_check == ""
+        skips = {f.phase for f in comp_b.findings if f.is_phase_skip}
+        assert {"review", "security"} <= skips
+        assert not any(f.is_infrastructure_error for f in comp_b.findings)
+        assert "Phase 2.5 SKIPPED for comp-b" in run.output
+
+    def test_budget_halt_is_terminal_for_serve(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """The halt reaches `ks serve` as terminal, not as a retry.
+
+        Every finding on a budget-halted component is an
+        `infrastructure_error`, which is the shape `classify_run` reads
+        as retryable infrastructure. Measured on the review of #349: the
+        real classifier returned RETRY_INFRA with `may_retry` True on
+        the manifest a real halted run writes, so `ks serve` re-ran the
+        whole factory against a cap that starts again at zero and stops
+        at the same component, paying an engineer loop per component
+        each time. This test reads the manifest the factory actually
+        wrote rather than a hand-built one, because the hand-built
+        manifests are what missed it.
+        """
+        run = _run_with_budget(
+            tmp_path,
+            ["comp-a", "comp-b"],
+            review_mode="hard",
+            max_adversarial_calls=1,
+        )
+        assert run.component("comp-b").failed_check == "adversarial_budget"
+        manifest_path = run.root / "scripts" / "kstrl" / "manifest.json"
+        assert manifest_path.exists(), "the factory writes its manifest here"
+        outcome = classify_run(
+            run.root,
+            run=RunOutcome(returncode=1),
+            manifest_path=manifest_path,
+        )
+        assert outcome.verdict is Verdict.BUDGET_HALT
+        assert outcome.verdict.may_retry is False
+        assert "comp-b" in outcome.reason
+        assert outcome.evidence["budget_halted"] == ["comp-b"]
+
+    def test_three_adversarial_calls_per_component(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """The number five doc sites quote, counted rather than restated.
+
+        `kstrl.toml.example`, `kstrl/init_cmd.py`, `scripts/gen_docs.py`
+        (and the README it generates), `docs/runbook.md` and the
+        CHANGELOG all tell an operator to budget 3 calls per component.
+        That is a property of the call sites of
+        `adversarial_budget_consume`, so this counts them: if the
+        distiller stops spending from this cap, or a fourth phase starts
+        spending from it, all five prose sites go wrong at once and this
+        goes red instead.
+        """
+        seen: list[str] = []
+        real = ComponentPipeline.adversarial_budget_consume
+
+        def spy(self: ComponentPipeline) -> None:
+            # The phase attribution comes free from the calling frame,
+            # so the spy needs no per-phase wiring to keep in step.
+            seen.append(traceback.extract_stack(limit=2)[0].name)
+            real(self)
+
+        with patch.object(ComponentPipeline, "adversarial_budget_consume", spy):
+            _run_with_budget(
+                tmp_path,
+                ["comp-a", "comp-b"],
+                review_mode="hard",
+                max_adversarial_calls=0,
+                security_config=SecurityConfig(mode=SecurityMode.HARD.value),
+            )
+
+        assert seen == ["_phase_review", "_phase_security", "_phase_distill"] * 2
 
     def test_single_pr_knowledge_skip_leaves_trace(
         self,
