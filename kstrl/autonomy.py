@@ -637,8 +637,14 @@ def _strict_bool(section: Mapping[str, Any], key: str, default: bool) -> bool:
 
     value = section[key]
     if not isinstance(value, bool):
+        # No ``[autonomy]`` prefix: ``config_preflight`` puts the section
+        # label in front of whatever the loader raises, and a message
+        # that carries its own reads "[autonomy] [autonomy] ..." there.
+        # The key is unique to this section, so it identifies itself on
+        # the one surface that prints the exception bare, which is
+        # ``python -m kstrl.calibration compare``.
         raise ConfigError(
-            f"[autonomy] {key} must be a boolean (true or false), got {value!r}. "
+            f"{key} must be a boolean (true or false), got {value!r}. "
             "A quoted value is a string, and every non-empty string reads as true."
         )
     return value

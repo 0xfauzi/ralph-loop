@@ -32,6 +32,7 @@ from kstrl.autonomy import (
     apply_demotion,
 )
 from kstrl.config import ConfigError
+from kstrl.config_preflight import config_problem_lines
 from kstrl.inbox import ItemKind
 from kstrl.statedir import CONTROL_AUTONOMY, control_file
 from tests.helpers.demotion import inbox_items, make_ui, write_config
@@ -259,3 +260,28 @@ class TestConfigFlags:
         (tmp_path / "kstrl.toml").write_text(f"[autonomy]\n{key} = {literal}\n", encoding="utf-8")
         with pytest.raises(ConfigError, match=f"{key} must be a boolean"):
             AutonomyConfig.load(tmp_path)
+
+    def test_refusal_reaches_the_preflight_as_a_problem(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, key: str, env_var: str
+    ) -> None:
+        """The nth-order effect: a config that used to load now does not.
+
+        ``[autonomy]`` is a fatal preflight section, and 16 CLI commands
+        run the preflight, so refusing a value that previously coerced
+        has to surface as a stated configuration problem rather than as
+        a traceback out of ``ks status``. Also pins that the message
+        carries no ``[autonomy]`` prefix of its own: the preflight adds
+        the section label, and a self-labelled message reads
+        "[autonomy] [autonomy] ..." there.
+        """
+        monkeypatch.delenv(env_var, raising=False)
+        (tmp_path / "kstrl.toml").write_text(f'[autonomy]\n{key} = "false"\n', encoding="utf-8")
+
+        problems = config_problem_lines(tmp_path, warn=lambda _line: None)
+
+        assert len(problems) == 1, problems
+        assert problems[0].startswith(f"[autonomy] {key} must be a boolean"), problems[0]
+        # Not "[autonomy] [autonomy] ...". The trailing provenance the
+        # preflight appends names the section again on purpose, so the
+        # check is on the prefix rather than on a count.
+        assert not problems[0].startswith("[autonomy] [autonomy]")
