@@ -69,7 +69,7 @@ from pathlib import Path
 from typing import Any, Final, Protocol
 
 from kstrl.agents.base import ARCHITECT_COMPONENT, ARCHITECT_ROLE
-from kstrl.manifest import ADVERSARIAL_BUDGET_CHECK
+from kstrl.manifest import ADVERSARIAL_BUDGET_CHECK, Component, Manifest
 from kstrl.procdispose import drain_or_abandon
 from kstrl.procgroup import (
     pid_is_alive,
@@ -983,13 +983,7 @@ def classify_run(
         )
 
     if run.timed_out:
-        # WE killed it. A hang is an infrastructure symptom, and
-        # max_attempts plus the daily budget bound the exposure.
-        return Outcome(
-            Verdict.RETRY_INFRA,
-            "run exceeded serve.factory_timeout_seconds and was killed",
-            {"timed_out": True},
-        )
+        return _timeout_outcome(manifest_path, run.returncode)
 
     if run.returncode == 0:
         return Outcome(Verdict.SUCCESS, "factory exited 0", {"returncode": 0})
@@ -1052,8 +1046,6 @@ def classify_run(
             "manifest",
             {"returncode": run.returncode},
         )
-    from kstrl.manifest import Manifest
-
     try:
         manifest = Manifest.load(manifest_path)
     except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
@@ -1091,7 +1083,44 @@ def classify_run(
     return _merits_outcome(failed, run.returncode)
 
 
-def _budget_halt_outcome(failed: Sequence[Any], returncode: int) -> Outcome | None:
+def _timeout_outcome(manifest_path: Path | None, returncode: int) -> Outcome:
+    """What a run WE killed on ``factory_timeout_seconds`` classifies as.
+
+    Same rule as the ``budget_halt_reason`` check above ``classify_run``\'s
+    timeout branch, one branch over. A run that halted a component on
+    ``max_adversarial_calls`` and THEN hung long enough for the timeout
+    to kill it is still a run that reached the cap, and requeuing it pays
+    a whole run to re-reach a counter that starts again at zero. That is
+    the shape #197 M1 already fixed once for the token and cost ceilings.
+
+    The manifest is written by the pipeline from its own counter before
+    the kill, so it is evidence about THIS run rather than inference. It
+    is read for positive evidence only: no path, no file, or a file that
+    will not parse all answer "no evidence" and leave the timeout verdict
+    standing, which is what this branch returned for every run before
+    #226. A separate function rather than two more branches inside
+    ``classify_run``, which is already at the cyclomatic ratchet.
+    """
+    if manifest_path is not None:
+        try:
+            manifest = Manifest.load(manifest_path)
+        except (OSError, ValueError, KeyError, json.JSONDecodeError):
+            manifest = None
+        if manifest is not None:
+            failed = [comp for comp in manifest.components if str(comp.status) == "failed"]
+            halted = _budget_halt_outcome(failed, returncode)
+            if halted is not None:
+                return halted
+    # WE killed it. A hang is an infrastructure symptom, and max_attempts
+    # plus the daily budget bound the exposure.
+    return Outcome(
+        Verdict.RETRY_INFRA,
+        "run exceeded serve.factory_timeout_seconds and was killed",
+        {"timed_out": True},
+    )
+
+
+def _budget_halt_outcome(failed: Sequence[Component], returncode: int) -> Outcome | None:
     """BUDGET_HALT when the adversarial call cap ended the run, else None.
 
     The cap halting a hard-mode review or security phase is a deliberate
@@ -1112,11 +1141,16 @@ def _budget_halt_outcome(failed: Sequence[Any], returncode: int) -> Outcome | No
     halted = [comp.id for comp in failed if comp.failed_check == ADVERSARIAL_BUDGET_CHECK]
     if not halted:
         return None
-    others = [comp.id for comp in failed if comp.failed_check != ADVERSARIAL_BUDGET_CHECK]
-    # Named for the same reason the sibling_note below exists: a
-    # component that failed for another cause must not disappear from
-    # the reason just because this branch fired first (#197 M3).
-    also = f"; also failed, for other reasons: {', '.join(others)}" if others else ""
+    others = [comp for comp in failed if comp.failed_check != ADVERSARIAL_BUDGET_CHECK]
+    # Written through the same two helpers _merits_outcome uses, and for
+    # the same reason (#197 M3): a component that failed for another
+    # cause must not lose its CAUSE just because this branch fired
+    # first. An id alone sent a real operator looking in the wrong
+    # place, and a sibling that produced no finding has nothing but
+    # ``Component.error`` to be read from.
+    other_evidence = _unevidenced_evidence(others, returncode)
+    detail = _unevidenced_detail(others)
+    also = f"; also failed, for other reasons - {detail}" if detail else ""
     return Outcome(
         Verdict.BUDGET_HALT,
         "the run halted on max_adversarial_calls: "
@@ -1127,17 +1161,26 @@ def _budget_halt_outcome(failed: Sequence[Any], returncode: int) -> Outcome | No
         {
             "returncode": returncode,
             "budget_halted": halted,
-            "other_failures": others,
+            # Named ``other_failures`` rather than the helper's own key:
+            # a sibling here may well carry findings, so calling it
+            # unevidenced would be a claim this branch has not checked.
+            "other_failures": other_evidence["unevidenced_failures"],
+            "component_errors": other_evidence["component_errors"],
         },
     )
 
 
-def _merits_outcome(failed: Sequence[Any], returncode: int) -> Outcome:
+def _merits_outcome(failed: Sequence[Component], returncode: int) -> Outcome:
     """Whether named failures were the spec's fault, unproven, or infra.
 
-    Split out of ``classify_run`` unchanged by #226 round 2, which added
-    the branch above it and would otherwise have pushed that function
-    past the cyclomatic ratchet.
+    Split out of ``classify_run`` by #226 round 2, which added the branch
+    above it and would otherwise have pushed that function past the
+    cyclomatic ratchet, with the two duplicated joins written once. The
+    verdicts, their order and their text are the ones that were here
+    before the split; ``run.returncode`` became a parameter, and the
+    ``sibling_note`` guard reads ``detail`` rather than ``unevidenced``,
+    which is the same condition because every element of ``detail``
+    formats to at least ``": no error recorded"``.
     """
     # A component that produced FINDINGS, none of them infrastructural, is
     # positive evidence of a merits-based failure. A component that
@@ -1188,21 +1231,27 @@ def _merits_outcome(failed: Sequence[Any], returncode: int) -> Outcome:
     )
 
 
-def _unevidenced_detail(unevidenced: Sequence[Any]) -> str:
-    """``id: error`` for each component that failed with no finding.
+def _unevidenced_detail(unevidenced: Sequence[Component]) -> str:
+    """``id: error`` for each component the caller can only name.
 
     One writer for what was the same join written twice, so the reason a
     human reads in the inbox cannot say two different things about the
-    same components.
+    same components. ``_budget_halt_outcome`` is the third caller and
+    passes siblings that may carry findings: ``Component.error`` is set
+    for those too, and it is the whole record for a component that
+    produced no finding at all.
     """
     return "; ".join(f"{comp.id}: {comp.error or 'no error recorded'}" for comp in unevidenced)
 
 
-def _unevidenced_evidence(unevidenced: Sequence[Any], returncode: int) -> dict[str, Any]:
-    """The evidence both unevidenced-carrying verdicts record.
+def _unevidenced_evidence(unevidenced: Sequence[Component], returncode: int) -> dict[str, Any]:
+    """The evidence a verdict records about failures it can only name.
 
     Same reason as ``_unevidenced_detail``: it was written out twice,
     and the inbox item is what a human reads before deciding to requeue.
+    ``_budget_halt_outcome`` reads the two lists out under its own key
+    names rather than merging the dict, because ``unevidenced_failures``
+    would be a claim about its siblings that it has not checked.
     """
     return {
         "returncode": returncode,
