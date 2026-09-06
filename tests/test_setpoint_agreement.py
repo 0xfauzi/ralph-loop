@@ -37,6 +37,7 @@ from kstrl.review import (
     setpoint_disagreements,
     setpoint_retry_context,
 )
+from tests.helpers.replay import failing_run
 from tests.test_pipeline import (
     _component,
     _factory_config,
@@ -856,6 +857,52 @@ class TestPipelineWiring:
         # Retrying cannot recover budget, so it must not retry.
         assert comp.retries == 0
         assert PRD.load(prd_path).user_stories[0].passes is True
+
+    def test_the_setpoint_refusal_is_a_disclosed_divergence(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """#226 round 2. The seventh row of the census in
+        ``kstrl/evolution.py`` above ``_CATEGORY_BY_CHECK``, asserted
+        here so the disclosure fails if it stops being true.
+
+        The repository answers "did this run say anything about the
+        factory's judgement" twice. ``factory._infra_casualty`` asks the
+        FINDING question and ``autonomy_replay.RunRecord`` asks the
+        SIGNATURE one. For this component they disagree: the reviewer
+        never ran, so the only finding is the ``phase_skipped`` trace and
+        the live side counts a judged failure, while the signature says
+        infrastructure and the replay excludes the run.
+
+        Both halves are asserted, because a divergence is only
+        defensible while it is on purpose. It is not on purpose here so
+        much as newly VISIBLE: before this sweep the signature was
+        ``review:setpoint-budget-exhausted`` and the two consumers agreed
+        by both calling a reviewer that never ran a verdict. Enrolling
+        ``adversarial_budget`` fixed the replay half and left the live
+        half, which belongs to factory.py (#332).
+        """
+        pipeline, comp, transition, _ = _drive(
+            tmp_path,
+            review=_review(),
+            prd=_prd(_story("A", passes=True)),
+            review_mode="advisory",
+            setpoint_agreement="block",
+            max_adversarial_calls=1,
+            before_run=lambda p: p.adversarial_budget_consume(),
+        )
+        assert transition == Transition.FAILED
+        # The signature, read where the journal reads it. The check name
+        # is the part that carries: everything before the first colon is
+        # what evolution._CATEGORY_BY_CHECK is asked about.
+        assert pipeline.component_failure_signatures["comp-a"] == ["adversarial_budget:setpoint"]
+        # The replay half.
+        assert failing_run("adversarial_budget:setpoint").infra_aborted
+        # The live half: no infrastructure_error finding, so
+        # factory._infra_casualty returns False and the same run counts
+        # as a judged failure there.
+        assert not any(f.is_infrastructure_error for f in comp.findings)
+        assert [f.phase for f in comp.findings if f.is_phase_skip] == ["review"]
 
     def test_budget_exhaustion_with_no_claim_completes(
         self,

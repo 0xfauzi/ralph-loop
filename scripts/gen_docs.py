@@ -494,7 +494,14 @@ KEY_DESCRIPTIONS: dict[tuple[str, str], str] = {
         "story the engineer marked passes=true (R10.3)"
     ),
     ("factory", "merge_timeout"): "seconds to wait for PR merge confirmation",
-    ("factory", "max_adversarial_calls"): "cap on review+security+distill LLM calls; 0 = unbounded",
+    (
+        "factory",
+        "max_adversarial_calls",
+    ): "cap on review+security+distill LLM calls; 0 = unbounded. "
+    "At the cap a hard-mode review or security phase HALTS the component "
+    "rather than merging it unreviewed; an advisory one skips. Budget 3 calls "
+    "per component for hard review + hard security + knowledge (R10.5, "
+    "docs/runbook.md)",
     (
         "factory",
         "max_total_tokens",
