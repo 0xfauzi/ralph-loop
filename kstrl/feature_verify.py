@@ -431,8 +431,8 @@ def report_verification(
     # them, plus ``dead_code_ruff``, which the same toggle suppresses for
     # a different reason (#335). Counted rather than written out because
     # the number here was already one stale when the split added a name.
-    # Making those names say so in the
-    # field is a change to the suppression layer, not to this emitter,
+    # Making those names say so in the field is a change to the
+    # suppression layer, not to this emitter,
     # and it is the same "one owner for every argument that decides
     # whether a check can honestly run" that #305 tracks. Wired anyway,
     # because an emitter that drops a field it should carry is how the
