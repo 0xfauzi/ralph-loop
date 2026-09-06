@@ -184,11 +184,33 @@ def _announce_verification(
     check silently does not run, and the report reads as a complete PASS
     over three checks. A skip an operator explicitly asked against has to
     be named, or the report is answering a question it never asked.
+
+    ``dead_code_ruff`` is the third instance of that same rule (#335).
+    It is deliberately NOT in :data:`DIFF_DEPENDENT_CHECKS`, because ruff
+    scans ``.`` and needs no base to diff against, but ``[verify]
+    dead_code_cleanup`` is one toggle owning both dead-code phases and
+    ``narrow_to_undiffed`` turns it off, so the phase is suppressed for a
+    reason the diff sentence above does not cover. Naming it in the same
+    list would have printed a false reason; leaving it out printed no
+    reason at all, which was a silent non-measurement the split had just
+    introduced.
+
+    Unconditional, like the list above it and NOT keyed on the toggle:
+    ``config`` here has already been through
+    :func:`resolve_feature_verify_config`, so every one of these toggles
+    reads False by the time this function sees it and a condition on one
+    would be a branch that can never run - the shape of defect this
+    module keeps finding rather than one to add.
     """
     ui.section(f"Verification report ({phase})")
     ui.info(
         "Report only, not a gate: the exit code is unchanged. Not measured "
         "here (no diff to read, see docs/runbook.md): " + ", ".join(DIFF_DEPENDENT_CHECKS)
+    )
+    ui.info(
+        "  also not measured: dead_code_ruff. It reads no diff, but one toggle "
+        "([verify] dead_code_cleanup) owns both dead-code phases and this flow "
+        "turns it off. Use `ks sense` for it."
     )
     ui.info(f"  running: {commands.test}")
     ui.info(f"  running: {commands.typecheck}")
@@ -404,9 +426,13 @@ def report_verification(
     # ``narrow_to_undiffed`` rewrites the operator's toggles to False
     # before the checks run, which erases the very bit the sidecar reads
     # - "was this asked for" - so no gap can be produced on this path
-    # even though ``_announce_verification`` prints the six suppressed
-    # names in prose two lines earlier. Making those six say so in the
-    # field is a change to the suppression layer, not to this emitter,
+    # even though ``_announce_verification`` prints the suppressed names
+    # in prose two lines earlier - ``len(DIFF_DEPENDENT_CHECKS)`` of
+    # them, plus ``dead_code_ruff``, which the same toggle suppresses for
+    # a different reason (#335). Counted rather than written out because
+    # the number here was already one stale when the split added a name.
+    # Making those names say so in the field is a change to the
+    # suppression layer, not to this emitter,
     # and it is the same "one owner for every argument that decides
     # whether a check can honestly run" that #305 tracks. Wired anyway,
     # because an emitter that drops a field it should carry is how the

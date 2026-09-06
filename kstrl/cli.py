@@ -13,8 +13,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, NoReturn
 
 if TYPE_CHECKING:
+    from kstrl.adequacy import AdequacyConfig
     from kstrl.evolution import EvolutionConfig, EvolutionJournal
     from kstrl.interaction import InteractionChannel
+    from kstrl.policy import PolicyConfig
 
     # Annotation only, and the cheapest available: with
     # `from __future__ import annotations` above, _sense_document's
@@ -22,7 +24,7 @@ if TYPE_CHECKING:
     # Not a deferral - line 104 already imports kstrl.verify at module
     # scope, so it is on `ks --help`'s import path either way (measured
     # here at 5.2ms of cli.py's 84.7ms cumulative).
-    from kstrl.verify import VerificationResult
+    from kstrl.verify import VerificationResult, VerifyConfig
 
 from dataclasses import replace
 
@@ -3626,23 +3628,29 @@ def status(
 #: "absent means disabled" is wrong about a v2 document, which is why
 #: this is a bump and not a silent addition.
 #:
-#: Scoped to that one check on purpose, because that is all v2
-#: delivers. ``not_measured`` is not yet a complete index of every
-#: check that did not run: ``check_dead_code`` still reports three
-#: non-measurements as passing rows, and ``require_self_critique`` with
-#: no ``progress_file_path`` and no PRD emits neither a row nor a gap.
-#: Both predate this and both are follow-ups on #306; a reader must not
-#: read an empty array as "everything enabled was measured".
-SENSE_SCHEMA_VERSION = 2
+#: 3 (#335): the same two changes for the dead-code gate, by v2's own
+#: rule. ``check_dead_code`` fused a ruff auto-fix phase and a vulture
+#: scan into one row, so an absent ``dead_code`` row still meant only
+#: "turned off"; now it also means "asked for, measured nothing". And a
+#: NEW row name appears in ``checks``, ``dead_code_ruff``, which is the
+#: ruff half answering for itself. A v2 reader is wrong about a v3
+#: document on both counts.
+#:
+#: Still not a complete index of every check that did not run:
+#: ``require_self_critique`` with no ``progress_file_path`` and no PRD
+#: emits neither a row nor a gap. That predates this and is a follow-up
+#: on #306; a reader must not read an empty array as "everything
+#: enabled was measured".
+SENSE_SCHEMA_VERSION = 3
 
 
 def _sense_document(path: Path, base: str, result: VerificationResult) -> dict[str, Any]:
     """The ``ks sense --json`` document, at :data:`SENSE_SCHEMA_VERSION`.
 
     Its own function because it is a published contract and ``sense``
-    is a 200-line command: a reader checking what v2 promises should not
-    have to find it among the preflight, the base resolution and the
-    terminal rendering.
+    is a 200-line command: a reader checking what the current schema
+    promises should not have to find it among the preflight, the base
+    resolution and the terminal rendering.
     """
     return {
         "schema_version": SENSE_SCHEMA_VERSION,
@@ -3682,6 +3690,47 @@ def _sense_error(message: str, as_json: bool) -> NoReturn:
             )
         )
     sys.exit(2)
+
+
+def _sense_needs_diff(
+    verify_cfg: VerifyConfig,
+    policy_cfg: PolicyConfig,
+    adequacy_cfg: AdequacyConfig,
+) -> bool:
+    """Whether a check `ks sense` is about to run reads ``git diff``.
+
+    Every check that consumes the diff reads it through the LENIENT git
+    helpers, which map a bad ref, a missing base or a non-repository onto
+    an EMPTY file list, indistinguishable from "nothing changed".
+    diff_scope then reports "0 files, all within scope", bad_patterns
+    "scanned 0 Python files", and ``ks sense`` exits 0 having measured
+    nothing. So the answer here gates one strict read up front, and
+    cannot-measure becomes exit 2.
+
+    ``mutation_testing`` is deliberately absent: sense skips that check
+    outright (read-only), so its diff read never happens and demanding a
+    base for it would be a false exit 2.
+
+    ``dead_code_cleanup`` is one toggle over TWO phases since #335, and
+    only one of them reads a diff. ``dead_code_ruff`` scans ``.``, and
+    with ``[verify] dead_code_command`` set the detector is the
+    operator's own program, run without the diff read that only ever
+    existed to build vulture's argument list. The toggle alone therefore
+    stopped implying a diff is needed, and demanding one there is the
+    same false exit 2 mutation_testing is excluded for.
+
+    Its own function because ``sense`` is grandfathered at the cognitive
+    ratchet, so the extra clause is a refusal at commit time if it stays
+    inline - and because "does anything here need a base" now has an
+    answer worth stating once.
+    """
+    return bool(
+        verify_cfg.check_diff_scope
+        or verify_cfg.check_bad_patterns
+        or (verify_cfg.dead_code_cleanup and not verify_cfg.dead_code_command)
+        or policy_cfg.enabled
+        or adequacy_cfg.enabled
+    )
 
 
 @cli.command()
@@ -3751,13 +3800,18 @@ def sense(
     policy / adequacy / dead-code / mutation checks from kstrl.toml),
     run by hand with no PRD, no branch, no worktree and no agent spend.
 
+    [verify] dead_code_cleanup produces two rows, `dead_code_ruff` for
+    the ruff F401/F811/F841 phase and `dead_code` for the vulture or
+    [verify] dead_code_command scan, so a phase that could not run does
+    not take the other one's answer with it (#335).
+
     The measurement is read-only. It runs against your live checkout,
     not a worktree kstrl owns, so it writes nothing to .kstrl/ and never
-    edits, stages, commits or leaves bytecode: the dead-code check
-    reports what it would remove instead of removing it, and mutation
-    testing cannot run at all because mutmut works by rewriting source.
-    The exception is the project's OWN configured test / typecheck /
-    lint commands, which are your programs and write their own caches.
+    edits, stages, commits or leaves bytecode: `dead_code_ruff` reports
+    what it would remove instead of removing it, and mutation testing
+    cannot run at all because mutmut works by rewriting source. The
+    exception is the project's OWN configured test / typecheck / lint
+    commands, which are your programs and write their own caches.
 
     A check that could not run gets NO row: it is reported under
     not_measured with the reason, never as a passing check (#306).
@@ -3805,23 +3859,7 @@ def sense(
 
     base = resolve_base_branch(base_branch, path)
 
-    # Every check below that consumes the diff reads it through the
-    # LENIENT git helpers, which map a bad ref, a missing base or a
-    # non-repository onto an EMPTY file list - indistinguishable from
-    # "nothing changed". diff_scope then reports "0 files, all within
-    # scope", bad_patterns "scanned 0 Python files", and `ks sense`
-    # exits 0 having measured nothing. mutation_testing is deliberately
-    # absent from this list: sense skips that check outright (read-only),
-    # so its diff read never happens and demanding a base for it would
-    # be a false exit 2.
-    needs_diff = (
-        verify_cfg.check_diff_scope
-        or verify_cfg.check_bad_patterns
-        or verify_cfg.dead_code_cleanup
-        or policy_cfg.enabled
-        or adequacy_cfg.enabled
-    )
-    if needs_diff:
+    if _sense_needs_diff(verify_cfg, policy_cfg, adequacy_cfg):
         # Ask git the same question once, strictly, before any check
         # runs. Cannot-measure is exit 2; it is never a pass.
         from kstrl import git as _git

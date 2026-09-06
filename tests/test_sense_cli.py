@@ -8,10 +8,14 @@ command through ``CliRunner`` and reads the ``--json`` document back.
 from __future__ import annotations
 
 import json
+import shutil
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
+import pytest
 from click.testing import CliRunner, Result
 
 from kstrl.cli import cli
@@ -80,12 +84,14 @@ def test_sense_passes_on_clean_tree(tmp_path: Path) -> None:
     result, document = _sense_json(root)
 
     assert result.exit_code == 0, result.output
-    # 2, not 1 (#306). The literal is pinned deliberately: this document
-    # is a published surface, and the bump is the only thing that tells
-    # a reader an ABSENT check row no longer means "turned off in
-    # kstrl.toml" - it can now also mean "asked for, measured nothing",
-    # which `not_measured` below disambiguates.
-    assert document["schema_version"] == 2
+    # 3, not 2 (#335); 2, not 1, was #306. The literal is pinned
+    # deliberately: this document is a published surface, and the bump
+    # is the only thing that tells a reader an ABSENT check row no
+    # longer means "turned off in kstrl.toml" - it can now also mean
+    # "asked for, measured nothing", which `not_measured` below
+    # disambiguates. #335 extended that to the dead-code gate and added
+    # a new row name, `dead_code_ruff`, to `checks`.
+    assert document["schema_version"] == 3
     assert document["path"] == str(root)
     assert document["passed"] is True
     # Present and empty on a tree where every enabled check measured
@@ -203,7 +209,7 @@ def test_sense_exit_2_on_missing_path(tmp_path: Path) -> None:
     assert result.exit_code == 2
     assert result.stderr.startswith("error:")
     document = json.loads(result.stdout)
-    assert document["schema_version"] == 2
+    assert document["schema_version"] == 3
     assert "error" in document
     assert missing in document["error"]
 
@@ -278,6 +284,21 @@ def _dead_code_repo(tmp_path: Path) -> Path:
     return root
 
 
+def _without_vulture() -> Callable[..., str | None]:
+    """``shutil.which`` with vulture hidden and everything else real.
+
+    Patched for that ONE name and delegating the rest: `ks sense` runs
+    in-process under ``CliRunner``, so a blanket patch would take ruff
+    and the operator's own commands down with it.
+    """
+    real_which = shutil.which
+
+    def which(name: str, *args: Any, **kwargs: Any) -> str | None:
+        return None if name == "vulture" else real_which(name, *args, **kwargs)
+
+    return which
+
+
 def test_sense_never_edits_stages_or_commits(tmp_path: Path) -> None:
     root = _dead_code_repo(tmp_path)
     head_before = git("rev-parse", "HEAD", cwd=root)
@@ -294,12 +315,73 @@ def test_sense_never_edits_stages_or_commits(tmp_path: Path) -> None:
     assert git("status", "--porcelain", cwd=root) == status_before
     assert "unrelated.txt" in status_before
     assert (root / "src" / "b.py").read_text() == b_before
-    # The dead-code sensor reported rather than removed. Its verdict is
-    # left open on purpose: whether vulture is installed in the running
-    # environment decides that, and this test is about the tree, not the
-    # verdict.
-    dead_code = _check(document, "dead_code")
-    assert "not removed" in dead_code["message"] or "Skipped" in dead_code["message"]
+    # The full account of what the two phases REPORTED is asserted in
+    # test_sense_reports_the_dead_code_phases_separately below, which
+    # needs ruff on PATH to have a measurement to read. What this test
+    # keeps unconditionally is the read-only contract itself, stated
+    # about the document rather than only about the tree: `assert
+    # document["checks"]` alone is true of any run that produced one row
+    # at all, and would still pass with both dead-code phases deleted -
+    # on a machine without ruff, that left nothing in this file
+    # asserting anything about either of them.
+    dead_code_rows = [c for c in document["checks"] if c["name"].startswith("dead_code")]
+    gaps = [g for g in document["not_measured"] if g["check"].startswith("dead_code")]
+    assert dead_code_rows or gaps
+    assert not any("auto-fixed" in row["message"] for row in dead_code_rows)
+
+
+@pytest.mark.skipif(shutil.which("ruff") is None, reason="needs ruff on PATH")
+def test_sense_reports_the_dead_code_phases_separately(tmp_path: Path) -> None:
+    """#335 end to end, on a command where one phase can measure and the
+    other cannot.
+
+    ``check_dead_code`` fused the ruff auto-fix and the vulture scan
+    into one row, so with vulture absent ``ks sense`` printed
+    ``dead_code  pass  ruff reports 1 auto-removable, not removed;
+    vulture not installed`` - and ``build_review_prompt`` handed the
+    same row to an adversarial reviewer as ``dead_code: PASS``. Omitting
+    the fused row would have thrown away the ruff measurement with it,
+    which is why the fix is a split and not an omission. Both halves are
+    asserted: the ruff row with its real message, and a reason for the
+    scan that did not happen.
+    """
+    root = _dead_code_repo(tmp_path)
+
+    with patch("shutil.which", side_effect=_without_vulture()):
+        result, document = _sense_json(root)
+
+    assert result.exit_code == 0, result.output
+    ruff_phase = _check(document, "dead_code_ruff")
+    assert ruff_phase["passed"] is True
+    assert "auto-removable, not removed" in ruff_phase["message"]
+    assert [c for c in document["checks"] if c["name"] == "dead_code"] == []
+    assert document["not_measured"] == [
+        {
+            "check": "dead_code",
+            "reason": "tool_missing",
+            "detail": (
+                "vulture is not on PATH and no [verify] dead_code_command is set, "
+                "so nothing scanned for dead code"
+            ),
+        }
+    ]
+    # Still a pass: a check that measured nothing neither passes nor
+    # fails, so the sidecar cannot become a gate by the back door.
+    assert document["passed"] is True
+
+
+@pytest.mark.skipif(shutil.which("ruff") is None, reason="needs ruff on PATH")
+def test_sense_table_names_the_dead_code_scan_it_did_not_run(tmp_path: Path) -> None:
+    """The terminal half. Most operators read the table, not the JSON."""
+    root = _dead_code_repo(tmp_path)
+
+    with patch("shutil.which", side_effect=_without_vulture()):
+        result = _invoke("--root", str(root), "--ui", "plain", "--no-color")
+
+    assert result.exit_code == 0, result.output
+    assert "dead_code  not measured" in result.output
+    assert "vulture is not on PATH" in result.output
+    assert "sense: PASS" in result.output
 
 
 def test_sense_leaves_no_bytecode_or_lint_cache(tmp_path: Path) -> None:
@@ -344,6 +426,33 @@ def test_sense_exit_2_when_explicit_base_is_unreachable(tmp_path: Path) -> None:
     # No verdict was invented for a diff git could not produce.
     assert "passed" not in document
     assert "checks" not in document
+
+
+def test_sense_does_not_demand_a_diff_no_dead_code_phase_reads(tmp_path: Path) -> None:
+    """The preflight asks for a base on behalf of the checks that read
+    one, and `[verify] dead_code_cleanup` stopped being that question.
+
+    It is one toggle over two phases (#335): `dead_code_ruff` scans `.`,
+    and with `[verify] dead_code_command` set the detector is the
+    operator's own program, run without the diff read that only ever
+    existed to build vulture's argument list. With both diff-reading
+    gates off and the toggle on, demanding a base is the same false
+    exit 2 mutation_testing is already excluded for - the run that could
+    have measured two phases measures none.
+    """
+    root = _diverged_repo(tmp_path)
+    (root / "kstrl.toml").write_text(
+        _kstrl_toml()
+        + "check_diff_scope = false\n"
+        + "check_bad_patterns = false\n"
+        + "dead_code_cleanup = true\n"
+        + 'dead_code_command = "true"\n'
+    )
+
+    result, document = _sense_json(root, "--base", "no-such-branch")
+
+    assert result.exit_code != 2, result.output
+    assert [c["name"] for c in document["checks"] if c["name"].startswith("dead_code")]
 
 
 def test_sense_detects_the_base_branch_that_exists(tmp_path: Path) -> None:
