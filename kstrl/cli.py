@@ -4514,6 +4514,10 @@ def autonomy_replay_cmd(
     what is a permission or an encoding problem. The exit code is the
     same because nothing was replayed either way; the difference is
     that the line above it now names the file and the error.
+
+    This is also the advisory mode for the R8.4 health rules: it reports
+    would-have-fired counts and never demotes, so a candidate rule set is
+    scored against real history before it is allowed to revoke a level.
     """
     from kstrl.autonomy_replay import replay_file
 

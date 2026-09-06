@@ -11,6 +11,45 @@ stage, runtime feedback, and an earned-autonomy ladder). See
 [`docs/dark-factory-roadmap.md`](docs/dark-factory-roadmap.md) and the
 [R8 milestone](https://github.com/0xfauzi/kstrl/milestone/1).
 
+### Added
+
+- Two of the autonomy ladder's five declared demotion triggers now fire.
+  `DemotionTrigger` has listed `CALIBRATION_REGRESSION` and
+  `HEALTH_BREACH` since R8.2 and neither had an emitter, so a factory
+  getting quietly worse without breaching the policy envelope kept its
+  level, and a calibration regression a human had already measured
+  changed nothing. `python -m kstrl.calibration compare` takes a
+  `--root` and, when the ladder is enabled, opens a `calibration_drift`
+  inbox item on a regression; `[autonomy] demote_on_calibration_regression`
+  (env `KSTRL_AUTONOMY_DEMOTE_ON_CALIBRATION`) additionally revokes one
+  level, once per comparison however often that comparison is re-run.
+  With the ladder off it says so on stdout, naming the root it consulted,
+  rather than doing nothing quietly. The R8.4 half is the seam only: a
+  new `health_breach` inbox kind and `[autonomy] demote_on_health_breach`
+  (env `KSTRL_AUTONOMY_DEMOTE_ON_HEALTH`), inert until `kstrl/health.py`
+  exists and suppressed - out loud - while a cool-down is running. Both
+  switches default off, because every threshold in the ladder is still an
+  unmeasured placeholder, and they are refused unless written as unquoted
+  booleans, because `= "false"` would otherwise arm them. `[autonomy]
+  enabled` is read the same strict way for the same reason, which is a
+  behaviour change: a config that spells it `"false"` or `"0"` now
+  reports a configuration problem instead of quietly switching the ladder
+  on. Every automatic
+  demotion now goes through one `autonomy.apply_demotion`, so its four
+  writes cannot drift apart per trigger. Compare's exit codes are
+  unchanged, except that on a regression a `kstrl.toml` that will not
+  load or cannot be read exits 2 instead of being read as "ladder off".
+
+### Changed
+
+- A repeat of an open inbox item now refreshes its `evidence` alongside
+  its `detail`. Only the prose half was refreshed before, so a deduped
+  item whose numbers move - a health breach, whose whole point is that
+  the value moves - reported the latest observation in `detail` and the
+  first one in the structured payload that `ks inbox` and the TUI render.
+  `title` is still not refreshed: it is the row's label, and a repeat
+  must not relabel a row somebody has already read.
+
 ### Fixed
 
 - Six more record files survive an interrupted write. A crash leaves a
@@ -99,6 +138,28 @@ stage, runtime feedback, and an earned-autonomy ladder). See
   `ENOLCK` or `EINVAL`, and an unguarded acquisition made every journal
   append raise on such a mount where it used to write the entry, so the
   lock added to protect the record was the thing losing it.
+
+- `.kstrl/autonomy.json` is no longer overwritten when the file it was
+  read from could not be parsed. `AutonomyState.load` fails closed to a
+  fresh L1 and records why; saving that fresh state back replaced the
+  damaged bytes, which are the only thing an operator could have
+  repaired, and the next load then found a clean file, so nothing
+  reported the damage again. The refusal now lives in
+  `AutonomyState.save`, the one function that writes that file, rather
+  than in the branches that remembered to ask, and it is reported on the
+  run's own surface every time a save is attempted until the file is
+  fixed.
+
+- An inbox write that could not take the control lock no longer takes
+  its caller down. `Inbox._append` locks on every write and raises a
+  `RuntimeError` subclass, which the `(OSError, ValueError)` pair each
+  inbox site was written with does not catch; seven sites had that hole,
+  including `ks serve`'s decision filing, the pipeline's item resolve and
+  the TUI's approve/reject/snooze, where it reached the Textual event
+  loop. A malformed `[inbox]` value is now caught too: the config casts
+  per key, so a TOML date raised `TypeError`, which is not a
+  `ValueError` either, and at the demotion notice that arrived after the
+  demotion had already been saved.
 
 - `ks decompose --project-name`, `ks factory --project-name` and
   `ks queue add --project-name` refuse an explicit empty or

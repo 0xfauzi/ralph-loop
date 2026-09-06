@@ -390,8 +390,10 @@ deploy = false                                                                  
 
 # Autonomy ladder (R8.2; opt-in)
 [autonomy]
-enabled = false  # derive run permissions from the ladder level (opt-in)
-max_level = 4    # hard ceiling: never run above this level (1-4)
+enabled = false                           # derive run permissions from the ladder level (opt-in)
+max_level = 4                             # hard ceiling: never run above this level (1-4)
+demote_on_calibration_regression = false  # demote one level when `calibration compare` finds a regression (an inbox item is opened either way)
+demote_on_health_breach = false           # demote one level on an R8.4 health control-limit breach (an inbox item is opened either way)
 
 # Exception inbox (R8.3)
 [inbox]

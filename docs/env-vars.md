@@ -332,6 +332,13 @@ Promotion requires evidence **and** a recorded human ack (`ks autonomy promote -
 |---|---|---|
 | `KSTRL_AUTONOMY_ENABLED` | bool (`1`) | false |
 | `KSTRL_AUTONOMY_MAX_LEVEL` | int (1-4) | 4 |
+| `KSTRL_AUTONOMY_DEMOTE_ON_CALIBRATION` | bool (`1`) | false |
+| `KSTRL_AUTONOMY_DEMOTE_ON_HEALTH` | bool (`1`) | false |
+
+Both demotion switches are advisory first: a calibration regression or a health
+control-limit breach always opens an inbox item while the ladder is enabled, and
+revokes a level only when the matching switch is on. They default off because
+every ladder threshold is still an unmeasured placeholder.
 
 ## InboxConfig (`[inbox]`)
 

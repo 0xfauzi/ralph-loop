@@ -95,6 +95,7 @@ from kstrl.review import (
 from kstrl.sandbox import SandboxConfig
 from kstrl.scope import RunScope
 from kstrl.security import SecurityConfig, SecurityMode, SecurityResult
+from kstrl.statedir import ControlStateError
 from kstrl.verify import (
     SCOPE_UNREADABLE_CHECK,
     CheckResult,
@@ -1630,7 +1631,14 @@ class ComponentPipeline:
             existing = self._inbox.find_by_dedupe_key(dedupe_key)
             if existing is not None and existing.is_open:
                 self._inbox.resolve(existing.id, comment=reason)
-        except (OSError, ValueError, InboxError) as exc:
+        except (OSError, TypeError, ValueError, InboxError, ControlStateError) as exc:
+            # Same tuple as _inbox_add below, and for the same two
+            # reasons: Inbox.resolve reaches _append through _decide, so
+            # it takes the control lock and can raise ControlStateError,
+            # and InboxConfig.load casts per key, so a TOML date raises
+            # TypeError. Neither is an OSError, a ValueError or an
+            # InboxError, and this function's contract is that closing a
+            # stale item cannot fail the run that answered it.
             self.ui.warn(f"  Inbox resolve failed (non-fatal): {exc}")
 
     def _inbox_suppress_generic(self, comp_id: str) -> None:
@@ -1688,7 +1696,12 @@ class ComponentPipeline:
                     item.title,
                     component_id=component,
                 )
-        except (OSError, ValueError) as exc:
+        except (OSError, TypeError, ValueError, ControlStateError) as exc:
+            # ControlStateError is a RuntimeError: Inbox._append takes
+            # the control lock on every write, and the (OSError,
+            # ValueError) pair all seven inbox sites were written with
+            # does not catch what that lock raises. TypeError is
+            # InboxConfig.load's per-key cast.
             self.ui.warn(f"  Inbox write failed (non-fatal): {exc}")
 
     def _park_merge_pending(
