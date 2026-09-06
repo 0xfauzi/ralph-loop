@@ -3017,8 +3017,8 @@ class ComponentPipeline:
         # exhausted budget instead of downgrading, so
         # ``budget_downgraded`` is only ever true for an advisory
         # reviewer. An advisory reviewer that never ran can still FAIL
-        # the component here, which is why "advisory does not block" is
-        # not a statement this tree makes anywhere.
+        # the component here, so "advisory never blocks" is false as a
+        # statement about this branch, whatever else it may describe.
         if (
             budget_downgraded
             and self._setpoint_blocking()[0]
@@ -3059,12 +3059,14 @@ class ComponentPipeline:
         """Phase 2.5's exhausted-budget branch, both modes.
 
         Same reason the review side keeps its mode split inside the
-        budget check (see ``_phase_review``): a mode added later takes
-        the recorded skip, which is what every mode did before #226.
-        ``SecurityConfig.__post_init__`` rejects any mode outside
-        skip|advisory|hard, and skip already returned above.
+        budget check (see ``_phase_review``), and keyed the same way:
+        the arm a mode added later would fall into is the REFUSAL, not
+        the downgrade that merges a component no security reviewer
+        looked at. ``SecurityConfig.__post_init__`` rejects any mode
+        outside skip|advisory|hard, and skip already returned above, so
+        the two arms are exactly hard and advisory today.
         """
-        if sec_config.mode == SecurityMode.HARD.value:
+        if sec_config.mode != SecurityMode.ADVISORY.value:
             # R10.5 (#226): same rule as Phase 2. Hard mode refuses to
             # merge a component no security reviewer looked at.
             return SecurityPhaseResult(
@@ -3207,11 +3209,17 @@ class ComponentPipeline:
             #
             # The mode split is INSIDE the budget check, not a second
             # condition beside it, so the check stays closed over
-            # ReviewMode: a mode added later falls into the downgrade
-            # below (today's behaviour) instead of falling past both
-            # branches and out of the budget check entirely. Phase 2.5
-            # has the same shape for the same reason.
-            if review_mode == ReviewMode.HARD:
+            # ReviewMode and a mode added later cannot fall past both
+            # branches and out of the budget check entirely. It keys on
+            # ADVISORY rather than on HARD so that the arm it closes
+            # ONTO is the refusal: keyed the other way, a mode added
+            # later would merge unreviewed by default, which is the
+            # fail-open direction and the exact outcome #226 exists to
+            # remove. SKIP returned above and both remaining members are
+            # named here, so this is the same behaviour today as
+            # ``== HARD`` was, measured by the suite staying green.
+            # Phase 2.5 has the same shape for the same reason.
+            if review_mode != ReviewMode.ADVISORY:
                 comp.review_passed = False
                 return ReviewPhaseResult(
                     ran=False,

@@ -783,9 +783,11 @@ class TestFactorySkipTraces:
         assert f"Phase 2 FAILED for comp-b: Review infrastructure error: {refusal}" in run.output
         assert infra[0].explanation == refusal
         # The reviewer did not run, so it did not reject: review_passed
-        # is the rejection record and must not read as one. (It is False
-        # rather than None because the component is failing; the advisory
-        # path, which continues, writes None.)
+        # is the rejection record and must not read as one. False is how
+        # the halting path spells "did not pass" and None is how the
+        # advisory path, which lets the component continue, spells it:
+        # the difference is between the two paths, not a claim about
+        # what any reviewer decided.
         assert comp_b.review_passed is False
         # Nothing was skipped, so nothing claims it was - in the findings
         # or in the progress log, where the base commit emitted a
@@ -797,8 +799,15 @@ class TestFactorySkipTraces:
         self,
         tmp_path: Path,
     ) -> None:
-        """Advisory never blocks, so the exhausted budget still degrades
-        to a recorded skip and the component completes."""
+        """In advisory mode the exhausted budget degrades to a recorded
+        skip and, with ``setpoint_agreement`` at its default, the
+        component completes.
+
+        Both halves of that sentence are configuration, not a rule about
+        advisory mode: under ``setpoint_agreement = "block"`` the R10.3
+        gate in ``_review_did_not_run`` fails this same component, which
+        ``tests/test_setpoint_agreement.py`` covers.
+        """
         run = _run_with_budget(
             tmp_path,
             ["comp-a", "comp-b"],

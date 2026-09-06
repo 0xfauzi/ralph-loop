@@ -189,7 +189,7 @@ class TestE4BudgetCap:
         """The cap is what it says: one adversarial call, so the second
         component's reviewer never runs. Named "stops" rather than
         "skips" since R10.5 (#226): in hard mode, which this test uses,
-        the second component now halts at the budget wall instead of
+        the second component now halts on the exhausted budget instead of
         being skipped past it. What the cap does to the CALL COUNT is
         the same either way, and that is all this test measures.
         """
