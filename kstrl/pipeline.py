@@ -196,6 +196,36 @@ class ReviewPhaseResult:
     result: ReviewResult | None = None
     failure: PhaseFailure | None = None
 
+    @property
+    def produced_a_reading(self) -> bool:
+        """Whether this phase actually measured the change (#247).
+
+        Narrower than ``ran`` on purpose, and the narrowness is the
+        point. The only consumer is the record ``_buckets`` uses to
+        decide whether an OLDER finding may be dropped, so the predicate
+        has to be the one that makes dropping safe.
+
+        ``ran`` is not that predicate. In ADVISORY mode a reviewer that
+        CRASHES yields ``passed = review_mode != HARD`` = True with
+        ``infrastructure_error=True``: it records no failure entry and
+        this phase returns ``ran=True``. Keying on ``ran`` would let a
+        crashed reviewer in attempt N retire attempt N-1's real finding,
+        and if the budget then ran out the finding would never be seen
+        again. That is the fail-open ``FailureEntry.infrastructure`` and
+        ``Finding.infrastructure_error`` (E9) both exist to prevent.
+
+        A review that ran and FAILED does count. Its own entry lands in
+        ``current`` and an older entry at the same rank is retired by the
+        ``rank == q`` branch already, so recording it changes no bucket;
+        it keeps the record a truthful census of the attempt rather than
+        a special case.
+
+        ``result is not None`` cannot be False on a ``ran=True`` path
+        today. It is here so the answer stays the safe one if a future
+        return site makes it possible.
+        """
+        return self.ran and self.result is not None and not self.result.infrastructure_error
+
 
 @dataclass(frozen=True)
 class SecurityPhaseResult:
@@ -206,6 +236,12 @@ class SecurityPhaseResult:
     skip_reason: str | None = None
     result: SecurityResult | None = None
     failure: PhaseFailure | None = None
+
+    @property
+    def produced_a_reading(self) -> bool:
+        """Same predicate and same reasoning as
+        ``ReviewPhaseResult.produced_a_reading``; see there."""
+        return self.ran and self.result is not None and not self.result.infrastructure_error
 
 
 @dataclass(frozen=True)
@@ -526,6 +562,17 @@ class ComponentPipeline:
         # rendered into the engineer's prompt - a cost governor has no
         # business in the agent's context.
         self.review_readings: dict[str, list[AttemptReading]] = {}
+        # #247: which skippable phases produced a reading, per component
+        # and per attempt, as (attempt, phase) pairs. Merged into the
+        # retry context at whichever gate finally fails, because that is
+        # the only moment the context is written.
+        #
+        # In-run only and NOT a constructor parameter, unlike
+        # component_contexts: after record_contract_failure moved here,
+        # nothing outside the pipeline reads it. The record itself
+        # travels between attempts inside the context's JSON, so a fresh
+        # process picks up what the previous one observed.
+        self._phase_readings: dict[str, set[tuple[int, str]]] = {}
         # Components whose usage snapshot could not be retired
         # before this attempt launched; disk salvage is refused
         # for them (R8 review P2 on 22e99b4).
@@ -1226,6 +1273,10 @@ class ComponentPipeline:
         comp.status = ComponentStatus.RUNNING.value
         comp.started_at = _iso_now()
         self.component_failure_signatures.pop(comp.id, None)
+        # #247: the readings describe the attempt in flight, so the
+        # attempt boundary is where they are cleared. Anything the
+        # previous attempt observed is already in the context's JSON.
+        self._phase_readings.pop(comp.id, None)
         self._attempt_started_monotonic[comp.id] = time.monotonic()
 
     def _end_attempt(self, comp: Component) -> None:
@@ -1303,6 +1354,52 @@ class ComponentPipeline:
                 signature_for_error(phase or "unknown", error),
             ]
 
+    def _note_phase_reading(self, comp: Component, phase: str, produced: bool) -> None:
+        """Record that ``phase`` measured this attempt of ``comp`` (#247).
+
+        The attempt number is captured HERE rather than at merge time,
+        which is what stops an off-by-one: ``comp.retries + 1`` is the
+        attempt convention every entry site uses, and ``retry_or_fail``
+        increments ``retries`` before it stores the context.
+        """
+        if produced:
+            self._phase_readings.setdefault(comp.id, set()).add((comp.retries + 1, phase))
+
+    def _with_phase_readings(self, comp_id: str, context_json: str) -> str:
+        """Merge this attempt's readings into the context about to be
+        stored for the next attempt.
+
+        A record carried forward from an older attempt is inert by
+        construction: ``_buckets`` only consults readings whose attempt
+        equals the latest one.
+        """
+        ctx = IterationContext.from_json(context_json)
+        for attempt, phase in sorted(self._phase_readings.get(comp_id, set())):
+            ctx.add_phase_reading(phase, attempt=attempt)
+        return ctx.to_json()
+
+    def record_contract_failure(self, comp_id: str, attempt: int, test_output: str) -> None:
+        """Add a contract-test failure to a component's retry context.
+
+        Called by the factory's contract loop, which owns the rest of
+        that reset (the manifest save, the completed-list removal, the
+        signature). Only the CONTEXT write lives here, and it lives here
+        because the retry context has exactly two writers - this one and
+        ``retry_or_fail`` - and both must merge the phase readings or
+        the contract path keeps the defect the retry path just lost: a
+        contract failure in attempt N would re-raise a review finding
+        the reviewer cleared in attempt N.
+
+        ``attempt`` is the attempt whose contract test failed. The
+        caller has already incremented ``retries``, so it passes that
+        value directly rather than ``retries + 1``; the pipeline sites
+        use ``+ 1`` because there the increment happens inside
+        ``retry_or_fail`` AFTER the entry is recorded.
+        """
+        ctx = IterationContext.from_json(self.component_contexts.get(comp_id, "{}"))
+        ctx.add_contract_failure(test_output, attempt=attempt)
+        self.component_contexts[comp_id] = self._with_phase_readings(comp_id, ctx.to_json())
+
     def retry_or_fail(
         self,
         comp: Component,
@@ -1350,7 +1447,13 @@ class ComponentPipeline:
             comp.status = ComponentStatus.PENDING.value
             comp.error = error
             if context_json:
-                self.component_contexts[comp.id] = context_json
+                # The chokepoint: every failing gate that carries a
+                # context routes here, so this is the one place the
+                # attempt's phase readings have to be merged in (#247).
+                self.component_contexts[comp.id] = self._with_phase_readings(
+                    comp.id,
+                    context_json,
+                )
             self.bus.emit(
                 ev.ComponentRetrying(
                     component=comp.id,
@@ -2261,6 +2364,9 @@ class ComponentPipeline:
             review.failure is None,
             review.failure.error if review.failure else "",
         )
+        # Before the failure return on purpose: a review that ran and
+        # failed produced a reading too (#247).
+        self._note_phase_reading(comp, "review", review.produced_a_reading)
         if review.failure is not None:
             return PipelineOutcome(
                 transition=self._route_failure(comp, review.failure),
@@ -2283,6 +2389,7 @@ class ComponentPipeline:
             security.failure is None,
             security.failure.error if security.failure else "",
         )
+        self._note_phase_reading(comp, "security", security.produced_a_reading)
         if security.failure is not None:
             return PipelineOutcome(
                 transition=self._route_failure(comp, security.failure),

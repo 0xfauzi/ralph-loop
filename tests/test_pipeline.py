@@ -22,6 +22,7 @@ from kstrl import events as ev
 from kstrl import git
 from kstrl.agents.base import UsageRecord, UsageTotals
 from kstrl.config import KstrlConfig
+from kstrl.context import IterationContext
 from kstrl.events import CallbackSink, Event, EventBus, PhaseCompleted, V1CompatSink
 from kstrl.evolution import category_for_check
 from kstrl.factory import (
@@ -50,6 +51,7 @@ from kstrl.scope import RunScope
 from kstrl.security import SecurityConfig, SecurityResult
 from kstrl.ui.plain import PlainUI
 from kstrl.verify import CheckResult, VerificationResult, VerifyConfig
+from tests.test_context import CURRENT, NOT_REMEASURED, RESOLVED, section
 
 
 class _ChoiceUI(PlainUI):
@@ -2239,3 +2241,282 @@ class TestJournalConfigNeverGatesAnAttempt:
 
         assert "Evolution config unreadable" in console.getvalue()
         assert not (tmp_path / ".kstrl" / "evolution.jsonl").exists()
+
+
+class TestPhaseReadingsRetireSkippableFindings:
+    """#247: a review or security finding from an earlier attempt is
+    dropped from the next attempt's prompt only when its phase actually
+    ran again and returned a verdict.
+
+    Drives the real ``process_result`` twice per case, feeding the stored
+    context back in as the next attempt's ``ComponentResult.context_json``
+    exactly as the factory's ``_submit_args`` does, and asserts on the
+    block the worker would render into the engineer's prompt.
+
+    ON THE FAILING GATE IN THE BUDGET CASES. The issue's second
+    acceptance criterion asks for an attempt that skips review on an
+    exhausted budget and fails SECURITY. That is unreachable, measured
+    rather than assumed: both phases consult the same counter and review
+    runs first, so a budget that has skipped review has already skipped
+    security. The reachable shape puts the failing gate above security,
+    and these tests use the HITL checkpoint (rank ``pr``). The
+    criterion's intent - a skippable phase that did not run retires
+    nothing - is pinned three ways: here on the budget cause, here on the
+    operator's explicit skip, and at the unit layer in
+    ``tests/test_context.py``.
+    """
+
+    def _attempt(
+        self,
+        pipeline: ComponentPipeline,
+        manifest: Manifest,
+    ) -> Any:
+        """One attempt, wired the way the factory wires it."""
+        comp = manifest.get_component("comp-a")
+        assert comp is not None
+        pipeline.begin_attempt(comp)
+        return pipeline.process_result(
+            "comp-a",
+            ComponentResult(
+                "comp-a",
+                success=True,
+                iterations=1,
+                duration_seconds=1.0,
+                context_json=pipeline.component_contexts.get("comp-a"),
+            ),
+        )
+
+    def _prompt_block(self, pipeline: ComponentPipeline) -> str:
+        """What the worker would build for the next attempt."""
+        raw = pipeline.component_contexts.get("comp-a", "{}")
+        return IterationContext.from_json(raw).format_for_prompt()
+
+    def _pipeline(
+        self,
+        tmp_path: Path,
+        *,
+        config: FactoryConfig,
+        reviews: list[ReviewResult] | None = None,
+        securities: list[SecurityResult] | None = None,
+        review_raises: Exception | None = None,
+        ui: PlainUI | None = None,
+    ) -> tuple[ComponentPipeline, Manifest]:
+        review_queue = iter(reviews or [])
+        security_queue = iter(securities or [])
+
+        def _review(*args: Any, **kwargs: Any) -> ReviewResult:
+            """Serve the queued results, then raise: the crash is what
+            the attempt after the last queued verdict does."""
+            queued = next(review_queue, None)
+            if queued is None:
+                assert review_raises is not None
+                raise review_raises
+            return queued
+
+        overrides: dict[str, Any] = {
+            "run_review": lambda *a, **k: next(review_queue),
+            "run_security_review": lambda *a, **k: next(security_queue),
+        }
+        if review_raises is not None:
+            overrides["run_review"] = _review
+        pipeline, manifest, _, _ = _make_pipeline(
+            tmp_path,
+            components=[_component("comp-a")],
+            config=config,
+            ui=ui,
+            security_selection=_selection("security"),
+            hooks_overrides=overrides,
+        )
+        return pipeline, manifest
+
+    def test_a_review_that_ran_and_passed_retires_its_own_earlier_finding(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Acceptance criterion 1. Attempt 1 fails review, attempt 2
+        passes review and fails security, and attempt 3 is not told to
+        re-check the criterion the reviewer cleared."""
+        pipeline, manifest = self._pipeline(
+            tmp_path,
+            config=_factory_config(
+                max_retries=5,
+                review_mode="hard",
+                security_config=SecurityConfig(mode="hard"),
+            ),
+            reviews=[
+                ReviewResult(passed=False, mode="hard", overall_notes="CRITERION-X-UNMET"),
+                ReviewResult(passed=True, mode="hard"),
+            ],
+            securities=[
+                SecurityResult(passed=False, mode="hard", overall_notes="SQL-IN-USERS"),
+            ],
+        )
+        for _ in range(2):
+            assert self._attempt(pipeline, manifest).transition == Transition.RETRYING
+
+        block = self._prompt_block(pipeline)
+        assert "SQL-IN-USERS" in block
+        assert "CRITERION-X-UNMET" not in block
+        assert "from review passed or were re-measured in attempt 2" in block
+
+    def test_a_security_review_that_passed_retires_its_own_earlier_finding(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """The mirror of criterion 1 for the other skippable phase, so
+        dropping either recording site is caught behaviourally and not
+        only by the site census."""
+        pipeline, manifest = self._pipeline(
+            tmp_path,
+            config=_factory_config(
+                max_retries=5,
+                review_mode="hard",
+                security_config=SecurityConfig(mode="hard"),
+            ),
+            reviews=[
+                ReviewResult(passed=True, mode="hard"),
+                ReviewResult(passed=True, mode="hard"),
+            ],
+            securities=[
+                SecurityResult(passed=False, mode="hard", overall_notes="SQL-IN-USERS"),
+                SecurityResult(passed=True, mode="hard"),
+            ],
+        )
+        assert self._attempt(pipeline, manifest).transition == Transition.RETRYING
+        assert self._attempt(pipeline, manifest).transition == Transition.COMPLETED
+        pipeline.record_contract_failure("comp-a", 2, "tier 0 broke")
+
+        block = self._prompt_block(pipeline)
+        assert "tier 0 broke" in block
+        assert "SQL-IN-USERS" not in block
+        assert "from security passed or were re-measured in attempt 2" in block
+
+    def test_a_review_the_budget_skipped_retires_nothing(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Acceptance criterion 2, budget cause. Attempt 2's reviewer
+        never ran, so attempt 1's finding is still shown."""
+        pipeline, manifest = self._pipeline(
+            tmp_path,
+            config=_factory_config(
+                max_retries=5,
+                review_mode="advisory",
+                security_config=SecurityConfig(mode="advisory"),
+                max_adversarial_calls=1,
+                create_prs=True,
+                pause_before_pr_merge=True,
+            ),
+            reviews=[
+                ReviewResult(passed=False, mode="advisory", overall_notes="CRITERION-X-UNMET"),
+            ],
+            ui=_ChoiceUI(choice=2),
+        )
+        for _ in range(2):
+            assert self._attempt(pipeline, manifest).transition == Transition.RETRYING
+
+        block = self._prompt_block(pipeline)
+        assert "Human reviewer requested changes" in block
+        assert "CRITERION-X-UNMET" in section(block, NOT_REMEASURED)
+        assert section(block, RESOLVED) == ""
+
+    def test_a_review_turned_off_by_the_operator_retires_nothing(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Acceptance criterion 2, the other live skip cause. The
+        operator sets ``review_mode = "skip"`` between attempts."""
+        pipeline, manifest = self._pipeline(
+            tmp_path,
+            config=_factory_config(
+                max_retries=5,
+                review_mode="hard",
+                security_config=SecurityConfig(mode="hard"),
+            ),
+            reviews=[
+                ReviewResult(passed=False, mode="hard", overall_notes="CRITERION-X-UNMET"),
+            ],
+            securities=[
+                SecurityResult(passed=False, mode="hard", overall_notes="SQL-IN-USERS"),
+            ],
+        )
+        assert self._attempt(pipeline, manifest).transition == Transition.RETRYING
+        pipeline.factory_config.review_mode = "skip"
+        assert self._attempt(pipeline, manifest).transition == Transition.RETRYING
+
+        block = self._prompt_block(pipeline)
+        assert "SQL-IN-USERS" in section(block, CURRENT)
+        assert "CRITERION-X-UNMET" in section(block, NOT_REMEASURED)
+        assert section(block, RESOLVED) == ""
+
+    def test_a_crashed_review_retires_nothing(self, tmp_path: Path) -> None:
+        """The fail-open guard. In advisory mode a reviewer that raises
+        is reported as PASSING with ``infrastructure_error=True``, and
+        ``ran`` is True. Keying the record on ``ran`` would retire a live
+        finding on the strength of an exception."""
+        pipeline, manifest = self._pipeline(
+            tmp_path,
+            config=_factory_config(
+                max_retries=5,
+                review_mode="advisory",
+                security_config=SecurityConfig(mode="advisory"),
+                create_prs=True,
+                pause_before_pr_merge=True,
+            ),
+            reviews=[
+                ReviewResult(passed=False, mode="advisory", overall_notes="CRITERION-X-UNMET"),
+            ],
+            securities=[
+                SecurityResult(passed=True, mode="advisory"),
+                SecurityResult(passed=True, mode="advisory"),
+            ],
+            review_raises=RuntimeError("reviewer exploded"),
+            ui=_ChoiceUI(choice=2),
+        )
+        assert self._attempt(pipeline, manifest).transition == Transition.RETRYING
+        outcome = self._attempt(pipeline, manifest)
+        assert outcome is not None
+        assert outcome.review is not None
+        assert outcome.review.ran
+        assert outcome.review.result is not None
+        assert outcome.review.result.infrastructure_error
+        assert not outcome.review.produced_a_reading
+
+        block = self._prompt_block(pipeline)
+        assert "CRITERION-X-UNMET" in section(block, NOT_REMEASURED)
+
+    def test_the_contract_gate_retires_a_review_that_passed(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """The second writer of the retry context, which is why
+        ``record_contract_failure`` lives on the pipeline.
+
+        Attempt 1 fails review; attempt 2 passes review and COMPLETES;
+        the tier's contract test then fails. Without the merge at this
+        writer the contract entry re-raises the cleared review finding.
+        It also pins that completing a component does not clear the
+        record: the contract loop reads it afterwards.
+        """
+        pipeline, manifest = self._pipeline(
+            tmp_path,
+            config=_factory_config(
+                max_retries=5,
+                review_mode="hard",
+                security_config=SecurityConfig(mode="hard"),
+            ),
+            reviews=[
+                ReviewResult(passed=False, mode="hard", overall_notes="CRITERION-X-UNMET"),
+                ReviewResult(passed=True, mode="hard"),
+            ],
+            securities=[SecurityResult(passed=True, mode="hard")],
+        )
+        assert self._attempt(pipeline, manifest).transition == Transition.RETRYING
+        assert self._attempt(pipeline, manifest).transition == Transition.COMPLETED
+
+        pipeline.record_contract_failure("comp-a", 2, "tier 0 broke")
+
+        block = self._prompt_block(pipeline)
+        assert "tier 0 broke" in section(block, CURRENT)
+        assert "CRITERION-X-UNMET" not in block
+        assert "from review passed or were re-measured in attempt 2" in block
