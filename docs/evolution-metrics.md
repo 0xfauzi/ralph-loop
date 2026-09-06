@@ -55,12 +55,27 @@ did. Reading one of these rows:
 - **Counting.** `ks evolve --status` prints the count when it is
   non-zero (`EvolutionJournal.get_repair_count`), before the
   no-experiments exit, because a journal can hold a repair long before
-  any factory run has written `experiments.tsv`. Two processes
-  repairing the same tear write two rows, so the count is of rows, not
-  of incidents. It is also a LOWER bound: a write split part-way
-  through (residual 4 on `append_entries`) can land the newline that
-  isolates the fragment without landing the row, and the next append
-  then sees a terminated file and adds none.
+  any factory run has written `experiments.tsv`. The count is of rows,
+  not of incidents, and the two can differ in one direction only.
+
+  It is a LOWER bound: a write split part-way through (residual 4 on
+  `append_entries`) can land the newline that isolates the fragment
+  without landing the row, and the next append then sees a terminated
+  file and adds none.
+
+  It is no longer an UPPER bound as well. Two processes repairing the
+  same tear used to write two rows (#330 residual 2). Since #331 the
+  append holds `fcntl.LOCK_EX` on the journal's own descriptor across
+  the probe and the write, so the second writer probes after the first
+  has finished and finds a terminated file: one row is one tear.
+  Measured, two processes x 150 appends with 74 tears planted, eight
+  runs of each arm: 76 to 86 rows unlocked, exactly 74 locked on every
+  run. Where the exclusion is not available nothing is excluded and two
+  rows for one tear are possible again, the same degradation
+  `control_lock`, `queue_lock` and the run-level factory lock already
+  take. That is not only a Windows condition: `_flock` takes the same
+  no-exclusion path on any mount whose `flock` raises `OSError`, such as
+  an NFS export without a lock daemon, which returns `ENOLCK`.
 
 ### `component_result` fields
 

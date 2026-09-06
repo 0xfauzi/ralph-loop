@@ -77,6 +77,8 @@ from tests.helpers.encodingwalk import package_scan, reported_sites, spells_a_to
 EXPECTED_READ_SPELLINGS: dict[str, int] = {
     "agents/codex.py": 1,
     "agents/logging.py": 1,
+    # The "a+b" append open, moved here from evolution.py by #331.
+    "appendio.py": 1,
     "atomicio.py": 1,
     "autonomy.py": 1,
     "autonomy_replay.py": 1,
@@ -85,25 +87,31 @@ EXPECTED_READ_SPELLINGS: dict[str, int] = {
     "commandrun.py": 1,
     "decisions.py": 1,
     "decompose.py": 2,
-    "events.py": 2,
-    "evolution.py": 4,
+    "events.py": 1,
+    "evolution.py": 2,
     "factory.py": 6,
     "feature_cmd.py": 2,
     "feedforward.py": 8,
     "fixtures.py": 3,
-    "inbox.py": 2,
-    "init_cmd.py": 3,
+    "inbox.py": 1,
+    # 3 until #352 routed ``_ensure_gitignore``'s append through
+    # ``appendio``, which encodes once for every appender. The two left
+    # are both reads: the PRD file and ``_read_text_or_none``.
+    "init_cmd.py": 2,
     "init_wizard.py": 1,
     "intake_github.py": 1,
-    "knowledge.py": 4,
+    "knowledge.py": 3,
     "licensing.py": 1,
     "loop.py": 2,
     "manifest.py": 1,
-    "observability.py": 2,
+    "observability.py": 1,
     "parsers.py": 1,
     "pipeline.py": 3,
     "prd.py": 1,
-    "proposals.py": 4,
+    # 4 until #352 routed ``mark_applied`` through ``appendio`` for the
+    # same reason. The three left are the CLAUDE.md read, the proposal
+    # read, and the CLAUDE.md write.
+    "proposals.py": 3,
     "security.py": 1,
     "serve.py": 4,
     "statedir.py": 1,
@@ -112,7 +120,7 @@ EXPECTED_READ_SPELLINGS: dict[str, int] = {
     "tui/session.py": 1,
     "tui/tail.py": 2,
     "verify.py": 4,
-    "workqueue.py": 7,
+    "workqueue.py": 6,
 }
 
 
@@ -144,8 +152,15 @@ EXPECTED_CLEARED_READS: tuple[str, ...] = (
     "agents/codex.py last_msg_file.read_text(encoding='utf-8')",
     "agents/logging.py self._log_path.open('a', encoding='utf-8')",
     "autonomy.py path.read_text(encoding='utf-8')",
-    "autonomy_replay.py csv.DictReader(handle, delimiter='\\t') on an open() handle",
-    "autonomy_replay.py path.open(encoding='utf-8', newline='')",
+    # Two rows became one in #331. ``load_runs`` held a utf-8 handle open
+    # and ran ``csv.DictReader`` over it, which the walk had to clear as
+    # two separate reads; it reads the text once now and hands it to
+    # ``evolution.experiment_rows``, the parser its sibling reader
+    # ``get_experiment_trends`` already used. The disposition is stronger,
+    # not merely different: the old pair named utf-8 under no handler at
+    # all, and this names utf-8 AND catches ``ValueError`` beside
+    # ``OSError``, which is the half a ``UnicodeDecodeError`` escapes.
+    "autonomy_replay.py path.read_text(encoding='utf-8')",
     "calibration.py path.read_text(encoding='utf-8')",
     "cli.py open(prd_file, encoding='utf-8')",
     "commandrun.py open(path, 'a', buffering=1, encoding='utf-8')",
@@ -153,8 +168,6 @@ EXPECTED_CLEARED_READS: tuple[str, ...] = (
     "decompose.py (spec_path / name).read_text(encoding='utf-8')",
     "decompose.py spec_path.read_text(encoding='utf-8')",
     "events.py open(path, encoding='utf-8', errors='replace')",
-    "events.py open(self.path, 'a', encoding='utf-8')",
-    "evolution.py open(self.config.experiments_path, 'a', encoding='utf-8')",
     "evolution.py self.config.experiments_path.read_text(encoding='utf-8')",
     "factory.py fp.read(64) on an open() handle",
     "factory.py open(lock_path, 'a+', encoding='utf-8')",
@@ -171,15 +184,17 @@ EXPECTED_CLEARED_READS: tuple[str, ...] = (
     "fixtures.py full_path.read_text(encoding='utf-8')",
     "fixtures.py open(prd_path, encoding='utf-8')",
     "fixtures.py snapshot_path.read_text(encoding='utf-8')",
-    "inbox.py open(path, 'a', encoding='utf-8')",
     "init_cmd.py open(prd_file, encoding='utf-8')",
-    "init_cmd.py path.open('a', encoding='utf-8')",
+    # ``init_cmd.py path.open('a', encoding='utf-8')`` was here until
+    # #352. The read is DELETED, not unseen: ``_ensure_gitignore``'s
+    # append goes through ``appendio.append_records`` now, so the utf-8
+    # it used to name is the one ``append_terminated`` encodes with, and
+    # the ``appendio.py`` row below is where that contract is counted.
     "init_cmd.py path.read_text(encoding='utf-8')",
     "init_wizard.py toml_path.read_text(encoding='utf-8')",
     "intake_github.py self.path.read_text(encoding='utf-8')",
     "knowledge.py path.read_text(encoding='utf-8')",
     "knowledge.py prd_path.read_text(encoding='utf-8')",
-    "knowledge.py target.open('a', encoding='utf-8')",
     "knowledge.py target.read_text(encoding='utf-8')",
     "licensing.py Path(match).read_text(encoding='utf-8', errors='replace')",
     "loop.py claude_md_path.read_text(encoding='utf-8')",
@@ -187,13 +202,14 @@ EXPECTED_CLEARED_READS: tuple[str, ...] = (
     "manifest.py open(path, encoding='utf-8')",
     "observability.py for line in f on an open() handle",
     "observability.py open(path, encoding='utf-8')",
-    "observability.py open(self._path, 'a', encoding='utf-8')",
     "parsers.py source_path.read_text(encoding='utf-8')",
     "pipeline.py open(path, 'a', buffering=1, encoding='utf-8')",
     "pipeline.py progress_path.read_text(encoding='utf-8')",
     "prd.py open(path, encoding='utf-8')",
     "proposals.py claude_md.read_text(encoding='utf-8')",
-    "proposals.py open(path, 'a', encoding='utf-8')",
+    # ``proposals.py open(path, 'a', encoding='utf-8')`` was here until
+    # #352, and is deleted for the same reason as the ``init_cmd`` row
+    # above: ``mark_applied`` appends through ``appendio`` now.
     "proposals.py path.read_text(encoding='utf-8')",
     "security.py prd_path.read_text(encoding='utf-8')",
     "serve.py manifest_path.read_text(encoding='utf-8')",
@@ -208,7 +224,6 @@ EXPECTED_CLEARED_READS: tuple[str, ...] = (
     "verify.py progress_path.read_text(encoding='utf-8')",
     "workqueue.py meta_path.read_text(encoding='utf-8')",
     "workqueue.py open(lock_path, 'a+', encoding='utf-8')",
-    "workqueue.py open(self.journal_path, 'a', encoding='utf-8')",
     "workqueue.py self.journal_path.read_text(encoding='utf-8')",
     "workqueue.py self.pause_path.read_text(encoding='utf-8')",
     "workqueue.py self.spec_path(item).read_text(encoding='utf-8')",
@@ -284,8 +299,11 @@ EXPECTED_UNDECIDED: tuple[str, ...] = (
 
 
 EXPECTED_DECIDED_OUT: tuple[str, ...] = (
+    # The journal's "a+b" probe-and-append. Binary, so no codec applies;
+    # #331 moved it from evolution.py to appendio.open_for_append, where
+    # six appenders now share it.
+    "appendio.py open",
     "atomicio.py os.open",
-    "evolution.py open",
     "factory.py EvolutionJournal.open",
     "pipeline.py EvolutionJournal.open",
     "tui/runs.py open",

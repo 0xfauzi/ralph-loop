@@ -52,6 +52,93 @@ stage, runtime feedback, and an earned-autonomy ladder). See
 
 ### Fixed
 
+- Six more record files survive an interrupted write. A crash leaves a
+  tail with no newline, the next append concatenates onto it, and the
+  tolerant reader then drops BOTH lines: the fragment, which was never
+  readable, and the record written after it, which was. Each was
+  reproduced with a real tear, a real append and the production reader.
+  `progress.jsonl` lost the entry after the tear, and the reducer left a
+  component `running` when the lost row was its `component_completed`;
+  `events.jsonl` and `engineer.jsonl` lost the next event, and the fold
+  reported no components at all; the queue journal lost the transition
+  after it; the inbox lost the item after it; the dependency-scope
+  telemetry lost the row after it. A tail that lost only its terminator
+  is worse than a fragment, because the append destroys a whole record
+  as well as the new one: measured, two records for one interrupted
+  write. Every appender now writes through `kstrl/appendio.py`, which
+  probes the tail through the same file description it appends with and
+  repairs it in one write.
+
+- `experiments.tsv` no longer renders a corrupted run. It is the same
+  interrupted write as above, and it cost more than the JSONL files
+  because its reader displays the damage instead of dropping it: the
+  run after the tear was lost AND the run before it was rendered by
+  `ks evolve --status` and the TUI trends tab with its columns shifted,
+  a timestamp under `completed` and extra fields on the end. The file
+  now pads its own tail, with no marker row, because TSV has none a
+  reader would not render as a run, and both of its readers drop any row
+  whose width is not one this writer emits. Two widths are legal, not
+  one: a file written before R3.1 has a shorter header, and a filter
+  that took the current header's width as the only legal one would
+  answer a rendering defect by deleting every row of a legacy file. The
+  second reader is `ks autonomy replay`, which fed the shifted columns
+  to the ladder through `_as_int`, turning each one into a 0 without
+  raising, so a run that never happened counted towards a promotion.
+
+- `experiments.tsv` is read on the dialect its writer writes. The reader
+  used `csv`'s default quoting against a writer that joins its fields on
+  a tab and never quotes or escapes, so a `"` at the start of any field
+  opened a quoted region that swallowed every byte to the next one: a
+  project named `"proj` hid every run recorded after it from
+  `ks evolve --status`, the TUI trends tab and `ks autonomy replay`, and
+  past 128 KiB of swallowed text it raised `_csv.Error` out of all three,
+  which is neither an `OSError` nor a `ValueError` and so escaped every
+  handler. Reading with `QUOTE_NONE` returns those runs. A field longer
+  than `csv`'s own limit is now a refusal the callers already handle:
+  `ks autonomy replay` names it and exits 2, and the trends tab logs it
+  and shows no runs rather than crashing the TUI.
+
+- An out-of-space error on the FIRST event of a run no longer leaves the
+  event log writing onto a torn tail. The sink probes and repairs the
+  tail once per run and then holds the handle open, and it bound that
+  handle before flushing: an event line is smaller than the 8 KiB buffer,
+  so a full disk surfaces at the flush and the sink was already bound and
+  in the no-probe branch when it did. The bind now happens only after the
+  first write and its flush both land.
+
+- `ks autonomy replay` names an unreadable `experiments.tsv` instead of
+  reporting that the project has too little history. The reader returned
+  no runs on a permission or a decode error, and no runs is the same
+  state as a project that has never been run, so the operator got
+  "VERDICT: INSUFFICIENT DATA" for a file problem. The exit code is
+  still 2, because nothing was replayed either way; the line above it
+  now names the file and the error.
+
+- A repaired `experiments.tsv` write is logged. It is the one record
+  file that cannot carry a repair row, because every marker a TSV can
+  hold is a field and a row of fields is a run to its reader, so a crash
+  that tore this file and lost a run left nothing anywhere: the pad
+  leaves a short fragment, the reader drops it on width, and there is no
+  counter on that path.
+
+- The evolution journal's probe and append happen under one exclusive
+  lock (POSIX). They shared a file description, which removes the
+  path-level races but is not a lock, so a concurrent writer could
+  crash mid-line between this process's probe and its write, and two
+  processes repairing one tear each wrote a repair row. Measured, two
+  processes and 74 planted tears, eight runs of each arm: unlocked, 244
+  to 269 of 300 records readable and 76 to 86 rows; locked, 300 of 300
+  and exactly 74. The lock is `fcntl.LOCK_EX` on the journal's own
+  descriptor rather than a sibling lock file, because the journal is one
+  file with one writer function. Without `fcntl` there is no exclusion,
+  the same degradation the control, queue and factory locks already take
+  there, and `get_repair_count` and `docs/evolution-metrics.md` both say
+  which case they are describing. A `flock` that RAISES takes the same
+  path as a missing `fcntl`: some FUSE, 9p and DrvFs mounts answer
+  `ENOLCK` or `EINVAL`, and an unguarded acquisition made every journal
+  append raise on such a mount where it used to write the entry, so the
+  lock added to protect the record was the thing losing it.
+
 - `.kstrl/autonomy.json` is no longer overwritten when the file it was
   read from could not be parsed. `AutonomyState.load` fails closed to a
   fresh L1 and records why; saving that fresh state back replaced the
@@ -161,6 +248,15 @@ stage, runtime feedback, and an earned-autonomy ladder). See
   instead.
 
 ### Added
+
+- The evolve screen reports repaired journal writes. `ks evolve
+  --status` has reported them since the repair was added and the TUI did
+  not, which was the gap: the argument for writing a durable
+  `journal_repair` row at all is that under the TUI the logger warning
+  goes to `orchestrator.log` where nobody is looking. A line above the
+  three tabs now carries the count, the path and which of the two
+  outcomes the line above each row is, in the CLI's own words. Silent at
+  zero, and it goes back to silent on reload when the count does.
 
 - The architect's non-blocker spec findings now reach the engineer. They
   were written to `scripts/kstrl/spec-issues.json` on every decompose and

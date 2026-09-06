@@ -132,6 +132,17 @@ ConfigProblemBanner {
     padding: 0 2;
 }
 
+/* The evolve screen's repaired-journal-write line (#333). Same alert
+ * grammar as the banner above it, height: auto because it names a path
+ * and a truncated path is not a path, and display: none because it is
+ * silent at zero. The colour is set on the Text rather than here, so a
+ * mistyped id costs the padding and not the warning. */
+#evolve-repairs {
+    display: none;
+    height: auto;
+    padding: 0 2;
+}
+
 /* ---- overview board ---------------------------------------------------- */
 
 #component-table {

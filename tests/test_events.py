@@ -172,6 +172,7 @@ def _sample_events() -> list[ev.Event]:
             flags=("merge gate: ON (human approves)",),
             overrides=("[factory] pause_before_pr_merge=False contradicts L1",),
         ),
+        ev.JournalRepaired(detail="the preceding line was not newline-terminated"),
     ]
 
 

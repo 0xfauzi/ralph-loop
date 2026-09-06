@@ -27,7 +27,6 @@ string of broken runs unlock a promotion, which is exactly backwards.
 
 from __future__ import annotations
 
-import csv
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -38,7 +37,7 @@ from kstrl.autonomy import (
     AutonomyState,
     DemotionTrigger,
 )
-from kstrl.evolution import INFRASTRUCTURE_CHECKS
+from kstrl.evolution import INFRASTRUCTURE_CHECKS, experiment_rows
 from kstrl.verify import SCOPE_UNREADABLE_CHECK
 
 DEFAULT_EXPERIMENTS_PATH = Path(".kstrl/experiments.tsv")
@@ -170,14 +169,40 @@ def _as_float(value: str) -> float:
 
 
 def load_runs(path: Path) -> list[RunRecord]:
-    """Parse experiments.tsv. Missing file -> no runs (not an error)."""
+    """Parse experiments.tsv. Missing file -> no runs (not an error).
+
+    Through ``evolution.experiment_rows`` rather than a bare
+    ``csv.DictReader``, which is #331's read half applied to the second
+    reader of this file. A crash mid-write used to leave a row torn, the
+    next ``record_run`` appended onto it, and ``DictReader`` zipped the
+    concatenation against the header: the ladder then saw a run whose
+    numeric columns had shifted, and ``_as_int`` turned every one of
+    them into 0 without raising. That is a fabricated run in the
+    population ``ks autonomy replay`` reports on. (Not in a live
+    promotion: this function has one caller, :func:`replay_file`, and
+    that command never mutates ladder state.) The shared parser drops a
+    row whose width does not fit the file's header.
+
+    MISSING is no runs; UNREADABLE is a refusal, and UNPARSEABLE joins
+    it: ``experiment_rows`` raises a ``ValueError`` for a file ``csv``
+    cannot get to the end of, which before #352 round 2 was a
+    ``_csv.Error`` that neither this function's caller nor
+    ``get_experiment_trends`` caught. ``OSError`` and
+    ``ValueError`` go to the caller, where 568bca4 let the ``OSError``
+    out too. Swallowing them turned a permission error or a decode
+    error into an empty population, and an empty population reads as
+    "insufficient data to calibrate anything", which is a sentence about
+    the project's history rather than about the file. CLAUDE.md, on
+    #260: make unreadable a REFUSAL, not an empty read, because an empty
+    read is a silent removal of the mechanism. ``ks autonomy replay``
+    catches both and names the cause.
+    """
     if not path.exists():
         return []
     runs: list[RunRecord] = []
-    with path.open(encoding="utf-8", newline="") as handle:
-        for row in csv.DictReader(handle, delimiter="\t"):
-            if not row.get("run_id"):
-                continue
+    text = path.read_text(encoding="utf-8")
+    for row in experiment_rows(text):
+        if row.get("run_id"):
             runs.append(
                 RunRecord(
                     run_id=row.get("run_id", ""),

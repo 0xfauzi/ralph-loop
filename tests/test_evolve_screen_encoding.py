@@ -118,11 +118,19 @@ async def test_the_evolve_screen_survives_all_three_undecodable_files(tmp_path: 
 
 def test_experiments_tsv_is_written_with_the_encoding_it_is_read_with(tmp_path: Path) -> None:
     """Encoding is a two-sided contract (CLAUDE.md): naming utf-8 on the
-    read while the write follows the locale just moves the failure."""
+    read while the write follows the locale just moves the failure.
+
+    #331 moved the write into ``kstrl.appendio``, so the pair is spelled
+    across two files now and both halves are asserted. The helper is the
+    ONE place the bytes are encoded, which is what makes checking it
+    here enough: evolution hands it ``str`` and names no codec.
+    """
     root = Path(__file__).resolve().parent.parent
     source = (root / "kstrl" / "evolution.py").read_text(encoding="utf-8")
-    assert 'open(self.config.experiments_path, "a", encoding="utf-8")' in source
+    assert "append_records(self.config.experiments_path" in source
     assert 'read_text(encoding="utf-8")' in source
+    helper = (root / "kstrl" / "appendio.py").read_text(encoding="utf-8")
+    assert 'payload.encode("utf-8")' in helper
 
 
 def test_a_proposal_survives_being_written_under_an_ascii_locale(tmp_path: Path) -> None:

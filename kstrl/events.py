@@ -36,8 +36,14 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, ClassVar, Final, Protocol, TextIO
+from typing import IO, Any, ClassVar, Final, Protocol
 
+from kstrl.appendio import (
+    JOURNAL_REPAIR_EVENT,
+    REPAIR_DETAIL,
+    append_terminated,
+    open_for_append,
+)
 from kstrl.observability import ProgressLog
 
 SCHEMA_VERSION: Final = 2
@@ -669,6 +675,30 @@ class AutonomyLevelApplied(Event):
 
 
 @dataclass(frozen=True, kw_only=True)
+class JournalRepaired(Event):
+    """#331: this file's tail was not newline-terminated when a sink
+    opened it, so a crash interrupted a write, and a newline was written
+    before this event to stop the unterminated tail swallowing it.
+
+    A REGISTERED event rather than a raw appended line, which is the
+    whole reason this class exists. A raw line decodes to
+    ``UnknownEvent`` and is counted in ``RunState.unknown_events``, and
+    "this build does not understand it" is false for a row this build
+    wrote deliberately. As a registered type it is understood and
+    inert: ``reducer.apply`` falls through every isinstance branch for
+    it and advances only the clock, so no component, phase or count
+    moves.
+
+    The envelope is empty (``run_id`` "", ``source`` at its default).
+    The sink sits BELOW the bus that stamps those fields, and it repairs
+    at open time, before the run has told it anything.
+    """
+
+    type: ClassVar[str] = JOURNAL_REPAIR_EVENT
+    detail: str = ""
+
+
+@dataclass(frozen=True, kw_only=True)
 class Log(Event):
     """The escape hatch for imperative narration (the old UI protocol).
 
@@ -837,22 +867,124 @@ class CallbackSink:
 
 class JsonlSink:
     """Append-only JSONL writer; one line per event, flushed, guarded by
-    a lock so heartbeat threads can share it with the main thread."""
+    a lock so heartbeat threads can share it with the main thread.
+
+    #331: the handle is opened ``"a+b"`` and the tail is probed ONCE,
+    at the first emit. Without that probe a crash mid-write cost the
+    next event as well as the torn one, measured through ``read_events``
+    and ``reducer.fold``: ``['factory_started']`` where two events were
+    written, and no components at all in the folded state.
+
+    Once per sink, not once per event, is the reason
+    ``handle_ends_without_newline`` takes a HANDLE. This sink holds one
+    open for a whole run; re-probing would pay a seek and a read on
+    every event and would write a second repair row for a tear it had
+    already repaired.
+
+    No lock on the file. One process owns each of these files: the
+    orchestrator owns ``events.jsonl`` and each worker owns its own
+    ``engineer.jsonl``. The threading lock below is about threads
+    sharing this object, which is a different question and predates
+    this change.
+
+    THE ``"a+b"`` WIDENING, and it is the QUIETEST of the three sites
+    that took it, so it is stated here rather than left to the module
+    that opens the handle. A file this process can write but not read
+    can no longer be appended to: the open raises. This sink is reached
+    through ``EventBus.emit``, which catches every exception per sink
+    and increments ``dropped``, and ``dropped`` has no production
+    reader. So on a mode-0200 ``events.jsonl`` the whole stream is lost
+    with no message on any surface, where 568bca4 wrote it. The same is
+    true of ``progress.jsonl``, which the factory reaches through a
+    ``V1CompatSink`` on the same bus, so both file streams of a run go
+    quiet together.
+
+    That was decided rather than overlooked. Reaching it needs a
+    deliberate ``chmod 0200`` or an ACL on a file kstrl created itself
+    at the umask default; the alternative to the widening is the
+    fail-OPEN shape #327 round 1 found, where an unreadable file was
+    reported as "not torn" and appended to blind. A warning on the
+    first drop was considered and left out: ``events`` has no logger,
+    the bus has no UI, and the surface it would reach is
+    ``orchestrator.log``, which is the surface #333 exists because
+    nobody reads. Giving ``dropped`` a real reader is the fix, and it
+    is a change to the run summary rather than to this sink.
+    """
 
     def __init__(self, path: Path, *, mkdir: bool = True) -> None:
         self.path = path
         if mkdir:
             path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
-        self._fh: TextIO | None = None
+        self._fh: IO[bytes] | None = None
 
     def emit(self, event: Event) -> None:
-        line = event.to_json_line()
+        line = event.to_json_line() + "\n"
         with self._lock:
             if self._fh is None:
-                self._fh = open(self.path, "a", encoding="utf-8")
-            self._fh.write(line + "\n")
-            self._fh.flush()
+                self._fh = self._probe_and_write(line)
+            else:
+                # Every later emit writes straight through. The probe is
+                # not repeated: this handle has been at the end of the
+                # file since the first emit, so nothing can have torn it
+                # without this process being dead.
+                self._fh.write(line.encode("utf-8"))
+                self._fh.flush()
+
+    def _probe_and_write(self, line: str) -> IO[bytes]:
+        """Open, probe and write the first line, returning the bound handle.
+
+        The handle is returned rather than assigned, and that is the
+        whole point of the method: :meth:`emit` binds ``self._fh`` only
+        after this returns, so a first write that RAISES leaves the sink
+        unbound and the next emit probes again.
+
+        THE FLUSH IS IN HERE, and that is not tidiness (#352 round 2,
+        F2). ``open_for_append`` returns a ``BufferedRandom`` with an
+        8 KiB buffer and an event line is smaller than that: measured, a
+        121-byte write leaves 0 bytes on disk until the flush. So an
+        out-of-space error surfaces at the FLUSH and not at the write,
+        and while the flush sat one line below the binding in
+        :meth:`emit`, the ``ENOSPC`` this docstring names as its own
+        example was the one case that still left the sink bound, in the
+        no-probe branch, on an unterminated tail. Everything the first
+        emit has to get right is under the one ``try`` now.
+
+        THIS flush is the mechanism; the ``else`` scoping of the other
+        one is not, and that is measured rather than assumed. Moving
+        ``emit``'s flush back out of the ``else`` leaves the sink
+        unbound and the probe repeated, because this one already ran:
+        that mutation is green and benign. Deleting THIS line binds the
+        sink and drops the second probe. The ``else`` earns its place by
+        not flushing an already-flushed handle, which is a smaller
+        claim.
+
+        Assigning first was a real hole. ``EventBus.emit`` catches every
+        exception per sink and increments ``dropped``, which nothing in
+        the product reads, so a first emit that hit ``ENOSPC`` on the
+        write or ``EIO`` on the probe's read was silent; the sink then
+        took the no-probe branch for the rest of the run and wrote
+        straight onto the unterminated tail. Measured on a torn
+        ``events.jsonl`` with the first write made to raise:
+        ``read_events`` returned NOTHING, because the concatenated line
+        does not parse at all.
+
+        The handle is closed on the way out. Leaking it would hold a
+        descriptor for the life of the run for a file this sink is
+        about to reopen on the next emit.
+        """
+        handle = open_for_append(self.path)
+        try:
+            append_terminated(
+                handle,
+                line,
+                repair=JournalRepaired(detail=REPAIR_DETAIL).to_json_line() + "\n",
+            )
+            handle.flush()
+        except BaseException:
+            handle.close()
+            raise
+        return handle
 
     def close(self) -> None:
         with self._lock:

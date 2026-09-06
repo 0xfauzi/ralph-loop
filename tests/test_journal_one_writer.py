@@ -305,9 +305,17 @@ def journal_path_escapes(source_file: Path) -> list[str]:
 #: ``EvolutionJournal.get_spec_audits`` now, and that method's docstring
 #: is where the reason lives.
 EXPECTED_JOURNAL_PATH_SITES: dict[str, int] = {
-    "cli.py: journal.config.journal_path": 1,
     "evolution.py: config.journal_path": 5,
-    "evolution.py: self.config.journal_path": 3,
+    # Four, not three, and TWO ROWS LEFT to make it four (#352 round 2,
+    # N4). ``cli.py: journal.config.journal_path`` and
+    # ``tui/screens/evolve.py: journal.config.journal_path`` were each a
+    # READ, added by #333: both surfaces named the torn file in their
+    # own copy of the repair sentence. The sentence has one home now,
+    # ``EvolutionJournal.repair_summary``, so the path escapes
+    # ``evolution.py`` one more time and stops escaping into the click
+    # module and the TUI at all. Two modules fewer that get hold of it
+    # is the direction this guard exists to push.
+    "evolution.py: self.config.journal_path": 4,
     "pipeline.py: self.journal_path": 4,
     "workqueue.py: self.journal_path": 2,
 }

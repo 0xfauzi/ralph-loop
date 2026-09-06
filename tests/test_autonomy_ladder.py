@@ -406,6 +406,28 @@ class TestReplay:
         assert report.total_runs == 0
         assert report.sufficient_data is False
 
+    def test_an_unreadable_experiments_file_is_a_refusal_not_no_runs(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """#352: an empty read is a silent removal of the mechanism.
+
+        A decode error and a permission error used to reach the
+        operator as "INSUFFICIENT DATA", which is a sentence about the
+        project's history rather than about the file. The exception goes
+        to the caller now, and ``ks autonomy replay`` names the cause
+        above the same exit code.
+
+        A byte that is no valid utf-8 sequence is the reachable half of
+        this on any machine; the mode-0200 half needs a permission the
+        superuser ignores, so it is not the one asserted here.
+        """
+        path = tmp_path / "experiments.tsv"
+        path.write_bytes(b"run_id\ttimestamp\nrun-1\xff\t2026-01-01\n")
+
+        with pytest.raises(ValueError):
+            load_runs(path)
+
     def test_replay_never_mutates_stored_state(self, tmp_path: Path) -> None:
         # Reading a replay is a report, never a transition.
         AutonomyState(level=int(AutonomyLevel.L2_GATED_MERGE)).save(tmp_path)
@@ -431,6 +453,42 @@ class TestReplay:
         assert report.decisive_runs == 1
         assert report.infra_aborted_runs == 1
         assert report.components_merged == 2
+
+    def test_a_torn_row_is_not_a_run_the_ladder_promotes_on(self, tmp_path: Path) -> None:
+        """#331's read half, on the SECOND reader of experiments.tsv.
+
+        A crash mid-write left a row torn, the next ``record_run``
+        appended onto it, and ``csv.DictReader`` zipped the
+        concatenation against the header: a run id from the fragment,
+        this run's fields shifted along by however many columns the
+        fragment held, and ``_as_int`` turning each of them into 0
+        rather than raising. That is a fabricated run in the population
+        a promotion is decided on, and it is silent.
+
+        The torn row here is written the way a crash writes one, and the
+        real ``record_run`` appends onto it, so this measures the reader
+        against bytes the writer actually produces.
+        """
+        from kstrl.factory import FactoryResult
+        from kstrl.manifest import Manifest
+        from tests.helpers.journal import journal_at, tear
+
+        journal = journal_at(tmp_path)
+        manifest = Manifest(
+            version="1",
+            spec_file="s.md",
+            project_name="p",
+            base_branch="main",
+            single_pr=False,
+            components=[],
+        )
+        journal.record_run("run-1", manifest, FactoryResult())
+        tear(journal.config.experiments_path)
+        journal.record_run("run-2", manifest, FactoryResult())
+
+        runs = load_runs(journal.config.experiments_path)
+
+        assert [run.run_id for run in runs] == ["run-1", "run-2"]
 
 
 # --------------------------------------------------------------------------

@@ -710,11 +710,16 @@ def _echo_journal_repairs(journal: EvolutionJournal, ui_impl: UI) -> None:
     all: a healthy journal that prints "0 repairs" every time teaches an
     operator to skip the line that matters.
 
-    Only ``ks evolve --status`` calls it. The evolve TUI screen renders
-    the same trends and stays silent about repairs, which is #333:
-    ``get_repair_count`` is click-free and on the journal, so that
-    screen can ask for itself, but claiming this helper serves the TUI
-    would be false. It lives in the click module.
+    Only ``ks evolve --status`` calls it, and that is still true after
+    #333: the evolve TUI screen reports repairs now, through
+    ``EvolveScreen._show_repairs``, which asks the journal for itself
+    because ``get_repair_count`` is click-free and on the journal. This
+    helper writes through ``UI`` in the click module and cannot be
+    reused as is, so the two are one measurement rendered twice rather
+    than two measurements. The wording is one string now, on the journal
+    (``repair_summary``): saying it was deliberately the same on both
+    was a claim with nothing keeping it (#352 round 2, N4). What is
+    still per-surface is the prefix and the decision to show anything.
 
     Takes the journal and asks IT for the path, rather than being handed
     both: a count from one journal printed beside another one's path is
@@ -724,15 +729,9 @@ def _echo_journal_repairs(journal: EvolutionJournal, ui_impl: UI) -> None:
     the staged complexity ratchet on a function this change is not
     otherwise touching.
     """
-    repairs = journal.get_repair_count()
-    if repairs:
-        ui_impl.warn(
-            f"  journal: {repairs} interrupted write(s) repaired. A crash left "
-            f"{journal.config.journal_path} without a trailing newline. The line above "
-            "each journal_repair row is what that write left behind: either a torn "
-            "fragment, which is lost, or a whole record that lost only its newline, "
-            "which is readable again. Read it to tell which."
-        )
+    summary = journal.repair_summary()
+    if summary is not None:
+        ui_impl.warn(f"  {summary}")
 
 
 def _preflight_root(ctx: click.Context) -> Path:
@@ -4508,6 +4507,14 @@ def autonomy_replay_cmd(
     to calibrate anything. Never mutates ladder state. Exit code 2 means
     "insufficient data", so a script cannot mistake it for a green run.
 
+    An UNREADABLE experiments.tsv exits 2 as well, and this is where it
+    gets a cause. ``load_runs`` used to swallow the OSError and the
+    decode error and return no runs, which reached the operator as
+    "INSUFFICIENT DATA": a sentence about the project's history for
+    what is a permission or an encoding problem. The exit code is the
+    same because nothing was replayed either way; the difference is
+    that the line above it now names the file and the error.
+
     This is also the advisory mode for the R8.4 health rules: it reports
     would-have-fired counts and never demotes, so a candidate rule set is
     scored against real history before it is allowed to revoke a level.
@@ -4516,7 +4523,14 @@ def autonomy_replay_cmd(
 
     root_dir = (root or Path.cwd()).resolve()
     ui_impl = _autonomy_ui(ui, no_color)
-    report = replay_file(experiments, root_dir)
+    try:
+        report = replay_file(experiments, root_dir)
+    except (OSError, ValueError) as exc:
+        # ValueError beside OSError because UnicodeDecodeError is one,
+        # and it escapes a fail-closed `except OSError` (CLAUDE.md,
+        # encoding is two-sided).
+        ui_impl.err(f"could not read the recorded run history: {exc}")
+        sys.exit(2)
     for line in report.render().splitlines():
         ui_impl.info(line)
     sys.exit(0 if report.sufficient_data else 2)

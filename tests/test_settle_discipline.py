@@ -199,6 +199,15 @@ EXPECTED_AWAIT_SITES: dict[str, int] = {
     "tests/test_decompose_screens.py": 32,
     "tests/test_evolve_screen.py": 37,
     "tests/test_evolve_screen_encoding.py": 1,
+    # Four ``async with evolve_screen(...)``, added by #333. The
+    # decision each one needs: every read after them is of
+    # ``#evolve-repairs``, and ``evolve_screen`` already waits on
+    # ``tests/helpers/tui_screens.py``'s conditions, the last of which
+    # is that ``EvolveScreen.on_mount`` has RETURNED. The repair line is
+    # written inside the ``reload()`` that on_mount's last statement
+    # calls, so it is drawn before any of these reads can run. No pause
+    # is counted and no new settle predicate was needed.
+    "tests/test_evolve_screen_repairs.py": 4,
     "tests/test_feature_run.py": 5,
     "tests/test_home_data.py": 4,
     "tests/test_home_shell.py": 52,

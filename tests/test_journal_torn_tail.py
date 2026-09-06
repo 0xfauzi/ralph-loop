@@ -31,13 +31,13 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from pathlib import Path
 
 import pytest
 
-from kstrl.evolution import EXPERIMENTS_HEADER, JOURNAL_REPAIR_EVENT, SPEC_ISSUES_EVENT
-from kstrl.observability import handle_ends_without_newline, read_progress_events
+from kstrl.appendio import JOURNAL_REPAIR_EVENT, handle_ends_without_newline
+from kstrl.evolution import EXPERIMENTS_HEADER, SPEC_ISSUES_EVENT
+from kstrl.observability import read_progress_events
 from tests.helpers.journal import (
     DANGLING_UTF8,
     TORN_FRAGMENT,
@@ -50,6 +50,7 @@ from tests.helpers.journal import (
     tear,
     terminate,
 )
+from tests.helpers.rootperms import skip_as_root
 
 
 class TestTheEntryAfterATear:
@@ -347,7 +348,10 @@ class TestTheRepairIsReportable:
 
     def test_the_count_is_of_rows_not_of_incidents(self, tmp_path: Path) -> None:
         """What ``get_repair_count`` promises, and no more. Two tears
-        are two rows; #330 is the case where one tear becomes two."""
+        are two rows. One tear becoming TWO rows was #330's residual 2,
+        and the lock ``append_entries`` now takes closes it wherever
+        ``fcntl`` imports; ``tests/test_journal_lock.py`` is where that
+        is measured, with concurrent writers this file never starts."""
         journal = journal_at(tmp_path)
         journal.append_entries([audit("alpha")])
         tear(journal.config.journal_path)
@@ -413,10 +417,7 @@ class TestAnUnreadableJournal:
     """#327 round 1, F3: a probe that could not read must never be taken
     for "not torn"."""
 
-    @pytest.mark.skipif(
-        hasattr(os, "geteuid") and os.geteuid() == 0,
-        reason="root ignores the mode bits this test sets",
-    )
+    @skip_as_root
     def test_a_write_only_journal_refuses_rather_than_appending_blind(
         self,
         tmp_path: Path,

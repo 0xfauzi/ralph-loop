@@ -97,6 +97,13 @@ class EvolveScreen(Screen[None]):
         # section empties patterns AND trends, and the operator may be
         # looking at proposals when it happens.
         yield ConfigProblemBanner()
+        # Also above the tabs, and for the same reason: a repaired
+        # journal write is about the file both journal-backed tabs read,
+        # and the operator may be looking at proposals when it happens.
+        # A separate widget rather than a second use of the banner
+        # above, which prefixes "configuration unreadable": the config
+        # is fine here and the journal was torn (#333).
+        yield Static(id="evolve-repairs")
         with TabbedContent(id="evolve-tabs"):
             with TabPane("proposals", id="tab-proposals"):
                 with Horizontal(id="proposals-split"):
@@ -194,8 +201,10 @@ class EvolveScreen(Screen[None]):
         trends_table = self.query_one("#trends-table", DataTable)
         trends_table.clear()
         if config is None:
+            self._show_repairs(None)
             return
         journal = EvolutionJournal(config)
+        self._show_repairs(journal)
         for pattern in journal.get_cross_run_patterns():
             patterns_table.add_row(
                 Text(pattern.check_name, style="bold"),
@@ -206,6 +215,70 @@ class EvolveScreen(Screen[None]):
             )
         for row in journal.get_experiment_trends(last_n=TREND_ROWS):
             trends_table.add_row(*self._trend_cells(row))
+
+    def _show_repairs(self, journal: EvolutionJournal | None) -> None:
+        """The count of repaired journal writes, or nothing at zero (#333).
+
+        #312's argument for writing a durable ``journal_repair`` row at
+        all was that under the TUI the logger warning goes to
+        ``orchestrator.log`` where nobody is looking. That argument names
+        the TUI operator, and until now this screen was the one surface
+        that built an ``EvolutionJournal``, read the journal for its
+        patterns tab, and said nothing about the rows.
+
+        Silent at zero, which is the same choice ``ks evolve --status``
+        makes and for the same reason: a line that prints on every
+        healthy journal is a line an operator learns to skip. The facts
+        are the CLI's facts, because they are facts about the file
+        rather than about a surface, and since #352 round 2 they are one
+        STRING as well: ``EvolutionJournal.repair_summary``. What is NOT
+        shared is the helper, because ``cli._echo_journal_repairs``
+        writes through ``UI`` in the click module, so this is a second
+        renderer of one measurement, not a second measurement.
+
+        Takes the journal rather than a count so the count and the path
+        printed beside it cannot come from two different journals. None
+        means the config did not resolve, which the banner above has
+        already said; this line hides rather than showing a stale count
+        from before a ``reload``.
+
+        COST, and it is a whole extra read of the journal rather than
+        nothing: ``repair_summary`` goes through ``_read_all_entries``
+        while the patterns tab beside it goes through
+        ``_read_journal_entries``, so this screen reads the file twice
+        per load and per ``r``, on the Textual event loop. Measured
+        here, 20 calls each: 0.016 ms at 1 line, 0.097 ms at 100,
+        1.12 ms at 989 (194 KiB, the largest real journal #333 found),
+        and on a 10,000-line journal 9.3 ms for the repair read against
+        9.2 ms for the patterns read, so the screen pays 18.5 ms where
+        one read would cost 9.3. Linear in the file.
+
+        The lookback window is NOT why it is a second read, and that
+        sentence used to be here and was wrong (#352 round 2, F5).
+        ``get_cross_run_patterns`` goes through ``_read_journal_entries``,
+        which calls ``_read_all_entries()`` and applies its window in
+        MEMORY. The two figures being within a few percent of each other
+        is that window costing nothing at the read.
+
+        Kept as a second read anyway, and this is the real reason: the
+        two are methods on the same journal called from two places on
+        this screen, so folding them means either passing the entries
+        into ``_show_repairs`` or giving ``EvolutionJournal`` a cached
+        read. The first makes this method's own argument a list somebody
+        else read, which is the thing the paragraph above rejects for
+        the count and the path. The second changes the surface every
+        other caller of the journal sees, for a screen that reloads on
+        one keypress. Neither is worth 9.3 ms at a file size no journal
+        here has reached; the cost is written down so the next reader
+        decides on the number rather than on the sentence.
+        """
+        line = self.query_one("#evolve-repairs", Static)
+        summary = None if journal is None else journal.repair_summary()
+        if summary is None:
+            line.display = False
+            return
+        line.display = True
+        line.update(Text(f"▲ {summary}", style=theme.WARNING))
 
     @staticmethod
     def _trend_cells(row: dict[str, Any]) -> tuple[Text | str, ...]:

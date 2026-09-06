@@ -39,8 +39,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from kstrl.appendio import JOURNAL_REPAIR_EVENT
 from kstrl.evolution import (
-    JOURNAL_REPAIR_EVENT,
     SPEC_ISSUES_EVENT,
     EvolutionConfig,
     EvolutionJournal,

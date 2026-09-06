@@ -1,6 +1,8 @@
-"""An enrolled event name is spelled once where a journal row is written or selected.
+"""An enrolled event name is spelled once, in the module that owns it.
 
-That one place is ``kstrl/evolution.py``. The scope of the claim is the
+That module is ``kstrl/evolution.py`` for ``spec_issues`` and
+``kstrl/appendio.py`` for ``journal_repair``, which is where the pin
+rows below put them. The scope of the claim is the
 row, not the word: ``tests/`` holds 46 spellings both layers
 deliberately leave alone, 44 of ``spec_issues`` and 2 of
 ``journal_repair``: mostly the architect's own JSON key, and in five
@@ -72,7 +74,8 @@ import ast
 from collections.abc import Iterable, Sequence
 from pathlib import Path
 
-from kstrl.evolution import JOURNAL_REPAIR_EVENT, SPEC_ISSUES_EVENT
+from kstrl.appendio import JOURNAL_REPAIR_EVENT
+from kstrl.evolution import SPEC_ISSUES_EVENT
 
 # Reached through the module for readability rather than for safety:
 # ``test_sources`` carries ``__test__ = False``, so a from-import of it
@@ -177,11 +180,18 @@ def event_name_spellings(source_file: Path) -> int:
 #: string, and why this layer is a pinned COUNT rather than an assertion
 #: that the count is zero.
 EXPECTED_EVENT_NAME_SPELLINGS: dict[str, int] = {
+    # The JOURNAL_REPAIR_EVENT declaration. Its home since #331: six
+    # appenders across six modules can write the row now, and appendio
+    # is the module all six already import.
+    "appendio.py": 1,
     # The architect's own JSON key, twice (validation and _parse_spec_issues),
     # plus the TUI artifact label emitted with ArtifactWritten.
     "decompose.py": 3,
-    # The two declarations. This is the one home.
-    "evolution.py": 2,
+    # The SPEC_ISSUES_EVENT declaration. Was 2 until #331 moved
+    # JOURNAL_REPAIR_EVENT to appendio.py; evolution.py imports it now,
+    # and an imported Name folds to nothing, which is why the count
+    # dropped rather than staying put.
+    "evolution.py": 1,
     # The TUI reading that artifact label back.
     "tui/screens/decompose.py": 1,
 }
@@ -619,7 +629,7 @@ class TestJournalEventNamesHaveOneHome:
             message=(
                 "The set of places that spell an enrolled journal event name "
                 "changed. If this is a journal row being written or selected, "
-                "import the constant evolution.py declares for it. If it is the "
+                "import the constant its own module declares for it. If it is the "
                 "architect's JSON key or the TUI's artifact label, which share the "
                 "word, add the row with a reason."
             ),
@@ -692,5 +702,5 @@ class TestJournalEventNamesHaveOneHome:
         )
         assert found == {}, (
             "A journal row is written or selected by a bare literal instead of the "
-            f"constant evolution.py declares for it. Import the constant. Sites: {found}"
+            f"constant its own module declares for it. Import it. Sites: {found}"
         )

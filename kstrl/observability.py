@@ -10,7 +10,9 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import IO, Any, Protocol
+from typing import Any, Protocol
+
+from kstrl.appendio import JOURNAL_REPAIR_EVENT, REPAIR_DETAIL, append_records
 
 
 class ProgressSink(Protocol):
@@ -124,13 +126,35 @@ class ProgressLog:
             event["component"] = component_id
         if data:
             event["data"] = data
-        # utf-8 pinned to match the reader below. ``json.dumps`` leaves
-        # ensure_ascii at its default, so what lands here is pure ASCII
-        # today and the locale cannot corrupt it; naming the encoding is
-        # what keeps that true if a field ever carries a raw string
-        # (#291's two-sided contract, #320's sweep).
-        with open(self._path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(event) + "\n")
+        # #331: through appendio, which repairs an unterminated tail
+        # before appending onto it. Without that, a crash mid-write
+        # costs THIS event as well as the torn one, measured through the
+        # reader below: ``['alpha']`` where alpha and beta were written,
+        # and ``reducer.load_run_state`` leaving a component ``running``
+        # when the lost row was its ``component_completed``.
+        #
+        # utf-8 is pinned inside the helper, matching the reader below.
+        # ``json.dumps`` leaves ensure_ascii at its default, so what
+        # lands here is pure ASCII today and the locale cannot corrupt
+        # it (#291's two-sided contract, #320's sweep).
+        #
+        # The ``"a+b"`` open widens what can fail: a log this process
+        # can write but not read is refused rather than appended to
+        # blind, so this RAISES where it returned. ``JsonlSink``'s
+        # docstring carries the decision, because the factory reaches
+        # this through a sink on the same bus and both go quiet at once.
+        repaired = append_records(
+            self._path,
+            json.dumps(event) + "\n",
+            repair=json.dumps(self._repair_event(event["ts"])) + "\n",
+        )
+        if repaired:
+            self._warn(
+                f"progress log {self._path} did not end in a newline, so a "
+                f"crash tore it. A newline and a {JOURNAL_REPAIR_EVENT} row "
+                f"were written before this event, so the unterminated tail "
+                f"cannot swallow the events after it."
+            )
         # R7.4: sink fan-out AFTER the journal write - the JSONL line is
         # the source of truth and must land even if every sink dies. A
         # sink exception warns and never propagates into the run.
@@ -141,6 +165,32 @@ class ProgressLog:
                 self._warn(
                     f"progress sink {type(sink).__name__} failed on {event_type}: {exc} (non-fatal)"
                 )
+
+    def _repair_event(self, ts: str) -> dict[str, Any]:
+        """The row :meth:`emit` writes when it finds an unterminated tail.
+
+        Progress-log shaped, so the file stays one schema: ``ts``,
+        ``event`` and the run it was found during. Carries NO
+        ``component``, which is what keeps it out of every aggregate:
+        ``summarize_events`` records the timestamp and skips any event
+        without one, so a repair row cannot invent activity for a
+        component that did nothing. ``latest_run_id`` is unaffected
+        because the row names the run that is already the latest.
+
+        It does NOT go to the sinks. A sink is an observer of the RUN,
+        and this row is about the FILE; a Linear sink that received it
+        would post about a torn journal onto whichever component's
+        issue happened to be open.
+
+        ``ts`` is the CALLER's, not a second ``_iso_now()``. This row
+        goes ABOVE the event it protects, so a separate stamp dated the
+        earlier line later across a second boundary.
+        """
+        event: dict[str, Any] = {"ts": ts, "event": JOURNAL_REPAIR_EVENT}
+        if self._run_id:
+            event["run_id"] = self._run_id
+        event["data"] = {"detail": REPAIR_DETAIL}
+        return event
 
     def factory_started(self, project_name: str, component_count: int) -> None:
         self.emit(
@@ -406,48 +456,6 @@ class NullProgressLog(ProgressLog):
         data: dict[str, Any] | None = None,
     ) -> None:
         pass
-
-
-def handle_ends_without_newline(handle: IO[bytes]) -> bool:
-    """True when the open binary file holds bytes and the last is not ``\\n``.
-
-    The write-side companion to :func:`read_progress_events`, and here
-    rather than in the one module that calls it today because it is the
-    generic half of #312 with no policy in it. That defect is one an
-    appender to any JSONL file in this package can have: a crash leaves
-    an unterminated tail, the next append concatenates onto it, and the
-    tolerant reader below drops BOTH lines. Measured on this tree, four
-    other appenders still can (``ProgressLog.emit``, ``JsonlSink``,
-    ``workqueue``, ``inbox``), which is #331; what each of them should
-    WRITE on finding a tear differs per file, so only the predicate is
-    shared. #291 is the argument for hoisting it before the second copy
-    rather than after the tenth.
-
-    Takes an OPEN HANDLE rather than a path, which is the whole design:
-
-    - the caller opens once, in ``"a+b"``, and probes and appends
-      through one file description, so there is no window between the
-      two in which the path can be replaced, retargeted or deleted;
-    - a file this process cannot read cannot be opened ``"a+b"`` at all,
-      so an unreadable journal raises ``PermissionError`` out of the
-      open instead of being reported as "not torn" and appended to
-      blind (#327 round 1, F3: a path-taking probe that answered False
-      on every ``OSError`` was fail-OPEN on a mode-0200 journal);
-    - a long-lived appender such as ``JsonlSink`` can ask this once when
-      it opens, which a path-taking predicate cannot serve.
-
-    Binary, which is the point: the last byte of a file torn
-    mid-utf-8-sequence cannot be decoded, and a text-mode probe would
-    raise ``UnicodeDecodeError`` on exactly the file that most needs the
-    repair. Seeks are reads; in append mode the write position is the
-    end regardless, so this does not disturb where the caller's next
-    write lands. Raises nothing of its own: an IO error belongs to the
-    caller that owns the handle.
-    """
-    if handle.seek(0, os.SEEK_END) == 0:
-        return False
-    handle.seek(-1, os.SEEK_END)
-    return handle.read(1) != b"\n"
 
 
 def read_progress_events(path: Path) -> list[dict[str, Any]]:

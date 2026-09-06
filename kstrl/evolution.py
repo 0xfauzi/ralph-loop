@@ -18,8 +18,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from kstrl.appendio import JOURNAL_REPAIR_EVENT, REPAIR_DETAIL, append_records
 from kstrl.manifest import ADVERSARIAL_BUDGET_CHECK
-from kstrl.observability import handle_ends_without_newline, read_progress_events
+from kstrl.observability import read_progress_events
 from kstrl.verify import SCOPE_UNREADABLE_CHECK, SCOPE_UNREADABLE_ERROR_PREFIX
 
 if TYPE_CHECKING:
@@ -37,13 +38,18 @@ logger = logging.getLogger("kstrl.evolution")
 # .kstrl/archive/, so fresh journals contain v2 entries only.
 JOURNAL_SCHEMA_VERSION = 2
 
-# #312: the event_type of the row append_entries writes when it finds the
-# journal not newline-terminated. Its own type rather than a synthetic
-# component_result, for the reason _role_usage_entries gives: every
-# aggregate in this module selects on event_type, so a row of this type
-# counts towards nothing and cannot invent an outcome. It exists to be
-# grepped: it is the only durable trace that a crash tore the file.
-JOURNAL_REPAIR_EVENT = "journal_repair"
+# #312 declared JOURNAL_REPAIR_EVENT here: the event_type of the row an
+# append writes when it finds the file not newline-terminated. Its own
+# type rather than a synthetic component_result, for the reason
+# _role_usage_entries gives: every aggregate in this module selects on
+# event_type, so a row of this type counts towards nothing and cannot
+# invent an outcome. It exists to be grepped: it is the only durable
+# trace that a crash tore the file.
+#
+# #331 moved the declaration to ``kstrl.appendio``, where the six
+# appenders that can write it can all reach it. The import above is
+# what binds the name in this module, for _repair_entry which writes
+# the row and get_repair_count which counts it.
 
 # #260: the event_type of one recorded spec audit. ``decompose`` writes
 # these rows and :meth:`EvolutionJournal.get_spec_audits` selects on
@@ -55,15 +61,197 @@ JOURNAL_REPAIR_EVENT = "journal_repair"
 SPEC_ISSUES_EVENT = "spec_issues"
 
 
+class ExperimentsDialect(csv.Dialect):
+    """The ON-DISK shape of experiments.tsv, in one place (#352 round 2).
+
+    The writer does not go through ``csv`` at all: ``record_run`` joins
+    its fields on this dialect's delimiter, and ``EXPERIMENTS_HEADER``
+    below is built the same way. So the delimiter is genuinely shared
+    and the quoting rules are a description of what that writer does,
+    which is nothing: it never quotes and it never escapes.
+
+    ``quoting = QUOTE_NONE`` is therefore the reader agreeing with the
+    writer rather than a new tolerance. The default dialect did not, and
+    the cost was measured in review of #352: a ``"`` at the start of any
+    field opens a quoted region that swallows every byte to the next
+    ``"``, so a file whose first run was named ``"proj`` returned NO
+    rows at 3 runs and raised ``_csv.Error: field larger than field
+    limit (131072)`` at 20,001. Neither reader caught that, because
+    ``_csv.Error`` is neither an ``OSError`` nor a ``ValueError``.
+
+    ``escapechar`` is ``None`` for the same reason. A tab or a newline
+    inside a field is therefore unrepresentable, which is residual 1 on
+    :func:`experiment_rows` and is a property of the writer, not of this
+    dialect: setting an escapechar here would only change how the reader
+    misreads a row the writer already wrote wrong.
+
+    ``lineterminator`` is what a ``csv.writer`` would emit and is unused
+    on the read side, where ``csv`` recognises all three endings
+    regardless. It is stated so the constant describes the whole file
+    rather than half of it.
+    """
+
+    delimiter = "\t"
+    quotechar = None
+    doublequote = False
+    escapechar = None
+    lineterminator = "\n"
+    quoting = csv.QUOTE_NONE
+    skipinitialspace = False
+
+
 # The header row record_run writes to experiments.tsv, at module scope so
 # that a test can assert against the columns the writer actually emits
-# rather than a shorter hand-typed row that csv.DictReader happens to
+# rather than a shorter hand-typed row a lenient reader happens to
 # tolerate. Files written before R3.1 keep their shorter header.
-EXPERIMENTS_HEADER = (
-    "run_id\ttimestamp\tproject\tcomponents_total\tcompleted\tfailed\t"
-    "skipped\tavg_iterations\tavg_duration_s\tretry_rate\tcommon_failure\t"
-    "total_tokens\ttotal_cost_usd\tunreported_calls"
+EXPERIMENTS_HEADER = ExperimentsDialect.delimiter.join(
+    (
+        "run_id",
+        "timestamp",
+        "project",
+        "components_total",
+        "completed",
+        "failed",
+        "skipped",
+        "avg_iterations",
+        "avg_duration_s",
+        "retry_rate",
+        "common_failure",
+        "total_tokens",
+        "total_cost_usd",
+        "unreported_calls",
+    )
 )
+
+
+def experiment_rows(text: str) -> list[dict[str, Any]]:
+    """Parse experiments.tsv, dropping any row whose WIDTH does not fit the header.
+
+    #331's read half. The write half pads an unterminated tail, but a
+    file torn before that landed still has the concatenated row in it,
+    and this reader is the one that RENDERS corruption rather than
+    dropping it: measured, ``ks evolve --status`` and the TUI trends tab
+    showed a run whose ``completed`` column held a timestamp, because
+    ``csv.DictReader`` zipped a fragment plus a whole row against the
+    header and put the overflow under the key ``None``.
+
+    Width, not content, is the check, and it is deliberately not "the
+    field count equals the header's". Files written before R3.1 have a
+    SHORTER header and this writer appends the full-width row onto them,
+    which the comment on :const:`EXPERIMENTS_HEADER` promises to
+    tolerate; a filter that took the header's own width as the only
+    legal one would answer a rendering defect by silently deleting every
+    row of a legacy file, which is a worse defect than the one it fixes.
+    So both widths are legal when the file's header is a PREFIX of the
+    current one, and only then.
+
+    Blank lines are skipped rather than dropped as malformed, and NOT
+    for the reason this said in round 1. The pad the writer leaves
+    behind does not produce one: it writes ``"\n" + payload``, so the
+    torn tail is terminated and the payload follows on the next line.
+    Measured on both tear shapes, a whole row that lost only its
+    newline and a fragment torn mid-row, and neither leaves a blank
+    line. The skip is still right, for a file a person may have edited;
+    the cause was invented.
+
+    THREE RESIDUALS, measured in review of #352 rather than reasoned
+    about, because "this writer never emits such a row" was the original
+    claim here and it is not true.
+
+    1. A row this writer CAN emit is dropped. ``row`` is joined on
+       :class:`ExperimentsDialect`'s delimiter, not written by a
+       ``csv.writer``, so a tab or a newline in ``project_name`` or
+       ``common_failure`` reaches the file unescaped and nothing between
+       the CLI and the write rejects one (#347's callback rejects blank
+       and whitespace-only names, not embedded tabs). Measured on one
+       ``record_run`` each: a project named ``pro\tject`` rendered a row
+       with shifted columns before this filter and renders nothing now,
+       and ``pro\nject`` produced two rows and now produces none.
+       Dropping beats rendering shifted numbers to a ladder, so the
+       filter is still the right call; the claim was the defect. A
+       ``"`` used to belong on this list and no longer does: it damaged
+       every LATER row rather than its own, and that is what reading on
+       the writer's own dialect removed.
+    2. A header that is NOT a prefix of the current one silently drops
+       every row this writer appends. Measured with the first column
+       renamed: an 11-column legacy header plus a fresh 14-field row
+       returns only the legacy row. ``record_run`` never rewrites a
+       disagreeing header, so in that state every new run is invisible
+       to ``ks evolve --status`` and to ``ks autonomy replay`` with
+       nothing logged.
+    3. A fragment torn INSIDE the first field survives. A concatenation
+       has ``k + 14 - 1`` fields for a fragment of ``k`` fields, which
+       is 15 or more for a tear past the first tab; a tear before it
+       gives ``k == 1`` and exactly 14, which is legal. Measured: both
+       readers return ``run_id='run-2run-3'`` with every other column
+       holding run-3's real values. ``run_id`` is column 1, so this is
+       whatever share of the row's bytes a run id occupies, not a
+       corner. New appends cannot create this state now that the writer
+       pads.
+
+    There is no counter for any of it, which is the fourth thing to
+    know: ``[]`` from here means "no runs recorded", "the header does
+    not match" and "every row was malformed" alike, and the trends tab
+    renders the same empty table for all three. A parse that cannot be
+    completed is deliberately NOT a fifth meaning of ``[]``: it raises.
+
+    WHAT THE DIALECT CANNOT REMOVE, and why the parse is guarded.
+    ``csv``'s field-size limit fires under ``QUOTE_NONE`` too, on any
+    single field longer than 131,072 characters, and it raises
+    ``_csv.Error``, which is neither an ``OSError`` nor a
+    ``ValueError``: measured, both ``isinstance`` checks answer False,
+    so it escaped ``get_experiment_trends`` (whose guard is around the
+    read, not the parse) and ``ks autonomy replay``'s handler alike.
+    CLAUDE.md's rule from #318 is that a parser's error taxonomy belongs
+    to the parser, so the clause here is ``except Exception`` exactly
+    rather than an enumeration of what ``csv`` is believed to raise, and
+    it converts to a ``ValueError``, which is the refusal path both
+    callers already take for an unreadable file. All of the I/O is
+    outside the guarded block for the same reason it is in
+    ``config.load_toml_document``: the caller does the reading, and the
+    only thing under the ``try`` is the parse.
+
+    That guard materialises every record before the width filter runs,
+    where the previous shape streamed. Measured on a 20,000-run file
+    (1.13 MB) rather than argued: 18.9 ms and a 21.1 MB peak against
+    15.0 ms and 17.1 MB, so 3.9 ms and 4.0 MB at twenty thousand runs.
+    Bought deliberately: streaming needs the clause twice, once on the
+    header and once on the rows, and two clauses is two messages and two
+    things to keep in step.
+
+    Public because this file has TWO readers, not one:
+    :meth:`EvolutionJournal.get_experiment_trends` renders it and
+    ``autonomy_replay.load_runs`` feeds it to the autonomy ladder. Both
+    used a bare ``csv.DictReader``, so a filter on only one of them
+    would fix the screen and leave the ladder promoting on a run that
+    does not exist.
+
+    ``newline=""`` on the buffer is what ``csv`` documents as required
+    for a stream handed to a reader. It is only half the contract here
+    and the other half is not reachable: both callers arrive with text
+    from ``Path.read_text``, which has already applied universal-newline
+    translation, and ``read_text`` grew a ``newline`` parameter in 3.13
+    while this project's floor is 3.11. So a lone ``\r`` inside a field
+    is an ``\n`` before it gets here, which residual 1 covers.
+    """
+    buffer = io.StringIO(text, newline="")
+    try:
+        records = list(csv.reader(buffer, ExperimentsDialect))
+    except Exception as exc:
+        raise ValueError(f"experiments.tsv could not be parsed: {exc}") from exc
+    if not records:
+        return []
+    header, rows = records[0], records[1:]
+    columns = EXPERIMENTS_HEADER.split(ExperimentsDialect.delimiter)
+    widths = {len(header)}
+    if header == columns[: len(header)]:
+        widths.add(len(columns))
+    return [
+        dict(zip(header, fields, strict=False))
+        for fields in rows
+        if fields and len(fields) in widths
+    ]
+
 
 # #191: what a component_result entry records when no fact-utilization
 # measurement reached the journal - the component never got past the
@@ -652,6 +840,31 @@ def _journal_line(entry: dict[str, Any]) -> str:
     return json.dumps(entry, separators=(",", ":")) + "\n"
 
 
+def _log_experiments_repair(repaired: bool, path: Path) -> None:
+    """Say that a torn experiments.tsv was padded, since the file cannot.
+
+    The other five appenders record a repair as a row their own reader
+    returns. This one pads bare, because every marker a TSV can carry is
+    a field and a row of fields is a run, so the log is the only place
+    the incident can go. Without it a crash that tore this file and cost
+    a run is something nothing in the product ever says: the pad leaves
+    a short fragment, ``experiment_rows`` drops it on width, and there
+    is no counter on that path either.
+
+    A function rather than an ``if`` inside :meth:`record_run` because
+    that method is at the cyclomatic ratchet's grandfathered value and
+    one more branch would push it up. It also gives the sentence one
+    home.
+    """
+    if repaired:
+        logger.warning(
+            "experiments.tsv did not end in a newline, so a crash tore it: %s. "
+            "The tail was padded onto a line of its own, so the row above this "
+            "run may be a fragment and the run it belonged to was lost.",
+            path,
+        )
+
+
 def _repair_entry() -> dict[str, Any]:
     """The row :meth:`EvolutionJournal.append_entries` writes on finding
     an unterminated tail.
@@ -665,12 +878,7 @@ def _repair_entry() -> dict[str, Any]:
         "schema_version": JOURNAL_SCHEMA_VERSION,
         "timestamp": _timestamp_now(),
         "event_type": JOURNAL_REPAIR_EVENT,
-        "detail": (
-            "the preceding line was not newline-terminated when this append "
-            "ran, so a write was interrupted. It is either a torn fragment "
-            "that was never readable, or a complete record that lost only its "
-            "newline; both are on their own line now."
-        ),
+        "detail": REPAIR_DETAIL,
     }
 
 
@@ -933,8 +1141,11 @@ class EvolutionJournal:
         # tracked for the run - zero would misread as "measured, free".
         # unreported_calls > 0 marks the token/cost figures as lower
         # bounds. Files written before R3.1 keep their shorter header;
-        # csv.DictReader in get_experiment_trends drops the extra values
-        # rather than crashing.
+        # experiment_rows keeps such a row while the file's header is a
+        # PREFIX of the current one and drops the extra values, which is
+        # its second legal width. The reader has not been a bare
+        # csv.DictReader since #331 and this comment named one until
+        # #352 round 2.
         if run_usage:
             total_tokens_col = str(run_usage.get("total_tokens", ""))
             total_cost_col = str(run_usage.get("cost_usd", ""))
@@ -942,11 +1153,31 @@ class EvolutionJournal:
         else:
             total_tokens_col = total_cost_col = unreported_col = ""
 
-        row = (
-            f"{run_id}\t{timestamp}\t{manifest.project_name}\t{total}\t"
-            f"{completed}\t{failed}\t{skipped}\t{avg_iterations:.2f}\t"
-            f"{avg_duration:.1f}\t{retry_rate:.2f}\t{common_failure}\t"
-            f"{total_tokens_col}\t{total_cost_col}\t{unreported_col}"
+        # Joined on ExperimentsDialect's delimiter rather than on a
+        # literal tab, so the one constant the reader parses with is the
+        # one this row is built with. Identical bytes: the delimiter IS
+        # "\t". Not through a csv.writer, because under QUOTE_NONE with
+        # no escapechar a writer RAISES on a field holding a tab, and
+        # record_run's only handler is `except OSError`; that would turn
+        # residual 1 on experiment_rows from a dropped row into a lost
+        # run, which is the worse of the two.
+        row = ExperimentsDialect.delimiter.join(
+            (
+                run_id,
+                timestamp,
+                manifest.project_name,
+                str(total),
+                str(completed),
+                str(failed),
+                str(skipped),
+                f"{avg_iterations:.2f}",
+                f"{avg_duration:.1f}",
+                f"{retry_rate:.2f}",
+                common_failure,
+                total_tokens_col,
+                total_cost_col,
+                unreported_col,
+            )
         )
 
         try:
@@ -955,12 +1186,39 @@ class EvolutionJournal:
                 not self.config.experiments_path.exists()
                 or self.config.experiments_path.stat().st_size == 0
             )
-            # The other side of the two-sided contract: this is the
-            # file get_experiment_trends decodes as utf-8.
-            with open(self.config.experiments_path, "a", encoding="utf-8") as f:
-                if needs_header:
-                    f.write(EXPERIMENTS_HEADER + "\n")
-                f.write(row + "\n")
+            # #331: through appendio, which repairs an unterminated
+            # tail before appending onto it. This file is the WORST of
+            # the seven, because its reader RENDERS the corruption
+            # instead of dropping it: measured, a torn row plus this
+            # append put a run into `ks evolve --status` and the TUI
+            # trends tab whose "completed" column held a timestamp,
+            # while the run being recorded here vanished.
+            #
+            # A BARE PAD, no marker row. Every marker a TSV can carry is
+            # a field, and a row of fields is a RUN to this file's
+            # reader; there is no shape here that reads as "not a run"
+            # the way JOURNAL_REPAIR_EVENT does in a JSONL file.
+            #
+            # So the incident is recorded in the log rather than in the
+            # file. The pad means there is no concatenated row left for
+            # get_experiment_trends to drop, only a short fragment it
+            # drops silently, and a crash that tore this file and cost a
+            # run would otherwise be something nothing in the product
+            # ever says. That is the same argument #312 made for the
+            # journal_repair row, on the one file that cannot carry one.
+            #
+            # needs_header is unchanged and still asked before the
+            # append: a file that is missing or empty cannot have a torn
+            # tail, so the two never both fire.
+            #
+            # The other side of the two-sided contract: utf-8 is pinned
+            # in the helper, and this is the file get_experiment_trends
+            # decodes as utf-8.
+            payload = (EXPERIMENTS_HEADER + "\n" if needs_header else "") + row + "\n"
+            _log_experiments_repair(
+                append_records(self.config.experiments_path, payload, repair=""),
+                self.config.experiments_path,
+            )
         except OSError as exc:
             logger.warning(
                 "experiments.tsv write failed (non-fatal): %s: %s",
@@ -1557,19 +1815,65 @@ class EvolutionJournal:
         experiments.tsv raised straight out of ``EvolveScreen.on_mount``
         two lines after the #289 config banner, which is that issue's
         own crash from that issue's own screen.
+
+        The PARSE is guarded separately, and differently (#352 round 2).
+        A read failure here is silent because a missing file is the
+        ordinary state of a project that has recorded no runs, and
+        because ``experiment_rows`` already documents ``[]`` as meaning
+        three things. A parse refusal is not one of those three: it can
+        only come from a file that exists and decoded, so it is an
+        incident and it is logged with the path and the cause. The
+        return stays ``[]`` rather than propagating, because this is
+        called from ``EvolveScreen.reload`` on the Textual event loop,
+        where a raise is the #289 crash again.
         """
         try:
             text = self.config.experiments_path.read_text(encoding="utf-8")
         except (OSError, ValueError):
             return []
 
-        reader = csv.DictReader(io.StringIO(text), delimiter="\t")
-        rows = list(reader)
-        return rows[-last_n:]
+        try:
+            return experiment_rows(text)[-last_n:]
+        except ValueError as exc:
+            logger.warning(
+                "experiments.tsv could not be parsed, so no runs are shown: %s: %s",
+                self.config.experiments_path,
+                exc,
+            )
+            return []
 
     # ------------------------------------------------------------------
     # get_repair_count
     # ------------------------------------------------------------------
+
+    def repair_summary(self) -> str | None:
+        """The operator-facing sentence about this journal's repairs, or None.
+
+        ONE HOME for prose two surfaces render (#352 round 2, N4).
+        ``cli._echo_journal_repairs`` and ``EvolveScreen._show_repairs``
+        each held their own copy and each said the wording was
+        deliberately the same on both, with nothing keeping it so. That
+        is the same argument this PR made for hoisting
+        ``REPAIR_DETAIL``, where three copies had already drifted.
+
+        ``None`` at zero rather than a sentence saying zero, which is
+        what both callers already did separately and for the same
+        reason: a healthy journal that prints "0 repairs" every time
+        teaches an operator to skip the line that matters. Deciding it
+        here also keeps the file read ONCE. What stays per-surface is
+        the prefix, two spaces for the CLI and an alert glyph for the
+        TUI, and the widget or stream it goes to.
+        """
+        repairs = self.get_repair_count()
+        if not repairs:
+            return None
+        return (
+            f"journal: {repairs} interrupted write(s) repaired. "
+            f"A crash left {self.config.journal_path} without a trailing newline. "
+            "The line above each journal_repair row is what that write left behind: "
+            "either a torn fragment, which is lost, or a whole record that lost only "
+            "its newline, which is readable again. Read it to tell which."
+        )
 
     def get_repair_count(self) -> int:
         """How many interrupted writes this journal has been repaired from.
@@ -1581,9 +1885,13 @@ class EvolutionJournal:
         logger warning goes to orchestrator.log under the TUI. ``ks
         evolve --status`` prints this when it is non-zero.
 
-        Counts rows, not incidents: :meth:`append_entries` residual 2
-        is how one tear can produce two, and residual 4 is how a repair
-        can happen and not be counted, so this is a lower bound. A
+        Counts rows, not incidents. Residual 4 of
+        :meth:`append_entries` is how a repair can happen and not be
+        counted, so this is a lower bound. It is no longer an UPPER
+        bound too: #330's residual 2, two processes each writing a row
+        for one tear, is closed under ``fcntl`` by the lock the append
+        takes, so one row is one tear on POSIX and two rows for one tear
+        remain possible only on a platform with no ``fcntl``. A
         non-zero count means at least one crash left an unterminated
         tail. It does NOT mean a record was lost: the line above each
         row is either a fragment that was never readable or a whole
@@ -1680,39 +1988,21 @@ class EvolutionJournal:
         #312: a crash mid-write leaves a tail with no newline, and an
         append onto that tail concatenates the two into one unparseable
         line, so the tolerant reader drops the NEW entry as well. The
-        cost is measured, not assumed, and it is not always one entry: a
-        tail that lost only its newline is a COMPLETE record, and
-        concatenating onto it destroys that record too. Writing a
-        newline first repairs the tail into a line of its own, which
-        drops a genuine fragment (unavoidable, it was never written) and
-        RECOVERS a record that lost only its terminator.
+        mechanism and the repair now live in ``kstrl.appendio``, which
+        #331 hoisted them into when five more appenders were measured
+        with the same defect; the ``"a+b"`` open, the probe, the single
+        write and the encoding are all described there.
 
-        Healing forward rather than raising, because the caller is a
-        record-keeper: refusing to append would answer the loss of one
-        record by losing every later one. So the repair is recorded
-        instead, twice, per "if it's worth deciding, it's worth
-        recording" - a ``JOURNAL_REPAIR_EVENT`` row in the file itself,
-        which is what ``ks evolve --status`` counts and an operator
-        greps months later, and a warning on this module's logger for
-        whoever is watching now. The row is durable where the log line
-        is not: the process that tore the file is exactly the process
-        whose stderr nobody kept.
+        What stays here is the POLICY, which is what differs per file.
+        This journal repairs with a ``JOURNAL_REPAIR_EVENT`` row rather
+        than a bare pad, per "if it's worth deciding, it's worth
+        recording": the row is what ``ks evolve --status`` counts and an
+        operator greps months later, and it is durable where the logger
+        warning below is not, because the process that tore the file is
+        exactly the process whose stderr nobody kept.
 
         An empty append writes nothing, so it repairs nothing: there is
         no entry to protect and the next real append will do it.
-
-        ONE file description does the probe and the append, in
-        ``"a+b"``, and the repair row plus the whole batch go in ONE
-        ``write``. Neither is an optimisation. The single description is
-        what removes the window in which the path could be replaced or a
-        symlink retargeted between the two, and what makes a journal
-        this process cannot READ raise out of the open rather than being
-        probed as "not torn" and appended to blind; the single write is
-        what stops another appender landing between the newline that
-        isolates a torn fragment and the entries the repair was for. It
-        costs the text-mode ``encoding="utf-8"``, so the bytes are
-        encoded explicitly instead, which is the same two-sided contract
-        stated at the other end.
 
         Both are enforced by ``tests/test_journal_write_boundary.py``,
         which counts descriptors and writes. Round 2 of review on #327
@@ -1726,29 +2016,65 @@ class EvolutionJournal:
         not a mechanism.
 
         WHAT IS STILL NOT ATOMIC, precisely, because a docstring that
-        implied otherwise would be worse than no docstring. This takes
-        no lock, and #330 tracks that:
+        implied otherwise would be worse than no docstring.
 
-        1. Between this process's tail read and its write, another
-           process can append. If that other write is a complete line,
-           nothing is lost. If it crashed mid-line inside that window,
-           this append lands on the fragment and the pair is unreadable
-           - the #312 outcome, in the narrower window.
-        2. Two processes repairing one tear each write a newline and a
-           repair row, so a single incident can be recorded twice. Both
-           the blank line and the extra row are skipped by every reader
-           and counted by none.
-        3. O_APPEND makes each ``write`` land at the end, and the repair
-           row plus the whole batch go in ONE ``write`` so that another
-           appender cannot land between them. That is not a guarantee,
-           but not for the reason it is tempting to write down. Measured
-           on this interpreter: ``BufferedWriter`` hands a payload of
-           ANY size to the raw layer in one ``write(2)`` (100 bytes to
-           5 MB, one raw call each), so the split is not size-driven and
+        #330 listed three residuals of the unlocked probe-and-append.
+        This call now passes ``lock=True``, so ``appendio.appending``
+        holds ``fcntl.LOCK_EX`` on the journal's OWN descriptor across
+        the probe and the write, and all three are gone WHERE ``fcntl``
+        imports, which is POSIX. On a platform without it the helper
+        yields no exclusion and all three are exactly as listed. The
+        same degradation ``control_lock``, ``queue_lock`` and the
+        run-level factory lock already take.
+
+        The two-process measurement that decided this is on
+        :func:`appendio.appending`, where the lock lives, rather than
+        copied here: two copies of one measurement drift, and this
+        docstring is about which residuals close, not about the numbers
+        that showed they do.
+
+        1. A STALE PROBE. Between this process's tail read and its
+           write, another process could append; if that other write
+           crashed mid-line inside the window, this append landed on the
+           fragment and the pair was unreadable, which is the #312
+           outcome in a narrower window. The lock closes the window: no
+           other locked writer is between the probe and the write.
+        2. A DOUBLED REPAIR ROW. Two processes repairing one tear each
+           wrote a newline and a repair row, so one incident was
+           recorded twice. Both the blank line and the extra row are
+           skipped by every reader and counted by none, so this cost
+           :meth:`get_repair_count` accuracy and nothing else. The lock
+           makes the count exact: the second writer probes AFTER the
+           first has written, and finds a terminated file.
+        3. INTERLEAVED LINES. O_APPEND makes each ``write`` land at the
+           end, and the repair row plus the whole batch go in ONE
+           ``write`` so that another appender cannot land between them.
+           That was not a guarantee, but not for the reason it is
+           tempting to write down. Measured on this interpreter:
+           ``BufferedWriter`` hands a payload of ANY size to the raw
+           layer in one ``write(2)`` (100 bytes to 5 MB, one raw call
+           each), so the split is not size-driven and
            ``io.DEFAULT_BUFFER_SIZE`` is not the threshold. It loops
            only when the OS returns a SHORT write, which on a regular
-           file means a signal or ENOSPC. Rare, not impossible, and it
-           predates this change.
+           file means a signal or ENOSPC. Under the lock no other kstrl
+           writer can land in that loop.
+
+        WHAT THE LOCK DOES NOT COVER, in any case: a SHORT write inside
+        the one write (residual 4 below), an appender that does not take
+        the lock (a foreign process, or this one on a platform without
+        ``fcntl``), and the readers, which are tolerant and unlocked and
+        unchanged by this.
+
+        Deadlock ordering: this lock is a LEAF. ``append_entries`` calls
+        nothing that takes another kstrl lock. ``commit_transition``
+        calls ``state.save()``, which takes and RELEASES ``control_lock``
+        BEFORE the append rather than around it; ``record_run`` and
+        ``_record_contract_event`` run under the run-level factory lock,
+        which is a different file that nothing acquires while holding
+        this one. ``flock`` is per open file description and
+        :func:`appendio.appending` opens its own, so two threads in one
+        process serialize against each other too.
+
         4. The repair is not two-phase-safe either. There is no gap
            BETWEEN two calls, because there is only one call: the
            newline that isolates the fragment, the marker and the batch
@@ -1766,17 +2092,18 @@ class EvolutionJournal:
            ``test_a_terminated_but_malformed_tail_is_not_a_tear`` pins
            it, so it cannot quietly stop being true.
 
-        Neither 1 nor 3 is made worse by the probe: at cbdff7c the same
-        two writers produced the same interleaving with no probe at all.
+        Neither 1 nor 3 was made worse by the probe: at cbdff7c the
+        same two writers produced the same interleaving with no probe at
+        all.
         """
         path = self.config.journal_path
         path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "a+b") as handle:
-            repairing = bool(entries) and handle_ends_without_newline(handle)
-            payload = "".join(_journal_line(entry) for entry in entries)
-            if repairing:
-                payload = "\n" + _journal_line(_repair_entry()) + payload
-            handle.write(payload.encode("utf-8"))
+        repairing = append_records(
+            path,
+            "".join(_journal_line(entry) for entry in entries),
+            repair=_journal_line(_repair_entry()),
+            lock=True,
+        )
         if repairing:
             logger.warning(
                 "evolution journal did not end in a newline, so a crash tore it: "
