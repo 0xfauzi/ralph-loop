@@ -668,11 +668,14 @@ def _echo_journal_repairs(journal: EvolutionJournal, ui_impl: UI) -> None:
     all: a healthy journal that prints "0 repairs" every time teaches an
     operator to skip the line that matters.
 
-    Only ``ks evolve --status`` calls it. The evolve TUI screen renders
-    the same trends and stays silent about repairs, which is #333:
-    ``get_repair_count`` is click-free and on the journal, so that
-    screen can ask for itself, but claiming this helper serves the TUI
-    would be false. It lives in the click module.
+    Only ``ks evolve --status`` calls it, and that is still true after
+    #333: the evolve TUI screen reports repairs now, through
+    ``EvolveScreen._show_repairs``, which asks the journal for itself
+    because ``get_repair_count`` is click-free and on the journal. This
+    helper writes through ``UI`` in the click module and cannot be
+    reused as is, so the two are one measurement rendered twice rather
+    than two measurements, and the wording is deliberately the same on
+    both.
 
     Takes the journal and asks IT for the path, rather than being handed
     both: a count from one journal printed beside another one's path is

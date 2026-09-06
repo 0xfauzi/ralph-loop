@@ -309,6 +309,12 @@ EXPECTED_JOURNAL_PATH_SITES: dict[str, int] = {
     "evolution.py: config.journal_path": 5,
     "evolution.py: self.config.journal_path": 3,
     "pipeline.py: self.journal_path": 4,
+    # A READ, added by #333: the evolve screen names the torn file in
+    # its repair line, and it asks the journal it took the count from
+    # rather than being handed a path beside a count. The same shape as
+    # the ``cli.py`` row above, which is the same line on the other
+    # surface.
+    "tui/screens/evolve.py: journal.config.journal_path": 1,
     "workqueue.py: self.journal_path": 2,
 }
 
