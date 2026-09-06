@@ -46,6 +46,27 @@ stage, runtime feedback, and an earned-autonomy ladder). See
   to the ladder through `_as_int`, turning each one into a 0 without
   raising, so a run that never happened counted towards a promotion.
 
+- `experiments.tsv` is read on the dialect its writer writes. The reader
+  used `csv`'s default quoting against a writer that joins its fields on
+  a tab and never quotes or escapes, so a `"` at the start of any field
+  opened a quoted region that swallowed every byte to the next one: a
+  project named `"proj` hid every run recorded after it from
+  `ks evolve --status`, the TUI trends tab and `ks autonomy replay`, and
+  past 128 KiB of swallowed text it raised `_csv.Error` out of all three,
+  which is neither an `OSError` nor a `ValueError` and so escaped every
+  handler. Reading with `QUOTE_NONE` returns those runs. A field longer
+  than `csv`'s own limit is now a refusal the callers already handle:
+  `ks autonomy replay` names it and exits 2, and the trends tab logs it
+  and shows no runs rather than crashing the TUI.
+
+- An out-of-space error on the FIRST event of a run no longer leaves the
+  event log writing onto a torn tail. The sink probes and repairs the
+  tail once per run and then holds the handle open, and it bound that
+  handle before flushing: an event line is smaller than the 8 KiB buffer,
+  so a full disk surfaces at the flush and the sink was already bound and
+  in the no-probe branch when it did. The bind now happens only after the
+  first write and its flush both land.
+
 - `ks autonomy replay` names an unreadable `experiments.tsv` instead of
   reporting that the project has too little history. The reader returned
   no runs on a permission or a decode error, and no runs is the same
