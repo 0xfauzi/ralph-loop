@@ -702,9 +702,7 @@ class TestAutonomyReplayNamesAnUnreadableFile:
         assert "could not read the recorded run history" in result.output
         assert "INSUFFICIENT DATA" not in result.output
 
-    def test_a_field_over_the_csv_field_limit_reports_the_cause(
-        self, tmp_path: Path
-    ) -> None:
+    def test_a_field_over_the_csv_field_limit_reports_the_cause(self, tmp_path: Path) -> None:
         """#352 round 2, F1: ``_csv.Error`` is neither an ``OSError`` nor
         a ``ValueError``, so it escaped this handler as a traceback.
 
