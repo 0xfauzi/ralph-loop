@@ -36,6 +36,21 @@ touch "$FAKE_GH_MARKER_PATH"
 exit 99
 """
 
+#: Counts its own invocations in FAKE_GH_COUNT and succeeds on the
+#: third, so one loop can be driven through fail, fail, succeed, fail,
+#: fail. A streak that survives a good count is only observable inside
+#: ONE `serve` call, because `serve` builds its own streak per call.
+FAKE_GH_THIRD_CALL_WORKS = """#!/bin/sh
+n=$(cat "$FAKE_GH_COUNT" 2>/dev/null || echo 0)
+n=$((n + 1))
+echo "$n" > "$FAKE_GH_COUNT"
+if [ "$n" -eq 3 ]; then
+  cat "$FAKE_GH_JSON"
+else
+  exit 99
+fi
+"""
+
 #: Where `gh` is actually spawned. `count_open_kstrl_prs` goes through
 #: `intake_github.run_gh`, so patching `kstrl.serve.subprocess.run` would
 #: patch nothing and the tests would silently reach the real `gh`.

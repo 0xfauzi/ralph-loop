@@ -43,14 +43,13 @@ from kstrl.serve import (
     state_dir,
 )
 from kstrl.workqueue import ItemState
-from tests.helpers.fakegh import FAKE_GH as _FAKE_GH
-from tests.helpers.fakegh import FAKE_GH_MARKER as _FAKE_GH_MARKER
+from tests.helpers.fakegh import FAKE_GH_THIRD_CALL_WORKS as _FAKE_GH_THIRD_CALL_WORKS
 from tests.helpers.fakegh import GH_RUN as _GH_RUN
 from tests.helpers.fakegh import install_fake_gh as _install_fake_gh
 from tests.helpers.fakegh import install_marker_gh as _install_marker_gh
 from tests.helpers.fakegh import marked as _marked
+from tests.helpers.fakegh import put_gh_on_path as _put_gh_on_path
 from tests.test_serve import _add, _no_spend, _queue, _stub_runner  # noqa: F401
-from tests.test_serve_seam import _write_executable
 
 
 def _boom(_: Path) -> OpenPrCount:
@@ -478,31 +477,58 @@ class TestPersistentCountFailure:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Two failures, one success, two more failures: nothing filed.
+        """Fail, fail, SUCCEED, fail, fail inside ONE loop: nothing filed.
 
         The reset is what keeps an intermittent `gh` from filing on the
         strength of failures spread over an afternoon.
+
+        All five polls have to be one `serve` call. `serve` builds its
+        own streak per call, so three separate calls would pass with
+        `record_conclusive` deleted: the streak would reset because it
+        was thrown away, not because a count succeeded. That is the
+        vacuity this class exists to avoid, so the fake `gh` counts its
+        own invocations and succeeds on the third.
         """
-        marker_bin = tmp_path / "fakebin" / "gh"
-        _install_marker_gh(tmp_path, monkeypatch)
-        _add(_queue(tmp_path))
-
-        self._run(tmp_path, 2)
-        assert self._open_items(tmp_path) == []
-
+        counter_file = tmp_path / "gh_calls"
+        monkeypatch.setenv("FAKE_GH_COUNT", str(counter_file))
         payload = tmp_path / "ok.json"
         payload.write_text("[]", encoding="utf-8")
         monkeypatch.setenv("FAKE_GH_JSON", str(payload))
-        _write_executable(marker_bin, _FAKE_GH)
-        self._run(tmp_path, 1)
+        _put_gh_on_path(tmp_path, monkeypatch, _FAKE_GH_THIRD_CALL_WORKS)
+        _add(_queue(tmp_path))
 
-        _write_executable(marker_bin, _FAKE_GH_MARKER)
-        self._run(tmp_path, 2)
+        results = self._run(tmp_path, 5)
 
+        assert counter_file.read_text(encoding="utf-8").strip() == "5"
+        reasons = [r.skipped for r in results]
+        assert [("cannot count" in reason) for reason in reasons] == [
+            True,
+            True,
+            False,
+            True,
+            True,
+        ], reasons
         assert self._open_items(tmp_path) == [], "the streak did not reset on a good count"
 
+    def test_five_failures_in_one_loop_do_file(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The same five polls with no good count in the middle DO file.
+
+        Without this, the reset test above passes whenever nothing files
+        for any reason at all.
+        """
+        _install_marker_gh(tmp_path, monkeypatch)
+        _add(_queue(tmp_path))
+
+        self._run(tmp_path, 5)
+
+        assert len(self._open_items(tmp_path)) == 1
+
     def test_the_streak_object_files_once_and_resets(self) -> None:
-        """The unit, so the loop test above is not the only witness."""
+        """The unit, so the loop tests above are not the only witness."""
         streak = OpenPrCountStreak()
         assert [streak.should_file() for _ in range(3)] == [False, False, False]
 
