@@ -1699,7 +1699,7 @@ class ComponentPipeline:
         except (OSError, TypeError, ValueError, ControlStateError) as exc:
             # ControlStateError is a RuntimeError: Inbox._append takes
             # the control lock on every write, and the (OSError,
-            # ValueError) pair all six inbox sites were written with
+            # ValueError) pair all seven inbox sites were written with
             # does not catch what that lock raises. TypeError is
             # InboxConfig.load's per-key cast.
             self.ui.warn(f"  Inbox write failed (non-fatal): {exc}")

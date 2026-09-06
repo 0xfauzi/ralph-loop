@@ -459,8 +459,9 @@ class AutonomyState:
         ``autonomy.json``, rather than in the callers that remembered to
         ask: a branch-by-branch guard is only closed over the branches
         someone enumerated, and the branch an ordinary run takes was not
-        one of them. ``tests/test_autonomy_one_writer.py`` pins that this
-        is the only writer.
+        one of them. This method is the module's only call to
+        ``atomic_write_json`` and ``path_for`` its only path derivation,
+        both checkable by grep.
 
         Returns None when the file was written, and the refusal sentence
         when it was not, so a caller holding a ``UI`` can report it on
@@ -1061,8 +1062,8 @@ def apply_demotion(
         # catch it - and Inbox._append takes the control lock on every
         # write, which is where it comes from. TypeError is
         # InboxConfig.load's: it casts per key, so a TOML date or array
-        # in [inbox] raises it. Escaping HERE is the worst of the six
-        # sites, because commit_transition has already saved the
+        # in [inbox] raises it. Escaping HERE is the worst of the
+        # seven sites, because commit_transition has already saved the
         # demotion: the level would be revoked with no notice, no
         # DEMOTED line and a traceback in place of the caller's return.
         ui.warn(f"Inbox write failed (non-fatal): {exc}")
