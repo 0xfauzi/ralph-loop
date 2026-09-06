@@ -348,7 +348,10 @@ class TestTheRepairIsReportable:
 
     def test_the_count_is_of_rows_not_of_incidents(self, tmp_path: Path) -> None:
         """What ``get_repair_count`` promises, and no more. Two tears
-        are two rows; #330 is the case where one tear becomes two."""
+        are two rows. One tear becoming TWO rows was #330's residual 2,
+        and the lock ``append_entries`` now takes closes it wherever
+        ``fcntl`` imports; ``tests/test_journal_lock.py`` is where that
+        is measured, with concurrent writers this file never starts."""
         journal = journal_at(tmp_path)
         journal.append_entries([audit("alpha")])
         tear(journal.config.journal_path)

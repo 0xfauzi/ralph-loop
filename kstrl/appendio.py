@@ -190,13 +190,24 @@ def appending(path: Path, *, lock: bool = False) -> Iterator[IO[bytes]]:
     process serialize against each other too.
 
     MEASURED, two processes x 150 appends of 200 KB lines with 74 torn
-    fragments planted between them: without the lock 267 of 300 records
-    were readable and 83 repair rows were written for 74 tears; with it
-    300 of 300 and exactly 74 rows, 0.14 s against 0.16 s. All three
-    residuals #330 lists (a stale probe, a doubled repair row,
-    interleaved lines) go in one change. What is left is a SHORT write
-    inside the one write, a foreign appender that does not lock, and
-    readers, which are tolerant and unlocked and unchanged.
+    fragments planted between them, eight runs of each arm: without the
+    lock 244 to 269 of 300 records were readable and 76 to 86 repair
+    rows were written for 74 tears; with it 300 of 300 and exactly 74
+    rows on every run. 0.08 to 0.11 s against 0.11 to 0.14 s. The
+    unlocked loss varies by 25 records run to run, which is why the
+    range is quoted rather than a single figure. All three residuals
+    #330 lists (a stale probe, a doubled repair row, interleaved lines)
+    go in one change. What is left is a SHORT write inside the one
+    write, a foreign appender that does not lock, and readers, which are
+    tolerant and unlocked and unchanged.
+
+    Only ``evolution.EvolutionJournal.append_entries`` asks for the lock
+    today. The other six appendio callers either hold an outer lock
+    already (``inbox`` under ``control_lock``, ``workqueue`` under the
+    caller's ``queue_lock``) or have one writer process per file
+    (``progress.jsonl``, ``events.jsonl``, ``engineer.jsonl``, the E8
+    telemetry log, ``experiments.tsv``), and each says which at its call
+    site.
     """
     handle = open_for_append(path)
     try:

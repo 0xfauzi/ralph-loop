@@ -1623,9 +1623,13 @@ class EvolutionJournal:
         logger warning goes to orchestrator.log under the TUI. ``ks
         evolve --status`` prints this when it is non-zero.
 
-        Counts rows, not incidents: :meth:`append_entries` residual 2
-        is how one tear can produce two, and residual 4 is how a repair
-        can happen and not be counted, so this is a lower bound. A
+        Counts rows, not incidents. Residual 4 of
+        :meth:`append_entries` is how a repair can happen and not be
+        counted, so this is a lower bound. It is no longer an UPPER
+        bound too: #330's residual 2, two processes each writing a row
+        for one tear, is closed under ``fcntl`` by the lock the append
+        takes, so one row is one tear on POSIX and two rows for one tear
+        remain possible only on a platform with no ``fcntl``. A
         non-zero count means at least one crash left an unterminated
         tail. It does NOT mean a record was lost: the line above each
         row is either a fragment that was never readable or a whole
@@ -1750,29 +1754,65 @@ class EvolutionJournal:
         not a mechanism.
 
         WHAT IS STILL NOT ATOMIC, precisely, because a docstring that
-        implied otherwise would be worse than no docstring. This takes
-        no lock, and #330 tracks that:
+        implied otherwise would be worse than no docstring.
 
-        1. Between this process's tail read and its write, another
-           process can append. If that other write is a complete line,
-           nothing is lost. If it crashed mid-line inside that window,
-           this append lands on the fragment and the pair is unreadable
-           - the #312 outcome, in the narrower window.
-        2. Two processes repairing one tear each write a newline and a
-           repair row, so a single incident can be recorded twice. Both
-           the blank line and the extra row are skipped by every reader
-           and counted by none.
-        3. O_APPEND makes each ``write`` land at the end, and the repair
-           row plus the whole batch go in ONE ``write`` so that another
-           appender cannot land between them. That is not a guarantee,
-           but not for the reason it is tempting to write down. Measured
-           on this interpreter: ``BufferedWriter`` hands a payload of
-           ANY size to the raw layer in one ``write(2)`` (100 bytes to
-           5 MB, one raw call each), so the split is not size-driven and
+        #330 listed three residuals of the unlocked probe-and-append.
+        This call now passes ``lock=True``, so ``appendio.appending``
+        holds ``fcntl.LOCK_EX`` on the journal's OWN descriptor across
+        the probe and the write, and all three are gone WHERE ``fcntl``
+        imports, which is POSIX. On a platform without it the helper
+        yields no exclusion and all three are exactly as listed. The
+        same degradation ``control_lock``, ``queue_lock`` and the
+        run-level factory lock already take.
+
+        MEASURED, two processes x 150 appends of 200 KB lines with 74
+        torn fragments planted between them, eight runs of each arm:
+        unlocked, 244 to 269 of 300 records readable and 76 to 86 repair
+        rows for 74 tears; locked, 300 of 300 and exactly 74 rows every
+        run. 0.08 to 0.11 s against 0.11 to 0.14 s.
+
+        1. A STALE PROBE. Between this process's tail read and its
+           write, another process could append; if that other write
+           crashed mid-line inside the window, this append landed on the
+           fragment and the pair was unreadable, which is the #312
+           outcome in a narrower window. The lock closes the window: no
+           other locked writer is between the probe and the write.
+        2. A DOUBLED REPAIR ROW. Two processes repairing one tear each
+           wrote a newline and a repair row, so one incident was
+           recorded twice. Both the blank line and the extra row are
+           skipped by every reader and counted by none, so this cost
+           :meth:`get_repair_count` accuracy and nothing else. The lock
+           makes the count exact: the second writer probes AFTER the
+           first has written, and finds a terminated file.
+        3. INTERLEAVED LINES. O_APPEND makes each ``write`` land at the
+           end, and the repair row plus the whole batch go in ONE
+           ``write`` so that another appender cannot land between them.
+           That was not a guarantee, but not for the reason it is
+           tempting to write down. Measured on this interpreter:
+           ``BufferedWriter`` hands a payload of ANY size to the raw
+           layer in one ``write(2)`` (100 bytes to 5 MB, one raw call
+           each), so the split is not size-driven and
            ``io.DEFAULT_BUFFER_SIZE`` is not the threshold. It loops
            only when the OS returns a SHORT write, which on a regular
-           file means a signal or ENOSPC. Rare, not impossible, and it
-           predates this change.
+           file means a signal or ENOSPC. Under the lock no other kstrl
+           writer can land in that loop.
+
+        WHAT THE LOCK DOES NOT COVER, in any case: a SHORT write inside
+        the one write (residual 4 below), an appender that does not take
+        the lock (a foreign process, or this one on a platform without
+        ``fcntl``), and the readers, which are tolerant and unlocked and
+        unchanged by this.
+
+        Deadlock ordering: this lock is a LEAF. ``append_entries`` calls
+        nothing that takes another kstrl lock. ``commit_transition``
+        calls ``state.save()``, which takes and RELEASES ``control_lock``
+        BEFORE the append rather than around it; ``record_run`` and
+        ``_record_contract_event`` run under the run-level factory lock,
+        which is a different file that nothing acquires while holding
+        this one. ``flock`` is per open file description and
+        :func:`appendio.appending` opens its own, so two threads in one
+        process serialize against each other too.
+
         4. The repair is not two-phase-safe either. There is no gap
            BETWEEN two calls, because there is only one call: the
            newline that isolates the fragment, the marker and the batch
@@ -1790,8 +1830,9 @@ class EvolutionJournal:
            ``test_a_terminated_but_malformed_tail_is_not_a_tear`` pins
            it, so it cannot quietly stop being true.
 
-        Neither 1 nor 3 is made worse by the probe: at cbdff7c the same
-        two writers produced the same interleaving with no probe at all.
+        Neither 1 nor 3 was made worse by the probe: at cbdff7c the
+        same two writers produced the same interleaving with no probe at
+        all.
         """
         path = self.config.journal_path
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -1799,6 +1840,7 @@ class EvolutionJournal:
             path,
             "".join(_journal_line(entry) for entry in entries),
             repair=_journal_line(_repair_entry()),
+            lock=True,
         )
         if repairing:
             logger.warning(
