@@ -7,116 +7,74 @@ every cheaper local gate has already admitted. The second half is not
 decoration. The gates tuple in `serve_cycle` is built eagerly, so a
 member of it runs even when an earlier member refuses; that is why this
 gate is a standalone check after the factory lock rather than a fifth
-tuple entry, and `test_no_gh_call_when_an_earlier_gate_refuses` is the
-control that keeps it there.
+tuple entry, and `TestGateOrderIsCost` is what keeps it there - one
+arrangement per boundary the ordering claims, and a positive control
+first, because `assert not marker.exists()` also passes when the fake
+`gh` was never reachable.
 
-The counter is exercised end to end through a fake `gh` on PATH rather
-than a patched `subprocess.run` wherever the subprocess and the JSON
-parse are part of what is being asserted.
+What a payload MEANS, and what counts as a kstrl-authored pull request,
+is `tests/test_open_pr_counter.py`. This file is what the daemon does
+with the answer.
 """
 
 from __future__ import annotations
 
-import json
-import os
-import subprocess
+import fcntl
+from collections.abc import Callable
 from pathlib import Path
-from subprocess import CompletedProcess
 from unittest.mock import patch
 
 import pytest
 from click.testing import CliRunner
 
-import kstrl.pr
 from kstrl.cli import cli
-from kstrl.pr import GH_TIMEOUT, PR_FOOTER_MARKER
+from kstrl.inbox import Inbox, InboxConfig, ItemKind
 from kstrl.serve import (
+    CycleResult,
+    OpenPrCount,
+    OpenPrCountStreak,
     RunOutcome,
     ServeConfig,
     ServeError,
     SpendLedger,
     check_open_pr_bound,
-    count_open_kstrl_prs,
+    serve,
     serve_cycle,
+    state_dir,
 )
 from kstrl.workqueue import ItemState
-from tests.helpers.astwalk import assert_census, folds_to, package_sources
+from tests.helpers.fakegh import FAKE_GH as _FAKE_GH
+from tests.helpers.fakegh import FAKE_GH_MARKER as _FAKE_GH_MARKER
+from tests.helpers.fakegh import GH_RUN as _GH_RUN
+from tests.helpers.fakegh import install_fake_gh as _install_fake_gh
+from tests.helpers.fakegh import install_marker_gh as _install_marker_gh
+from tests.helpers.fakegh import marked as _marked
 from tests.test_serve import _add, _no_spend, _queue, _stub_runner  # noqa: F401
 from tests.test_serve_seam import _write_executable
 
-#: Emits whatever JSON the test put in FAKE_GH_JSON. The real
-#: `count_open_kstrl_prs` runs against it, subprocess and json.loads
-#: included, so a change to the argv or the parse is caught here.
-_FAKE_GH = """#!/bin/sh
-cat "$FAKE_GH_JSON"
-"""
 
-#: Records that it ran, then fails. A test that asserts GitHub was NOT
-#: reached needs the fake to be observable when it IS reached, and an
-#: exit code the counter cannot mistake for a count.
-_FAKE_GH_MARKER = """#!/bin/sh
-touch "$FAKE_GH_MARKER_PATH"
-exit 99
-"""
+def _boom(_: Path) -> OpenPrCount:
+    """A counter the gate must not call.
 
-
-def _boom(_: Path) -> int:
-    """A counter that fails the test if the gate calls it."""
+    It raises, and the gate converts ANY exception from the counter into
+    a refusal, so the failure surfaces as `assert admission.allowed`
+    going red rather than as the AssertionError itself.
+    """
     raise AssertionError("the counter was called; the gate should have skipped it")
 
 
-def _put_gh_on_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: str) -> None:
-    """Make ``body`` the `gh` that a PATH lookup finds.
-
-    PATH rather than patching `subprocess.run`, so the lookup, the
-    process and the decode are all the real ones.
-    """
-    bindir = tmp_path / "fakebin"
-    bindir.mkdir(exist_ok=True)
-    _write_executable(bindir / "gh", body)
-    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
+def _counts(count: int, *, saturated: bool = False) -> Callable[[Path], OpenPrCount]:
+    """A counter seam that reports ``count``, page full or not."""
+    return lambda _: OpenPrCount(count=count, saturated=saturated)
 
 
-def _install_fake_gh(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    rows: list[dict[str, object]],
-) -> Path:
-    """A `gh` that prints ``rows``; returns the JSON file it reads.
+def _raises(exc: BaseException) -> Callable[[Path], OpenPrCount]:
+    """A counter seam that fails with ``exc``."""
 
-    Rewrite the returned file to change what the next call sees.
-    """
-    _put_gh_on_path(tmp_path, monkeypatch, _FAKE_GH)
-    payload = tmp_path / "fake_gh.json"
-    payload.write_text(json.dumps(rows), encoding="utf-8")
-    monkeypatch.setenv("FAKE_GH_JSON", str(payload))
-    return payload
+    def counter(_: Path) -> OpenPrCount:
+        raise exc
 
-
-def _install_marker_gh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """A `gh` that touches a marker and exits 99; returns the marker."""
-    _put_gh_on_path(tmp_path, monkeypatch, _FAKE_GH_MARKER)
-    marker = tmp_path / "gh_was_called"
-    monkeypatch.setenv("FAKE_GH_MARKER_PATH", str(marker))
-    return marker
-
-
-#: Where `gh` is actually spawned. `count_open_kstrl_prs` goes through
-#: `intake_github.run_gh`, so patching `kstrl.serve.subprocess.run` would
-#: patch nothing and the tests would silently reach the real `gh`.
-_GH_RUN = "kstrl.intake_github.subprocess.run"
-
-
-def _completed(returncode: int, *, stdout: str = "", stderr: str = "") -> CompletedProcess[str]:
-    return CompletedProcess(args=["gh"], returncode=returncode, stdout=stdout, stderr=stderr)
-
-
-def _marked(number: int) -> dict[str, object]:
-    return {"number": number, "body": f"Some body\n\n---\n{PR_FOOTER_MARKER}"}
-
-
-def _unmarked(number: int) -> dict[str, object]:
-    return {"number": number, "body": "A hand-written PR body"}
+    return counter
 
 
 # ---------------------------------------------------------------------------
@@ -153,7 +111,7 @@ class TestCheckOpenPrBound:
         admission = check_open_pr_bound(
             ServeConfig(max_open_prs=1),
             tmp_path,
-            counter=lambda _: 0,
+            counter=_counts(0),
         )
         assert admission.allowed
         assert admission.reason == "0 of 1 kstrl PRs open"
@@ -167,7 +125,7 @@ class TestCheckOpenPrBound:
         admission = check_open_pr_bound(
             ServeConfig(max_open_prs=1),
             tmp_path,
-            counter=lambda _: 1,
+            counter=_counts(1),
         )
 
         assert admission.allowed is False
@@ -181,21 +139,17 @@ class TestCheckOpenPrBound:
         admission = check_open_pr_bound(
             ServeConfig(max_open_prs=2),
             tmp_path,
-            counter=lambda _: 5,
+            counter=_counts(5),
         )
         assert admission.allowed is False
         assert "5 kstrl PR(s) open" in admission.reason
 
     def test_counter_failure_refuses(self, tmp_path: Path) -> None:
         """An unknown number of open PRs is not zero."""
-
-        def failing(_: Path) -> int:
-            raise RuntimeError("gh: not found")
-
         admission = check_open_pr_bound(
             ServeConfig(max_open_prs=1),
             tmp_path,
-            counter=failing,
+            counter=_raises(RuntimeError("gh: not found")),
         )
 
         assert admission.allowed is False
@@ -203,85 +157,118 @@ class TestCheckOpenPrBound:
         assert "gh: not found" in admission.reason
         assert admission.pause_reason == ""
 
+    def test_a_saturated_page_under_the_bound_refuses(self, tmp_path: Path) -> None:
+        """A full page makes a low count a lower bound, not a count.
 
-# ---------------------------------------------------------------------------
-# The counter
-# ---------------------------------------------------------------------------
+        `gh pr list` returns the newest `--limit` rows, so on a
+        repository with more open PRs than that an unmerged kstrl PR can
+        sit outside the window. Admitting on "0 of 1" there would switch
+        the bound off in exactly the condition it exists for.
+        """
+        admission = check_open_pr_bound(
+            ServeConfig(max_open_prs=1),
+            tmp_path,
+            counter=_counts(0, saturated=True),
+        )
 
+        assert admission.allowed is False
+        assert admission.pause_reason == ""
+        assert "cannot count" in admission.reason
+        assert "lower bound" in admission.reason
 
-class TestCountOpenKstrlPrs:
-    def test_filters_by_marker(self, tmp_path: Path) -> None:
-        rows = [_marked(1), _unmarked(2), _marked(3)]
+    def test_a_saturated_page_at_the_bound_still_refuses_on_the_bound(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """The conclusive direction keeps the ordinary reason.
 
-        with patch(_GH_RUN, return_value=_completed(0, stdout=json.dumps(rows))) as run:
-            assert count_open_kstrl_prs(tmp_path) == 2
+        Rows outside the window can only ADD to the count, so a count
+        already at the bound is a fact even on a full page. Refusing here
+        with "cannot count" would tell an operator to fix `gh` when the
+        actual answer is "merge the pull request".
+        """
+        admission = check_open_pr_bound(
+            ServeConfig(max_open_prs=1),
+            tmp_path,
+            counter=_counts(3, saturated=True),
+        )
 
-        assert run.call_args.args[0] == [
-            "gh",
-            "pr",
-            "list",
-            "--state",
-            "open",
-            "--limit",
-            "100",
-            "--json",
-            "number,body",
-        ]
-        assert run.call_args.kwargs["timeout"] == GH_TIMEOUT
-        assert run.call_args.kwargs["cwd"] == str(tmp_path)
+        assert admission.allowed is False
+        assert "3 kstrl PR(s) open (bound 1)" in admission.reason
+        assert "cannot count" not in admission.reason
 
-    def test_limit_reaches_the_argv(self, tmp_path: Path) -> None:
-        with patch(_GH_RUN, return_value=_completed(0, stdout="[]")) as run:
-            assert count_open_kstrl_prs(tmp_path, limit=7) == 0
-        assert "7" in run.call_args.args[0]
+    def test_a_bad_factory_section_refuses_instead_of_crashing(self, tmp_path: Path) -> None:
+        """`FactoryConfig.load` is inside the guard, not beside it.
+
+        The daemon re-reads `[factory]` every poll while only `ks serve`
+        startup validates it, so an operator editing `kstrl.toml` under a
+        running daemon used to kill the loop with a ValueError traceback.
+        """
+        (tmp_path / "kstrl.toml").write_text(
+            '[factory]\nmax_parallel = "two"\n',
+            encoding="utf-8",
+        )
+
+        admission = check_open_pr_bound(
+            ServeConfig(max_open_prs=1),
+            tmp_path,
+            counter=_counts(0),
+        )
+
+        assert admission.allowed is False
+        assert "cannot count open kstrl PRs" in admission.reason
+        assert "two" in admission.reason
 
     @pytest.mark.parametrize(
-        ("patch_kwargs", "match"),
+        "exc",
         [
-            ({"return_value": _completed(1, stderr="gh: auth required\n")}, "auth required"),
-            (
-                {"side_effect": subprocess.TimeoutExpired(cmd=["gh"], timeout=GH_TIMEOUT)},
-                "timed out",
-            ),
-            ({"side_effect": FileNotFoundError("gh")}, "could not run"),
-            ({"return_value": _completed(0, stdout="not json")}, "unparseable"),
-            ({"return_value": _completed(0, stdout='{"number": 1}')}, "expected a list"),
+            UnicodeDecodeError("ascii", b"\xe2\x80\x99", 0, 1, "ordinal not in range"),
+            RecursionError("maximum recursion depth exceeded"),
+            KeyError("body"),
         ],
-        ids=["gh error", "timeout", "exec failed", "unparseable", "non-list payload"],
+        ids=["decode", "recursion", "key"],
     )
-    def test_every_failure_shape_raises(
+    def test_every_non_count_outcome_refuses(self, tmp_path: Path, exc: BaseException) -> None:
+        """`except Exception`, not an enumeration of what is reachable.
+
+        `UnicodeDecodeError` escapes `run_gh`'s locale decode (it is a
+        ValueError, and `run_gh` catches OSError and TimeoutExpired);
+        `RecursionError` escapes `json.loads`'s `except ValueError` and
+        only landed in the old handler because it happens to subclass
+        RuntimeError. Enumerating the types believed reachable is the
+        defect, not the precaution (#318).
+        """
+        admission = check_open_pr_bound(
+            ServeConfig(max_open_prs=1),
+            tmp_path,
+            counter=_raises(exc),
+        )
+
+        assert admission.allowed is False
+        assert "cannot count open kstrl PRs" in admission.reason
+
+    def test_a_decode_failure_in_the_real_counter_refuses(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        patch_kwargs: dict[str, object],
-        match: str,
     ) -> None:
-        """Each failure the counter can meet becomes a RuntimeError.
+        """The same escape through the production path, not the seam.
 
-        `shutil.which` is pinned so these say the same thing on a machine
-        with no `gh`; the missing-binary case is its own test below.
+        `run_gh` calls `subprocess.run(text=True)` with no `encoding=`,
+        so the decode uses the locale and is strict; under `LC_ALL=C
+        PYTHONUTF8=0 PYTHONCOERCECLOCALE=0` one curly quote in any PR
+        body raises. `UnicodeDecodeError` is a ValueError, so it escaped
+        `run_gh`, escaped the counter, escaped the gate, and exited a
+        daemon that has no per-cycle handler.
         """
         monkeypatch.setattr("shutil.which", lambda _: "/usr/bin/gh")
-        with patch(_GH_RUN, **patch_kwargs), pytest.raises(RuntimeError, match=match):
-            count_open_kstrl_prs(tmp_path)
+        decode_error = UnicodeDecodeError("ascii", b"\xe2\x80\x99", 0, 1, "not in range(128)")
 
-    def test_raises_when_gh_is_not_installed(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        monkeypatch.setattr("shutil.which", lambda _: None)
-        with pytest.raises(RuntimeError, match="not installed"):
-            count_open_kstrl_prs(tmp_path)
+        with patch(_GH_RUN, side_effect=decode_error):
+            admission = check_open_pr_bound(ServeConfig(max_open_prs=1), tmp_path)
 
-    def test_counts_through_a_real_subprocess(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """End to end: PATH lookup, process, stdout, decode, filter."""
-        _install_fake_gh(tmp_path, monkeypatch, [_marked(1), _unmarked(2)])
-        assert count_open_kstrl_prs(tmp_path) == 1
+        assert admission.allowed is False
+        assert "cannot count open kstrl PRs" in admission.reason
 
 
 # ---------------------------------------------------------------------------
@@ -325,37 +312,210 @@ class TestServeCycleGate:
         assert result.skipped == ""
         assert len(calls) == 1
 
-    def test_no_gh_call_when_an_earlier_gate_refuses(
+
+class TestGateOrderIsCost:
+    """Every boundary the ordering claims, and the control that proves the fake works.
+
+    `assert not marker.exists()` on its own is not a control: it passes
+    when the gate is correctly ordered AND when the fake `gh` was never
+    reachable at all, which is the same shape as the defect. So the
+    positive control comes first, in the same class, with the same fake
+    on the same PATH. Two measured mutations made the old single
+    assertion vacuous: writing the fake where PATH never looks, and
+    making the fake stop touching its marker; both left the suite green.
+
+    Three boundaries, because the docstring claims three. The budget
+    gate is a member of the eagerly-built `gates` tuple; the inbox cap
+    and the factory lock are the two checks inside
+    `_wait_gate_refusal` that run before the bound. Moving the bound
+    first inside that function left all 308 tests green before this.
+    """
+
+    def _cycle(self, tmp_path: Path, config: ServeConfig | None = None) -> CycleResult:
+        _add(_queue(tmp_path))
+        return serve_cycle(
+            tmp_path,
+            config=config or ServeConfig(max_open_prs=1),
+            runner=_stub_runner(RunOutcome(0)),
+        )
+
+    def test_the_fake_gh_is_reached_when_every_earlier_gate_admits(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """The order property, asserted on the syscall rather than on prose.
+        """POSITIVE CONTROL for the three negative assertions below.
 
-        The gates tuple is built eagerly, so membership of it would run
-        this gate even behind a refusing budget. The fake `gh` records
-        that it ran; with the budget already spent, it must not have.
+        Nothing refuses before the bound here, so the fake must run. If
+        this goes red the fake is unreachable and every `not
+        marker.exists()` in this class is measuring nothing.
         """
+        marker = _install_marker_gh(tmp_path, monkeypatch)
+
+        result = self._cycle(tmp_path)
+
+        assert marker.exists(), "the fake gh is not on PATH; the negative tests are vacuous"
+        assert "cannot count" in result.skipped
+
+    def test_no_gh_call_when_the_budget_gate_refuses(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The eager `gates` tuple: membership of it would call gh anyway."""
         marker = _install_marker_gh(tmp_path, monkeypatch)
         (tmp_path / "kstrl.toml").write_text(
             "[serve]\ndaily_budget_usd = 5.0\nallow_uncovered_cost = true\n",
             encoding="utf-8",
         )
         SpendLedger(tmp_path).charge(10.0, covered_calls=1, total_calls=1)
-        _add(_queue(tmp_path))
 
-        result = serve_cycle(
+        result = self._cycle(
             tmp_path,
-            config=ServeConfig(
-                max_open_prs=1,
-                daily_budget_usd=5.0,
-                allow_uncovered_cost=True,
-            ),
-            runner=_stub_runner(RunOutcome(0)),
+            ServeConfig(max_open_prs=1, daily_budget_usd=5.0, allow_uncovered_cost=True),
         )
 
         assert "daily budget reached" in result.skipped
         assert not marker.exists(), "the open-PR gate reached gh behind a refusing budget gate"
+
+    def test_no_gh_call_when_the_inbox_cap_refuses(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """First of the two checks inside `_wait_gate_refusal`."""
+        marker = _install_marker_gh(tmp_path, monkeypatch)
+        (tmp_path / "kstrl.toml").write_text(
+            "[inbox]\nopen_item_cap = 1\n",
+            encoding="utf-8",
+        )
+        Inbox(tmp_path, InboxConfig.load(tmp_path)).add(ItemKind.HALTED_RUN, "already full")
+
+        result = self._cycle(tmp_path)
+
+        assert "open-item cap" in result.skipped
+        assert not marker.exists(), "the open-PR gate reached gh behind a full inbox"
+
+    def test_no_gh_call_when_the_factory_lock_is_held(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Second of the two, and a real flock rather than a patch."""
+        marker = _install_marker_gh(tmp_path, monkeypatch)
+        lock_path = state_dir(tmp_path) / "factory.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(lock_path, "a+", encoding="utf-8") as held:
+            fcntl.flock(held.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            result = self._cycle(tmp_path)
+
+        assert "already holds" in result.skipped
+        assert not marker.exists(), "the open-PR gate reached gh behind a held factory lock"
+
+
+# ---------------------------------------------------------------------------
+# A count that never works
+# ---------------------------------------------------------------------------
+
+
+class TestPersistentCountFailure:
+    """A wait is right for a condition that clears itself, and wrong here.
+
+    An expired `gh` token and a `gh` missing from launchd's PATH are the
+    two failures an unattended daemon actually meets, and neither ever
+    clears. Before this the daemon waited on them forever while every
+    surface an operator checks read healthy: the queue unpaused, `ks
+    inbox` empty, `needs_human` False, the exit code 0, and one WARN
+    line per poll in `serve.err.log` as the only evidence anywhere.
+    """
+
+    def _run(self, tmp_path: Path, cycles: int) -> list[CycleResult]:
+        return serve(
+            tmp_path,
+            config=ServeConfig(max_open_prs=1),
+            runner=_stub_runner(RunOutcome(0)),
+            max_cycles=cycles,
+            sleeper=lambda _: None,
+        )
+
+    def _open_items(self, tmp_path: Path) -> list[object]:
+        return Inbox(tmp_path, InboxConfig.load(tmp_path)).open_items()
+
+    def test_two_failures_file_nothing(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Under the threshold is still a wait; a rate limit clears itself."""
+        _install_marker_gh(tmp_path, monkeypatch)
+        _add(_queue(tmp_path))
+
+        results = self._run(tmp_path, 2)
+
+        assert all("cannot count" in r.skipped for r in results)
+        assert self._open_items(tmp_path) == []
+        assert not any(r.needs_human for r in results)
+
+    def test_three_failures_file_exactly_one_item(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _install_marker_gh(tmp_path, monkeypatch)
+        _add(_queue(tmp_path))
+
+        results = self._run(tmp_path, 6)
+
+        items = self._open_items(tmp_path)
+        assert len(items) == 1, "one item per streak, not one per poll"
+        assert items[0].kind is ItemKind.HALTED_RUN  # type: ignore[attr-defined]
+        assert items[0].occurrences == 1  # type: ignore[attr-defined]
+        assert "cannot count" in items[0].detail  # type: ignore[attr-defined]
+        assert [r.needs_human for r in results] == [False, False, True, False, False, False]
+
+    def test_a_successful_count_resets_the_streak(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Two failures, one success, two more failures: nothing filed.
+
+        The reset is what keeps an intermittent `gh` from filing on the
+        strength of failures spread over an afternoon.
+        """
+        marker_bin = tmp_path / "fakebin" / "gh"
+        _install_marker_gh(tmp_path, monkeypatch)
+        _add(_queue(tmp_path))
+
+        self._run(tmp_path, 2)
+        assert self._open_items(tmp_path) == []
+
+        payload = tmp_path / "ok.json"
+        payload.write_text("[]", encoding="utf-8")
+        monkeypatch.setenv("FAKE_GH_JSON", str(payload))
+        _write_executable(marker_bin, _FAKE_GH)
+        self._run(tmp_path, 1)
+
+        _write_executable(marker_bin, _FAKE_GH_MARKER)
+        self._run(tmp_path, 2)
+
+        assert self._open_items(tmp_path) == [], "the streak did not reset on a good count"
+
+    def test_the_streak_object_files_once_and_resets(self) -> None:
+        """The unit, so the loop test above is not the only witness."""
+        streak = OpenPrCountStreak()
+        assert [streak.should_file() for _ in range(3)] == [False, False, False]
+
+        for _ in range(3):
+            streak.record_inconclusive()
+        assert streak.should_file() is True
+        assert streak.should_file() is False, "a streak files once, not once per poll"
+
+        streak.record_conclusive()
+        assert streak.consecutive == 0
+        for _ in range(3):
+            streak.record_inconclusive()
+        assert streak.should_file() is True, "a new streak after a recovery files again"
 
 
 # ---------------------------------------------------------------------------
@@ -429,47 +589,3 @@ class TestConfig:
         (tmp_path / "kstrl.toml").write_text("[serve]\nmax_open_prs = -1\n", encoding="utf-8")
         with pytest.raises(ServeError, match="max_open_prs must be >= 0"):
             ServeConfig.load(tmp_path)
-
-
-# ---------------------------------------------------------------------------
-# The marker constant
-# ---------------------------------------------------------------------------
-
-
-#: The marker is spelled ONCE in ``kstrl/``: the constant's own
-#: definition. Anything else is a second spelling, which is the drift the
-#: hoist exists to prevent - a reader in another module reaches for the
-#: nearest spelling, and a footer reword then makes the bound count zero
-#: while every test stays green.
-EXPECTED_MARKER_SPELLINGS: dict[str, int] = {"pr.py": 1}
-
-
-class TestFooterMarker:
-    def test_the_marker_is_spelled_once_in_the_package(self) -> None:
-        """Layer 1, the net: every expression in ``kstrl/`` that folds to
-        the marker, counted per module, whatever it does with the string
-        afterwards. Package-wide rather than scoped to ``pr.py``, because
-        the modules that will grow a second spelling are the READERS -
-        this bound, the dampener, the polled steering channel (#231) -
-        and a guard that only reads ``pr.py`` cannot see them."""
-        assert_census(
-            sources=package_sources(),
-            sees=folds_to(PR_FOOTER_MARKER),
-            expected=EXPECTED_MARKER_SPELLINGS,
-            control=f'footer = "{PR_FOOTER_MARKER}"\n',
-            message=(
-                "The set of places spelling the kstrl PR footer changed. A "
-                "reader identifying a kstrl-authored PR must import "
-                "PR_FOOTER_MARKER from kstrl.pr, not repeat the literal: the "
-                "open-PR bound counts bodies containing it, so a second "
-                "spelling that drifts makes the count silently zero."
-            ),
-        )
-
-    def test_both_footer_sites_use_the_constant(self) -> None:
-        """Layer 2, the message: ``pr.py``'s two writers still go through
-        the constant. The census above cannot say this - deleting a
-        footer site leaves the spelling count at 1 - and "you wrote the
-        footer without the constant" is the wrong message for it."""
-        source = Path(kstrl.pr.__file__).read_text(encoding="utf-8")
-        assert source.count("lines.append(PR_FOOTER_MARKER)") == 2

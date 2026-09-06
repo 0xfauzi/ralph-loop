@@ -78,11 +78,12 @@ EXPECTED_RUNTIMEERROR_SPELLINGS: dict[str, int] = {
     "inbox.py": 1,
     "intake_github.py": 1,
     "pr.py": 4,  # no subclass: four bare raises
-    # One bare raise, plus four from the R10.7 open-PR bound (#228):
-    # count_open_kstrl_prs raises for a failed gh result and for each of
-    # the two bad-payload shapes, and check_open_pr_bound catches that
-    # one type. The transport failures belong to run_gh, so they are
-    # counted against intake_github.py, not here.
+    # One bare raise, plus four from the R10.7 open-PR bound (#228), all
+    # in count_open_kstrl_prs: a failed gh result, the two bad-payload
+    # shapes, and a row that is not a PR record. check_open_pr_bound
+    # catches `Exception`, not `RuntimeError`, so it contributes none.
+    # The transport failures belong to run_gh, counted against
+    # intake_github.py rather than here.
     "serve.py": 5,
     "statedir.py": 2,  # two subclasses
     "workqueue.py": 1,

@@ -287,7 +287,12 @@ def no_open_prs(monkeypatch: pytest.MonkeyPatch) -> None:
     NOT autouse: ``tests/test_flow_control.py`` asserts the bound's real
     behaviour, including the counter, and must not be stubbed out.
     """
-    monkeypatch.setattr("kstrl.serve.count_open_kstrl_prs", lambda root: 0)
+    from kstrl.serve import OpenPrCount
+
+    monkeypatch.setattr(
+        "kstrl.serve.count_open_kstrl_prs",
+        lambda root: OpenPrCount(count=0, saturated=False),
+    )
 
 
 # ---------------------------------------------------------------------------
