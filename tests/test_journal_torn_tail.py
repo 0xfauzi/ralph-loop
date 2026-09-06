@@ -162,7 +162,7 @@ class TestWhatIsNotATear:
         after = path.read_bytes()
         assert after.startswith(before)
         assert after == before + json.dumps(audit("beta"), separators=(",", ":")).encode() + b"\n"
-        assert repair_rows_in(path) == []
+        assert repair_rows_in(journal) == []
 
     def test_an_empty_journal_file_is_not_a_tear(self, tmp_path: Path) -> None:
         """Zero bytes has no unterminated line in it."""
@@ -173,7 +173,7 @@ class TestWhatIsNotATear:
         journal.append_entries([audit("alpha")])
 
         assert audits_in(journal) == ["alpha"]
-        assert repair_rows_in(journal.config.journal_path) == []
+        assert repair_rows_in(journal) == []
 
     def test_a_terminated_but_malformed_tail_is_not_a_tear(self, tmp_path: Path) -> None:
         """Residual 4 of ``append_entries``, pinned rather than implied.
@@ -210,7 +210,7 @@ class TestWhatIsNotATear:
         journal.append_entries([audit("alpha")])
 
         assert audits_in(journal) == ["alpha"]
-        assert repair_rows_in(journal.config.journal_path) == []
+        assert repair_rows_in(journal) == []
 
     def test_an_empty_append_repairs_nothing(self, tmp_path: Path) -> None:
         """Nothing to protect, so nothing is written.
@@ -468,7 +468,7 @@ class TestTheTearIsVisible:
 
         journal.append_entries([audit("beta")])
 
-        rows = repair_rows_in(journal.config.journal_path)
+        rows = repair_rows_in(journal)
         assert len(rows) == 1
         assert rows[0]["timestamp"]
         assert "not newline-terminated" in rows[0]["detail"]
@@ -505,7 +505,7 @@ class TestTheTearIsVisible:
         tear(journal.config.journal_path)
         journal.append_entries([audit("beta")])
 
-        detail = str(repair_rows_in(journal.config.journal_path)[0]["detail"])
+        detail = str(repair_rows_in(journal)[0]["detail"])
         assert "torn fragment that was never readable" in detail
         assert "lost only its newline" in detail
 
@@ -520,7 +520,7 @@ class TestTheTearIsVisible:
         journal.append_entries([audit("beta")])
         journal.append_entries([audit("gamma")])
 
-        assert len(repair_rows_in(journal.config.journal_path)) == 1
+        assert len(repair_rows_in(journal)) == 1
 
     def test_the_repair_row_counts_towards_no_aggregate(self, tmp_path: Path) -> None:
         """A repair row must not move a number anyone reads.
@@ -540,7 +540,7 @@ class TestTheTearIsVisible:
         torn.append_entries(records[:1])
         tear(torn.config.journal_path)
         torn.append_entries(records[1:])
-        assert len(repair_rows_in(torn.config.journal_path)) == 1
+        assert len(repair_rows_in(torn)) == 1
 
         assert clean.get_concern_hit_rate()["components"] == 2
         assert torn.get_concern_hit_rate() == clean.get_concern_hit_rate()

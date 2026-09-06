@@ -23,9 +23,15 @@ weakest case for this module and worth revisiting if it stays that way.
 ``audits_in`` takes the journal rather than its path and reads through
 ``EvolutionJournal.get_spec_audits``, so a test asserting on what the
 journal reads back is not asserting on a second copy of that reader's
-selection rule (#337). ``repair_rows_in`` still takes a path, because
-no production reader returns repair rows to route it through:
-``get_repair_count`` returns an int.
+selection rule (#337). ``repair_rows_in`` takes the journal too, for a
+separate reason that round 1 of review on #337 separated out: there is
+no production reader to route it THROUGH, because ``get_repair_count``
+returns an int, but the PARAMETER is a different question. Handing it a
+path made six call sites in ``test_journal_torn_tail.py`` write
+``repair_rows_in(journal.config.journal_path)`` next to
+``audits_in(journal)``, and reaching through ``config.journal_path`` at
+a call site is what ``EvolutionJournal.get_spec_audits``' own docstring
+calls the defect.
 """
 
 from __future__ import annotations
@@ -122,5 +128,15 @@ def audits_in(journal: EvolutionJournal) -> list[str]:
     return [str(entry.get("project")) for entry in journal.get_spec_audits()]
 
 
-def repair_rows_in(path: Path) -> list[dict[str, Any]]:
-    return [e for e in read_progress_events(path) if e.get("event_type") == JOURNAL_REPAIR_EVENT]
+def repair_rows_in(journal: EvolutionJournal) -> list[dict[str, Any]]:
+    """Every repair row this journal's file holds, in order.
+
+    Reads the file rather than a production reader: no reader returns
+    repair rows. The selection rule is this helper's own and is the one
+    copy of it in the suite.
+    """
+    return [
+        entry
+        for entry in read_progress_events(journal.config.journal_path)
+        if entry.get("event_type") == JOURNAL_REPAIR_EVENT
+    ]
