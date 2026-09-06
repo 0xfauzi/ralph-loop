@@ -15,13 +15,18 @@ all three: the untyped default is left alone, an explicit blank is
 refused.
 
 The census here is the guard for instance N+1. It walks the Click tree
-and counts every parameter named `project_name` that it OBTAINS, so a
-fourth option appears as an unexplained delta rather than as a site
-outside a list someone maintained by hand. It CLEARS each site, so it
-clears only on `callback is _reject_blank_project_name`, an object
-identity it can prove; and it pins both the count and the command
-paths, so a walk that has gone blind fails red instead of agreeing
-with an empty result.
+and counts every parameter it OBTAINS that spells the `--project-name`
+flag or binds the `project_name` destination, so a fourth option
+appears as an unexplained delta rather than as a site outside a list
+someone maintained by hand. Keyed on the flag as well as the
+destination because round 2 of review planted
+`@click.option("--project-name", "project")`, an idiom `cli.py` uses
+eight times, and a census keyed on the destination alone cleared it.
+It CLEARS each site, so it clears only on
+`callback is _reject_blank_project_name`, an object identity it can
+prove; and it pins both the count and the command paths, so a walk
+that has gone blind fails red instead of agreeing with an empty
+result.
 """
 
 from __future__ import annotations
@@ -31,6 +36,7 @@ from pathlib import Path
 
 import click
 import pytest
+from click.core import ParameterSource
 from click.testing import CliRunner, Result
 
 from kstrl.cli import _reject_blank_project_name, cli
@@ -76,11 +82,23 @@ def _every_parameter(
             yield from _every_parameter(sub, here)
 
 
-def _project_name_sites() -> dict[str, click.Parameter]:
+def _takes_a_project_name(param: click.Parameter) -> bool:
+    """The flag an operator types, or the destination the body reads.
+
+    Either alone is a list of the options that happen to use one
+    spelling: `"--project-name"` with a renamed destination is what
+    round 2 planted, and `project_name` bound from some other flag is
+    the reverse. Widening the key can only add sites, and the count is
+    a set equality, so over-matching fails red rather than clearing.
+    """
+    return param.name == "project_name" or "--project-name" in param.opts
+
+
+def _project_name_sites(root: click.Command = cli) -> dict[str, click.Parameter]:
     sites: dict[str, click.Parameter] = {}
-    for where, param in _every_parameter(cli):
-        if param.name == "project_name":
-            assert where not in sites, f"two project_name parameters on {where}"
+    for where, param in _every_parameter(root):
+        if _takes_a_project_name(param):
+            assert where not in sites, f"two project-name parameters on {where}"
             sites[where] = param
     return sites
 
@@ -90,12 +108,92 @@ class TestProjectNameCensus:
         assert set(_project_name_sites()) == EXPECTED_PROJECT_NAME_SITES
 
     def test_every_one_of_them_carries_the_rejecting_callback(self) -> None:
+        sites = _project_name_sites()
+        # Stand-alone: an empty walk must not clear this layer either.
+        assert sites
         uncovered = {
             where
-            for where, param in _project_name_sites().items()
+            for where, param in sites.items()
             if param.callback is not _reject_blank_project_name
         }
         assert uncovered == set()
+
+    def test_the_census_sees_the_flag_under_a_renamed_destination(self) -> None:
+        """Round 2 of review planted this shape and the census cleared it.
+
+        `cli.py` binds `"--all"` to `show_all` and `"--state"` to
+        `states`; a `--project-name` written the same way has
+        `param.name == "project"` and was invisible to a census keyed
+        on the destination. Planted on a throwaway group rather than
+        on `cli`, so the pinned census above is unaffected.
+        """
+
+        @click.group()
+        def root() -> None:
+            pass
+
+        @root.command()
+        @click.option("--project-name", "project")
+        def renamed(project: str | None) -> None:
+            pass
+
+        @root.command()
+        @click.option("--project-name")
+        def default_destination(project_name: str | None) -> None:
+            pass
+
+        @root.command()
+        @click.option("--name", "project_name")
+        def other_flag(project_name: str | None) -> None:
+            pass
+
+        @root.command()
+        @click.option("--project")
+        def unrelated(project: str | None) -> None:
+            pass
+
+        sites = _project_name_sites(root)
+        assert set(sites) == {
+            "root renamed",
+            "root default-destination",
+            "root other-flag",
+        }
+        assert all(param.callback is None for param in sites.values())
+
+
+class TestTheCallbackFailsClosed:
+    """The two branches no CLI path reaches today, pinned directly.
+
+    No option here declares `envvar=` or `prompt=` and Click never
+    hands a declared option a `None` name, so neither branch changes
+    what an operator sees. They are pinned because `_use_cli_value`
+    sits eight lines above and clears on `ParameterSource.COMMANDLINE`;
+    harmonising the two would widen this callback's clearing set from
+    one source to four.
+    """
+
+    def test_a_blank_from_the_environment_is_refused(self) -> None:
+        param = click.Option(["--project-name"])
+        ctx = click.Context(click.Command("probe", params=[param]))
+        ctx.set_parameter_source("project_name", ParameterSource.ENVIRONMENT)
+
+        with pytest.raises(click.BadParameter):
+            _reject_blank_project_name(ctx, param, "   ")
+
+    def test_a_blank_the_default_supplied_is_returned(self) -> None:
+        param = click.Option(["--project-name"], default="")
+        ctx = click.Context(click.Command("probe", params=[param]))
+        ctx.set_parameter_source("project_name", ParameterSource.DEFAULT)
+
+        assert _reject_blank_project_name(ctx, param, "") == ""
+
+    def test_an_unresolvable_parameter_name_is_refused(self) -> None:
+        param = click.Option(["--project-name"])
+        ctx = click.Context(click.Command("probe", params=[param]))
+        param.name = None
+
+        with pytest.raises(click.BadParameter):
+            _reject_blank_project_name(ctx, param, "")
 
 
 def _spec_at(root: Path) -> Path:

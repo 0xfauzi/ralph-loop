@@ -196,9 +196,10 @@ def _reject_blank_project_name(
     prove the value came from the default must flag, not clear.
 
     ``tests/test_project_name_boundary.py`` walks the Click tree and
-    fails if a fourth ``project_name`` parameter appears without this
-    callback, so the boundary is closed by census rather than by a
-    list of the options someone remembered.
+    fails if a fourth ``--project-name`` option, or a fourth parameter
+    bound to ``project_name``, appears without this callback, so the
+    boundary is closed by census rather than by a list of the options
+    someone remembered.
     """
     source = ctx.get_parameter_source(param.name) if param.name else None
     if value is not None and not value.strip() and source is not ParameterSource.DEFAULT:
@@ -4823,7 +4824,7 @@ def _resolve_queue_item(queue: Any, item_id: str, ui_impl: UI) -> Any:
     "--project-name",
     default="",
     callback=_reject_blank_project_name,
-    help="Factory project name",
+    help="Factory project name (omit it and serve derives queue-<id>)",
 )
 @click.option(
     "--auto-merge/--stop-at-pr",

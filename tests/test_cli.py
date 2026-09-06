@@ -717,6 +717,21 @@ class TestBlankProjectName:
         # proof nothing was spent rather than the proof it halted.
         assert seen == {}
 
+    def test_a_blank_name_beside_a_manifest_is_refused_too(self, tmp_path: Path) -> None:
+        """`factory --manifest` never reads the name, and used to accept
+        `""` beside it. The callback fires at parse time regardless of
+        which path the body would take, so the refusal is the same."""
+        manifest = tmp_path / "m.json"
+        manifest.write_text("{}\n", encoding="utf-8")
+
+        result = CliRunner().invoke(
+            cli,
+            ["factory", "--manifest", str(manifest), "--project-name", "", "--no-color"],
+        )
+
+        assert result.exit_code == 2
+        assert "--project-name" in result.output
+
     def test_a_name_with_surrounding_space_reaches_decompose_verbatim(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

@@ -1588,7 +1588,7 @@ class ExcludedHistory:
       wording claimed the whole journal.
     - ``projects`` covers every audit under some other project name.
     - ``unattributed`` covers audits whose ``project`` field is absent,
-      null or not a string, FOR A NON-EMPTY project name; at "" those
+      null, empty or not a string, FOR A NON-EMPTY project name; at "" those
       audits are this project's own, which is what :func:`_audit_bucket`
       decides. Round 2 of review found these counted by neither of the
       other two: three audits on disk reported as one.
@@ -1644,7 +1644,7 @@ def _audit_bucket(
     it cost. ``own_recorded`` was ``entry_str(e, "project") ==
     project_name`` and ``unattributed`` was ``not entry_str(e,
     "project")``. Those are two spellings of the same question at
-    ``project_name == ""``, so an audit with an absent, null or
+    ``project_name == ""``, so an audit with an absent, null, empty or
     non-string project satisfied both and was counted twice: five
     audits on disk, eight bucket placements. One call per audit places
     it once, so the three counts sum to the audits by construction
