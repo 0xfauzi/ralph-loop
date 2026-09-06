@@ -707,6 +707,11 @@ class TestBlankProjectName:
         result = _invoke_spec_command(command, root, project_name=project_name)
 
         assert result.exit_code == 2
+        # The halting stub ALSO exits 2, so the exit code alone does not
+        # discriminate: on the base commit it passed while the other
+        # lines failed. Naming the halt banner is what makes it a check
+        # on the callback rather than on the halt path.
+        assert "Architect escalated" not in result.output
         assert "--project-name" in result.output
         # The halting stub records every call, so an empty dict is the
         # proof nothing was spent rather than the proof it halted.
