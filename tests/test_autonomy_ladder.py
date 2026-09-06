@@ -432,6 +432,42 @@ class TestReplay:
         assert report.infra_aborted_runs == 1
         assert report.components_merged == 2
 
+    def test_a_torn_row_is_not_a_run_the_ladder_promotes_on(self, tmp_path: Path) -> None:
+        """#331's read half, on the SECOND reader of experiments.tsv.
+
+        A crash mid-write left a row torn, the next ``record_run``
+        appended onto it, and ``csv.DictReader`` zipped the
+        concatenation against the header: a run id from the fragment,
+        this run's fields shifted along by however many columns the
+        fragment held, and ``_as_int`` turning each of them into 0
+        rather than raising. That is a fabricated run in the population
+        a promotion is decided on, and it is silent.
+
+        The torn row here is written the way a crash writes one, and the
+        real ``record_run`` appends onto it, so this measures the reader
+        against bytes the writer actually produces.
+        """
+        from kstrl.factory import FactoryResult
+        from kstrl.manifest import Manifest
+        from tests.helpers.journal import journal_at, tear
+
+        journal = journal_at(tmp_path)
+        manifest = Manifest(
+            version="1",
+            spec_file="s.md",
+            project_name="p",
+            base_branch="main",
+            single_pr=False,
+            components=[],
+        )
+        journal.record_run("run-1", manifest, FactoryResult())
+        tear(journal.config.experiments_path)
+        journal.record_run("run-2", manifest, FactoryResult())
+
+        runs = load_runs(journal.config.experiments_path)
+
+        assert [run.run_id for run in runs] == ["run-1", "run-2"]
+
 
 # --------------------------------------------------------------------------
 # Factory wiring: levels drive the flag bundle ("Done when")

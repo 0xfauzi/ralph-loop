@@ -37,8 +37,14 @@ stage, runtime feedback, and an earned-autonomy ladder). See
   `ks evolve --status` and the TUI trends tab with its columns shifted,
   a timestamp under `completed` and extra fields on the end. The file
   now pads its own tail, with no marker row, because TSV has none a
-  reader would not render as a run, and `get_experiment_trends` drops
-  any row whose field count differs from the header.
+  reader would not render as a run, and both of its readers drop any row
+  whose width is not one this writer emits. Two widths are legal, not
+  one: a file written before R3.1 has a shorter header, and a filter
+  that took the current header's width as the only legal one would
+  answer a rendering defect by deleting every row of a legacy file. The
+  second reader is `ks autonomy replay`, which fed the shifted columns
+  to the ladder through `_as_int`, turning each one into a 0 without
+  raising, so a run that never happened counted towards a promotion.
 
 - The evolution journal's probe and append happen under one exclusive
   lock (POSIX). They shared a file description, which removes the

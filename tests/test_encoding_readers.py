@@ -146,8 +146,15 @@ EXPECTED_CLEARED_READS: tuple[str, ...] = (
     "agents/codex.py last_msg_file.read_text(encoding='utf-8')",
     "agents/logging.py self._log_path.open('a', encoding='utf-8')",
     "autonomy.py path.read_text(encoding='utf-8')",
-    "autonomy_replay.py csv.DictReader(handle, delimiter='\\t') on an open() handle",
-    "autonomy_replay.py path.open(encoding='utf-8', newline='')",
+    # Two rows became one in #331. ``load_runs`` held a utf-8 handle open
+    # and ran ``csv.DictReader`` over it, which the walk had to clear as
+    # two separate reads; it reads the text once now and hands it to
+    # ``evolution.experiment_rows``, the parser its sibling reader
+    # ``get_experiment_trends`` already used. The disposition is stronger,
+    # not merely different: the old pair named utf-8 under no handler at
+    # all, and this names utf-8 AND catches ``ValueError`` beside
+    # ``OSError``, which is the half a ``UnicodeDecodeError`` escapes.
+    "autonomy_replay.py path.read_text(encoding='utf-8')",
     "calibration.py path.read_text(encoding='utf-8')",
     "cli.py open(prd_file, encoding='utf-8')",
     "commandrun.py open(path, 'a', buffering=1, encoding='utf-8')",

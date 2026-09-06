@@ -27,7 +27,6 @@ string of broken runs unlock a promotion, which is exactly backwards.
 
 from __future__ import annotations
 
-import csv
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -38,7 +37,7 @@ from kstrl.autonomy import (
     AutonomyState,
     DemotionTrigger,
 )
-from kstrl.evolution import INFRASTRUCTURE_CHECKS
+from kstrl.evolution import INFRASTRUCTURE_CHECKS, experiment_rows
 from kstrl.verify import SCOPE_UNREADABLE_CHECK
 
 DEFAULT_EXPERIMENTS_PATH = Path(".kstrl/experiments.tsv")
@@ -170,14 +169,27 @@ def _as_float(value: str) -> float:
 
 
 def load_runs(path: Path) -> list[RunRecord]:
-    """Parse experiments.tsv. Missing file -> no runs (not an error)."""
+    """Parse experiments.tsv. Missing file -> no runs (not an error).
+
+    Through ``evolution.experiment_rows`` rather than a bare
+    ``csv.DictReader``, which is #331's read half applied to the second
+    reader of this file. A crash mid-write used to leave a row torn, the
+    next ``record_run`` appended onto it, and ``DictReader`` zipped the
+    concatenation against the header: the ladder then saw a run whose
+    numeric columns had shifted, and ``_as_int`` turned every one of
+    them into 0 without raising. That is a fabricated run in the
+    population a promotion is decided on. The shared parser drops a row
+    whose width this writer never emits.
+    """
     if not path.exists():
         return []
     runs: list[RunRecord] = []
-    with path.open(encoding="utf-8", newline="") as handle:
-        for row in csv.DictReader(handle, delimiter="\t"):
-            if not row.get("run_id"):
-                continue
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return []
+    for row in experiment_rows(text):
+        if row.get("run_id"):
             runs.append(
                 RunRecord(
                     run_id=row.get("run_id", ""),
