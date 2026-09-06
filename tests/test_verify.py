@@ -1690,8 +1690,15 @@ class TestCheckDeadCodeRuff:
 
         assert isinstance(outcome, NotMeasured)
         assert (outcome.check, outcome.reason) == ("dead_code_ruff", NOT_MEASURED_COMMAND_FAILED)
-        assert "2" in outcome.detail
-        assert "TOML parse error" in outcome.detail
+        # The exact detail, because the exit-code guard and the
+        # unreadable-output guard below it both produce a
+        # `command_failed` gap and they mean different things: ruff
+        # refused to run, against ruff ran and said something this
+        # cannot read. Asserting only the reason let the exit-code guard
+        # be deleted with the whole suite still green (measured).
+        assert outcome.detail == (
+            "ruff check exited 2: error: Failed to parse ruff.toml: TOML parse error"
+        )
         assert not any("git" in c for c in calls)
 
     def test_fixes_are_counted_staged_and_committed(self, tmp_path: Path) -> None:
