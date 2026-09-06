@@ -132,26 +132,34 @@ def raise_if_defect(exc: BaseException) -> None:
 
     ``RecursionError`` is the one that needs an argument rather than a
     rule, and the argument is layering rather than inspection (#323). A
-    kstrl.toml with 600 nested arrays exhausts the stack inside
-    tomllib's recursive descent, and that is the operator's file, not a
-    defect of ours. It never arrives here. Every tomllib parse in
-    ``kstrl/`` ends on a bare ``except Exception``, and
-    ``EXPECTED_TOML_PARSES`` in ``tests/test_toml_readers.py`` is what
-    makes that a closed set rather than a count restated here:
-    ``config.load_toml_document`` re-raises ``ConfigError`` naming the
-    path, and the pyproject.toml and ruff.toml readers in ``verify`` and
-    ``feedforward`` fall back to a default. So a ``RecursionError`` that
+    kstrl.toml with 600 nested arrays exhausts the stack at the default
+    recursion limit inside tomllib's recursive descent, and that is the
+    operator's file, not a defect of ours. It never arrives here. Every
+    tomllib parse in ``kstrl/`` ends on a bare ``except Exception``, and
+    the two-layer census in ``tests/test_toml_readers.py`` is what makes
+    that a closed set rather than a count restated here - layer 1,
+    ``EXPECTED_TOMLLIB_SPELLINGS``, resolves nothing and so cannot miss
+    a reader that spells ``tomllib`` at all. ``load_toml_document``
+    re-raises ``ConfigError`` naming the path, and the pyproject.toml
+    and ruff.toml readers in ``verify`` and ``feedforward`` fall back to
+    a default or to no conventions at all. So a ``RecursionError`` that
     does reach this function is a cycle in kstrl's own code, and the
-    traceback this re-raise keeps is what locates it.
+    traceback this re-raise keeps is what locates it. The closure is
+    over the PARSES, not over the call graph: not every guarded block
+    goes through ``load_toml_document``, and ``init_wizard._detected_text``
+    is the one that does not, reaching
+    ``verify._default_typecheck_command`` on the project's
+    pyproject.toml instead.
 
     Inspecting the exception could not have settled it anyway. Measured
     on 3.12.8 and 3.13.2, both directions give
     ``builtins.RecursionError`` with ``str(exc)`` "maximum recursion
     depth exceeded" and no attribute of its own; only the frames differ,
-    and by the time they could be read the boundary has already
-    answered. ``tests/test_recursion_provenance.py`` pins both
-    directions, at :func:`preflight_config` and at the ``ks status``
-    seam.
+    and by the time they could be read ``load_toml_document`` has
+    already turned the document's into a ``ConfigError``.
+    ``tests/test_recursion_provenance.py`` pins both directions at
+    :func:`preflight_config`, and direction (b) again at
+    :func:`config_problem_lines` and at the ``ks status`` seam.
     """
     if isinstance(exc, RuntimeError) and type(exc).__module__.split(".")[0] != "kstrl":
         raise exc
@@ -554,6 +562,12 @@ def _blamed_toml_value(
     whose value reprs into that message is the one to look at. Reported
     only when exactly one key matches, and phrased as what the file
     says rather than as a diagnosis.
+
+    The ``suppress`` below would swallow a ``RuntimeError`` kstrl did
+    not define, which :func:`raise_if_defect` exists to re-raise. It
+    cannot reach one: this runs only AFTER that function has passed on
+    the exception being reported, and everything ``load_toml_section``
+    raises here has already been converted by ``load_toml_document``.
     """
     hits = []
     for name in sections:

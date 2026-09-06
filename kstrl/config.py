@@ -547,7 +547,7 @@ def load_toml_document(path: Path) -> dict[str, Any]:
       from ``sys.get_int_max_str_digits``. Walked past round 1.
     - ``RecursionError``, from tomllib's recursive-descent parser, at no
       one depth: at the default limit nested arrays first fail at 497
-      levels from a one-frame caller and 396 under 200 more, inline
+      levels from a one-frame caller and 397 under 200 more, inline
       tables at 331 and 264; the caller's own stack sets it. It derives from
       ``RuntimeError``, NOT ``ValueError``, so it walked past round 2 -
       whose docstring, whose AST guard and whose CLAUDE.md line all
@@ -566,9 +566,11 @@ def load_toml_document(path: Path) -> dict[str, Any]:
     that no handler can promise the interpreter has the headroom left to
     render the message.
 
-    Provenance follows (#323): the parse runs at stack depth 9 to 16
-    under ``ks status``, so a ``RecursionError`` here is the document's.
-    One above this call is ours; ``raise_if_defect`` carries that half.
+    Provenance follows (#323): the parse runs 9 to 16 frames deep under
+    ``ks status``, 13 to 52 on the Textual event loop, so a
+    ``RecursionError`` here is the document's. Not by construction:
+    measured, a CALLER at 991 of 1000 frames gets a valid file called
+    unparseable, and IS the runaway. ``raise_if_defect`` has the rest.
 
     ``OSError`` is not in the catch-all's reach at all, which is the
     stronger form of the guarantee two callers depend on. An earlier
