@@ -138,11 +138,15 @@ class TestCompareLadder:
 
         assert code == 1
         out = capsys.readouterr().out
-        assert LADDER_DISABLED_LINE in out
         # A mistyped --root lands on a directory with no kstrl.toml,
         # which loads as "disabled": the line has to say which root it
-        # consulted or it reports the ladder off when it is on.
-        assert str(tmp_path) in out
+        # consulted or it reports the ladder off when it is on. Asserted
+        # against THAT line, not against the whole of stdout: the
+        # baseline paths printed above it are under tmp_path too, so
+        # `str(tmp_path) in out` passes with the root dropped.
+        disabled = [line for line in out.splitlines() if LADDER_DISABLED_LINE in line]
+        assert len(disabled) == 1, out
+        assert str(tmp_path) in disabled[0]
         assert inbox_items(tmp_path) == []
         assert AutonomyState.load(tmp_path).level == int(AutonomyLevel.L2_GATED_MERGE)
 
