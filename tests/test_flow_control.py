@@ -30,6 +30,7 @@ from click.testing import CliRunner
 from kstrl.cli import cli
 from kstrl.inbox import Inbox, InboxConfig, ItemKind
 from kstrl.serve import (
+    Admission,
     CycleResult,
     OpenPrCount,
     OpenPrCountStreak,
@@ -410,6 +411,44 @@ class TestGateOrderIsCost:
 
         assert "already holds" in result.skipped
         assert not marker.exists(), "the open-PR gate reached gh behind a held factory lock"
+
+
+class TestEmptyRefusalIsStillARefusal:
+    """`_wait_gate_refusal` returns `str | None`, and this is the control.
+
+    None of the three wait gates can produce an empty reason today, so
+    the change from `""` to None is a representation fix with nothing
+    observable behind it - which means a mutation back to `if waiting:`
+    stays green, and the sentinel has no mechanism. Measured: it does.
+
+    So one gate is made to refuse with an empty reason. The cycle must
+    still skip. Under the `""` sentinel it would lease the item and
+    spend, with nothing anywhere saying why.
+    """
+
+    def test_a_gate_refusing_with_no_reason_still_stops_the_cycle(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        marker = _install_marker_gh(tmp_path, monkeypatch)
+        _add(_queue(tmp_path))
+        calls: list[dict[str, object]] = []
+        monkeypatch.setattr(
+            "kstrl.serve.check_inbox_cap",
+            lambda root: Admission(allowed=False, reason=""),
+        )
+
+        result = serve_cycle(
+            tmp_path,
+            config=ServeConfig(max_open_prs=1),
+            runner=_stub_runner(RunOutcome(0), calls),
+        )
+
+        assert calls == [], "an empty refusal was read as an admission and spent"
+        assert result.ran_item == ""
+        assert _queue(tmp_path).items()[0].state is ItemState.QUEUED
+        assert not marker.exists(), "the refusal did not stop the cycle before the bound"
 
 
 # ---------------------------------------------------------------------------
