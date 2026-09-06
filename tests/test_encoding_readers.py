@@ -94,7 +94,10 @@ EXPECTED_READ_SPELLINGS: dict[str, int] = {
     "feedforward.py": 8,
     "fixtures.py": 3,
     "inbox.py": 1,
-    "init_cmd.py": 3,
+    # 3 until #352 routed ``_ensure_gitignore``'s append through
+    # ``appendio``, which encodes once for every appender. The two left
+    # are both reads: the PRD file and ``_read_text_or_none``.
+    "init_cmd.py": 2,
     "init_wizard.py": 1,
     "intake_github.py": 1,
     "knowledge.py": 3,
@@ -105,7 +108,10 @@ EXPECTED_READ_SPELLINGS: dict[str, int] = {
     "parsers.py": 1,
     "pipeline.py": 3,
     "prd.py": 1,
-    "proposals.py": 4,
+    # 4 until #352 routed ``mark_applied`` through ``appendio`` for the
+    # same reason. The three left are the CLAUDE.md read, the proposal
+    # read, and the CLAUDE.md write.
+    "proposals.py": 3,
     "security.py": 1,
     "serve.py": 4,
     "statedir.py": 1,
@@ -179,7 +185,11 @@ EXPECTED_CLEARED_READS: tuple[str, ...] = (
     "fixtures.py open(prd_path, encoding='utf-8')",
     "fixtures.py snapshot_path.read_text(encoding='utf-8')",
     "init_cmd.py open(prd_file, encoding='utf-8')",
-    "init_cmd.py path.open('a', encoding='utf-8')",
+    # ``init_cmd.py path.open('a', encoding='utf-8')`` was here until
+    # #352. The read is DELETED, not unseen: ``_ensure_gitignore``'s
+    # append goes through ``appendio.append_records`` now, so the utf-8
+    # it used to name is the one ``append_terminated`` encodes with, and
+    # the ``appendio.py`` row below is where that contract is counted.
     "init_cmd.py path.read_text(encoding='utf-8')",
     "init_wizard.py toml_path.read_text(encoding='utf-8')",
     "intake_github.py self.path.read_text(encoding='utf-8')",
@@ -197,7 +207,9 @@ EXPECTED_CLEARED_READS: tuple[str, ...] = (
     "pipeline.py progress_path.read_text(encoding='utf-8')",
     "prd.py open(path, encoding='utf-8')",
     "proposals.py claude_md.read_text(encoding='utf-8')",
-    "proposals.py open(path, 'a', encoding='utf-8')",
+    # ``proposals.py open(path, 'a', encoding='utf-8')`` was here until
+    # #352, and is deleted for the same reason as the ``init_cmd`` row
+    # above: ``mark_applied`` appends through ``appendio`` now.
     "proposals.py path.read_text(encoding='utf-8')",
     "security.py prd_path.read_text(encoding='utf-8')",
     "serve.py manifest_path.read_text(encoding='utf-8')",
