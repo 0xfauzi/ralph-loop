@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal, NamedTuple
 
 from kstrl import git
+from kstrl.appendio import append_records
 from kstrl.atomicio import atomic_write_text
 from kstrl.prd import PRD
 
@@ -1302,6 +1303,10 @@ def _ensure_gitignore(root: Path, language: str, ui: UI) -> None:
     so re-running `ks init` cannot duplicate it or rewrite a line the
     user wrote. A file it cannot read is left alone for the same reason:
     without the marker check, appending could duplicate the block.
+
+    The append goes through ``appendio``, which is why this function
+    reads the file once for the marker and never again to work out its
+    terminator; the comment on the call has the window that closes.
     """
     path = root / ".gitignore"
     action, existing = _gitignore_state(root)
@@ -1321,14 +1326,26 @@ def _ensure_gitignore(root: Path, language: str, ui: UI) -> None:
         return
 
     # One blank line between the user's last rule and ours, and no
-    # leading blank when the file is empty.
-    separator = "" if not existing else "\n" if existing.endswith("\n") else "\n\n"
-    # utf-8 pinned to match ``_read_text_or_none``, which is what reads
-    # this file back to decide whether the block is already there. The
-    # block is ASCII, so this changes no byte today; what it removes is a
-    # write and a read of the same file that could disagree (#320).
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(separator + gitignore_block(language))
+    # leading blank when the file is empty. The TERMINATOR is not
+    # decided here any more: ``append_records`` probes the handle it is
+    # about to write through and pads an unterminated tail itself, so
+    # what is left here is the blank line, which is a Markdown-style
+    # separation choice and not a repair.
+    #
+    # That closes a read-then-write window rather than tidying a
+    # branch. ``_gitignore_state`` reads the file, this appends to it,
+    # and the two reads used to disagree whenever the file changed in
+    # between: measured, a file reported empty by the read and holding
+    # an unterminated rule by the time of the write got the kstrl block
+    # header appended onto the user's last rule, on one line.
+    #
+    # utf-8 is pinned inside the helper and matches
+    # ``_read_text_or_none``, which is what reads this file back to
+    # decide whether the block is already there. The block is ASCII, so
+    # this changes no byte today; what it removes is a write and a read
+    # of the same file that could disagree (#320).
+    separator = "" if not existing else "\n"
+    append_records(path, separator + gitignore_block(language), repair="")
     ui.ok("  Appended the kstrl block to .gitignore")
 
 

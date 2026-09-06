@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from kstrl import init_cmd
 from kstrl.cli import cli
 from kstrl.init_cmd import (
     _LANGUAGE_IGNORES,
@@ -145,6 +146,43 @@ class TestGitignoreScaffold:
         run_init_capturing(tmp_path)
 
         assert (tmp_path / ".gitignore").read_text().startswith(GITIGNORE_BLOCK_MARKER)
+
+    def test_a_rule_written_between_the_read_and_the_write_is_not_glued_to(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The read-then-write window ``appendio`` closes (#352).
+
+        ``_gitignore_state`` reads the file and ``_ensure_gitignore``
+        appends to it, and until the append was routed the separator was
+        decided from that earlier read. The two disagree whenever the
+        file changes in between, which is a user saving in an editor or
+        a second tool appending a rule.
+
+        The window is simulated at the seam rather than raced, because a
+        race that reproduces one run in a thousand is not a test: the
+        state read reports the file as empty, and the file on disk holds
+        an unterminated rule by the time of the write. Before the
+        routing that produced ``secrets.env# kstrl`` on one line, so the
+        user's rule and the block header were both wrong. Now the probe
+        happens on the handle being written through, so the rule keeps
+        its own line.
+        """
+        path = tmp_path / ".gitignore"
+        path.write_text("secrets.env", encoding="utf-8")
+        real_state = init_cmd._gitignore_state
+
+        def stale_read(root: Path) -> tuple[str, str | None]:
+            action, _ = real_state(root)
+            return action, ""
+
+        monkeypatch.setattr(init_cmd, "_gitignore_state", stale_read)
+        run_init_capturing(tmp_path)
+
+        lines = path.read_text(encoding="utf-8").splitlines()
+        assert lines[0] == "secrets.env"
+        assert GITIGNORE_BLOCK_MARKER in lines
 
     def test_user_edits_below_the_block_survive_a_rerun(self, tmp_path: Path) -> None:
         run_init_capturing(tmp_path)

@@ -20,6 +20,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from kstrl.appendio import append_records
+
 PROPOSAL_TITLE_RE = re.compile(r"^# (PROP-\d+): (.+)$")
 PROPOSAL_FIELD_RE = re.compile(r"^\*\*(Type|Target)\*\*: (.+)$")
 PROPOSAL_APPLIED_RE = re.compile(r"^\*\*Applied\*\*: (.+)$")
@@ -155,10 +157,28 @@ def append_to_agent_learnings(
 
 
 def mark_applied(path: Path, when: str | None = None) -> str:
-    """Stamp the proposal file as applied; returns the timestamp."""
+    """Stamp the proposal file as applied; returns the timestamp.
+
+    Through ``appendio`` rather than its own ``open(path, "a")``. The
+    leading newline in the payload is the MARKDOWN separator - a stamp
+    written directly under the last line of a paragraph joins that
+    paragraph - and it is not a tear repair, even though it happened to
+    act as one. Those are two different claims and this file used to
+    make them with one character: #352 measured the append-open guard's
+    ``PADS_ITSELF`` reason and found it could not fail for the reason it
+    named, because the check could not tell this newline from the
+    terminator at the other end of the same f-string. A reason that
+    cannot fail is not a control, so the site is routed and the reason
+    is gone.
+
+    Byte-identical to what it replaced on an intact file, which is what
+    ``tests/test_proposals.py`` pins. On a file whose tail lost its
+    newline the helper's pad lands first, so the fragment ends up on a
+    line of its own and the stamp on the next: one newline more than
+    before, in a Markdown file where a blank line is a paragraph break.
+    """
     applied_at = when or datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-    with open(path, "a", encoding="utf-8") as f:
-        f.write(f"\n**Applied**: {applied_at}\n")
+    append_records(path, f"\n**Applied**: {applied_at}\n", repair="")
     return applied_at
 
 

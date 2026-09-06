@@ -43,12 +43,29 @@ check that can FAIL a row whose stated reason has stopped being true. A
 ``LOCK_FILE`` scope that no longer spells ``flock`` fails; a
 ``TEXT_LOG`` scope that starts spelling ``dumps`` fails, because a scope
 that serialises JSON and appends it is a record writer and records are
-what this guard is about; a ``PADS_ITSELF`` scope with no leading
-newline anywhere in it fails; a ``NOT_AN_APPEND`` row whose mode starts
+what this guard is about; a ``NOT_AN_APPEND`` row whose mode starts
 folding to a string fails. None of them can clear a site that has no
-row, and ``PADS_ITSELF``'s is the weakest of the four: four other scopes
-in ``kstrl/`` today would also satisfy it, so it can catch the pad being
-deleted and cannot prove the pad is the right one.
+row.
+
+There were FOUR reasons and there are three. ``PADS_ITSELF`` covered
+``proposals.mark_applied`` and ``init_cmd._ensure_gitignore``, on the
+grounds that each wrote its own leading newline, and its check asked
+whether anything in the scope started with one. Measured in review: the
+check could not fail for the reason it named. ``mark_applied``'s pad and
+the terminator at the other end of the same f-string are both constants
+that start with a newline, so deleting the pad left the check satisfied
+and the guard green; ``_ensure_gitignore`` computed its pad into a
+variable, so NONE of the three constants that satisfied its row was the
+pad at all. Narrowing the check does not fix it and was measured too: a
+version that required the constant to be inside a ``write`` call still
+missed the deleted pad, for the same f-string reason, and failed the
+second row outright.
+
+So both sites were routed through ``appendio`` instead and the reason
+was deleted. That is the direction #324's rule 1 asks for: two rows in a
+ledger became zero rows, the census closed over them by construction,
+and what used to be a claim about a scope is now a property of the one
+function that writes the pad.
 """
 
 from __future__ import annotations
@@ -196,7 +213,6 @@ class Reason(StrEnum):
 
     LOCK_FILE = "lock file"
     TEXT_LOG = "line-oriented text log"
-    PADS_ITSELF = "pads its own tail"
     NOT_AN_APPEND = "not an append: the mode does not fold"
 
 
@@ -210,8 +226,7 @@ class Reason(StrEnum):
 #: merges two lines and no parser drops a record; that is a real cost
 #: and a smaller one than the record loss this module exists for, and it
 #: is the reason the check is "does not serialise JSON" rather than
-#: something stronger. The PADS_ITSELF rows already write their own
-#: leading newline. The NOT_AN_APPEND rows are layer 1 over-matching on
+#: something stronger. The NOT_AN_APPEND rows are layer 1 over-matching on
 #: an unfoldable mode: two are ``EvolutionJournal.open(root_dir)``, a
 #: classmethod that happens to be called ``open``, and one is
 #: ``atomicio``'s ``os.open`` with ``O_EXCL`` flags, which creates.
@@ -229,8 +244,6 @@ ALLOWED_APPEND_OPENS: dict[str, tuple[Reason, str]] = {
     "pipeline.py:ComponentPipeline._phase_transcript": (Reason.TEXT_LOG, "a phase transcript"),
     "tui/embed.py:run_embedded": (Reason.TEXT_LOG, "the embedded run's log"),
     "tui/session.py:start_run_session": (Reason.TEXT_LOG, "the session log"),
-    "init_cmd.py:_ensure_gitignore": (Reason.PADS_ITSELF, "computes its own separator"),
-    "proposals.py:mark_applied": (Reason.PADS_ITSELF, "writes a leading newline"),
     "atomicio.py:_create_temp": (Reason.NOT_AN_APPEND, "os.open with O_WRONLY|O_CREAT|O_EXCL"),
     "factory.py:_run_factory_locked._record_contract_event": (
         Reason.NOT_AN_APPEND,
@@ -242,7 +255,7 @@ ALLOWED_APPEND_OPENS: dict[str, tuple[Reason, str]] = {
     ),
 }
 
-#: Layer 1's pinned inventory. Nineteen sites in seventeen rows;
+#: Layer 1's pinned inventory. Seventeen sites in fifteen rows;
 #: ``factory.py`` opens two different text logs with the same spelling,
 #: which is why the values are counts and not a set.
 #:
@@ -250,7 +263,10 @@ ALLOWED_APPEND_OPENS: dict[str, tuple[Reason, str]] = {
 #: ``appendio`` (``observability`` progress.jsonl, ``events``' JsonlSink,
 #: the ``workqueue`` journal, the ``inbox``, ``knowledge``'s telemetry,
 #: and both of ``evolution``'s: the journal and experiments.tsv) and
-#: added one, ``appendio``'s own.
+#: added one, ``appendio``'s own. #352 routed the last two that were
+#: standing on a reason instead: ``proposals.py: open('a')`` and
+#: ``init_cmd.py: path.open('a')``, which is why ``Reason`` has three
+#: members and not four.
 EXPECTED_APPEND_OPENS: dict[str, int] = {
     "agents/logging.py: self._log_path.open('a')": 1,
     "appendio.py: open('a+b')": 1,
@@ -259,10 +275,8 @@ EXPECTED_APPEND_OPENS: dict[str, int] = {
     "factory.py: EvolutionJournal.open(root_dir)": 1,
     "factory.py: open('a')": 2,
     "factory.py: open('a+')": 1,
-    "init_cmd.py: path.open('a')": 1,
     "pipeline.py: EvolutionJournal.open(self.root_dir)": 1,
     "pipeline.py: open('a')": 1,
-    "proposals.py: open('a')": 1,
     "serve.py: open('a+')": 2,
     "statedir.py: open('a+')": 1,
     "tui/embed.py: open('a')": 1,
@@ -317,10 +331,6 @@ def reason_still_holds(reason: Reason, body: list[ast.AST], node: ast.Call) -> s
         return "claims to be a lock file, but the scope no longer spells flock"
     if reason is Reason.TEXT_LOG and scope_spells(body, "dumps"):
         return "claims to be a text log, but the scope serialises JSON now"
-    if reason is Reason.PADS_ITSELF and not any(
-        (folded_str(child) or "").startswith("\n") for child in body
-    ):
-        return "claims to pad its own tail, but nothing in the scope starts with a newline"
     if reason is Reason.NOT_AN_APPEND and folded_str(mode_of(node)) is not None:
         return "claims not to be an append, but its mode folds to a string now"
     return None

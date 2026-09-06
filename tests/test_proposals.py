@@ -193,3 +193,43 @@ class TestApply:
         stamp = mark_applied(path, "2026-07-20T12:00:00Z")
         assert stamp == "2026-07-20T12:00:00Z"
         assert parse_proposal_file(path).applied == "2026-07-20T12:00:00Z"
+
+
+class TestTheAppliedStampGoesThroughAppendio:
+    """#352: the stamp is a routed append, not a hand-rolled one.
+
+    Its leading newline is a Markdown paragraph break; it is not a tear
+    repair, and the append-open guard's deleted ``PADS_ITSELF`` reason
+    could not tell the two apart. What the routing has to preserve is
+    the bytes on an intact file, since a proposal file is read back by
+    ``parse_proposal_file`` and shown to a person.
+    """
+
+    def test_the_bytes_on_an_intact_file_are_unchanged(self, tmp_path: Path) -> None:
+        """Byte-for-byte the same append the hand-rolled open made."""
+        path = tmp_path / "prop-001.md"
+        path.write_text(CONVENTION_PROP, encoding="utf-8")
+
+        mark_applied(path, "2026-07-20T12:00:00Z")
+
+        assert path.read_text(encoding="utf-8") == (
+            CONVENTION_PROP + "\n**Applied**: 2026-07-20T12:00:00Z\n"
+        )
+
+    def test_a_tail_with_no_newline_keeps_its_own_line(self, tmp_path: Path) -> None:
+        """The pad is the helper's now, and it lands before the stamp.
+
+        A proposal file whose last write was interrupted ends mid-line.
+        The stamp must not join that line, or ``parse_proposal_file``
+        sees neither the fragment nor the ``**Applied**`` field and the
+        proposal reads as unapplied for ever.
+        """
+        path = tmp_path / "prop-001.md"
+        path.write_text(CONVENTION_PROP.rstrip("\n"), encoding="utf-8")
+
+        mark_applied(path, "2026-07-20T12:00:00Z")
+
+        assert parse_proposal_file(path).applied == "2026-07-20T12:00:00Z"
+        assert path.read_text(encoding="utf-8").splitlines()[-1] == (
+            "**Applied**: 2026-07-20T12:00:00Z"
+        )
