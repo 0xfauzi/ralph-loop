@@ -214,6 +214,7 @@ def _section_specs() -> list[SectionSpec]:
                 "prd": "prd_file",
                 "progress": "progress_file",
                 "codebase_map": "codebase_map_file",
+                "golden_patterns": "golden_patterns_file",
                 "allowed": "allowed_paths",
             },
             kstrl_loader,
@@ -467,6 +468,8 @@ KEY_DESCRIPTIONS: dict[tuple[str, str], str] = {
     "component writes beside its own PRD (inside its allowedPaths), "
     "set = that one path is forced on every component",
     ("paths", "codebase_map"): "brownfield codebase notes",
+    ("paths", "golden_patterns"): "operator-authored golden patterns, injected "
+    "into every engineer prompt (R10.8)",
     ("paths", "allowed"): 'diff-scope allowlist, e.g. ["src/", "tests/"]; empty = unrestricted',
     ("git", "branch"): "branch override; empty = use PRD branchName",
     ("git", "auto_checkout"): "check the branch out automatically",

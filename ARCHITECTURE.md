@@ -103,6 +103,12 @@ Feedforward is distinct from the knowledge prefix: feedforward is
 *computed* from the current tree; knowledge facts are *distilled* by an
 LLM from prior components' verified work and re-validated on read.
 
+The engineer's prompt carries the context blocks in one order: distilled
+knowledge, the operator's golden patterns
+(`scripts/kstrl/golden-patterns.md`, written by hand and read verbatim),
+the architect's decisions, the feedforward context, then the previous
+attempt's retry context.
+
 ### Phases 1-3: Verification
 
 **Phase 1 - mechanical** (computational, fast): test suite, typecheck,
