@@ -63,6 +63,7 @@ class ItemKind(StrEnum):
     DEMOTION_NOTICE = "demotion_notice"  # R8.2 autonomy revoked
     CALIBRATION_DRIFT = "calibration_drift"  # detection rate moved
     TEST_ADEQUACY = "test_adequacy"  # R8.5 Layer 0 blocked a change
+    HEALTH_BREACH = "health_breach"  # R8.4 control-limit breach (#232)
 
     @property
     def action_required(self) -> bool:
@@ -103,7 +104,8 @@ class Priority(StrEnum):
 
 #: Default priority per kind. A demotion is high because autonomy was
 #: revoked and the evidence is perishable; drift is low because it is a
-#: trend, not an event.
+#: trend, not an event. A health breach sits between the two: it is a
+#: trend like drift, but one that may have cost a level in the same run.
 DEFAULT_PRIORITY: dict[ItemKind, Priority] = {
     ItemKind.POLICY_EXCEPTION: Priority.HIGH,
     ItemKind.MERGE_GATE: Priority.NORMAL,
@@ -112,6 +114,7 @@ DEFAULT_PRIORITY: dict[ItemKind, Priority] = {
     ItemKind.DEMOTION_NOTICE: Priority.HIGH,
     ItemKind.CALIBRATION_DRIFT: Priority.LOW,
     ItemKind.TEST_ADEQUACY: Priority.NORMAL,
+    ItemKind.HEALTH_BREACH: Priority.NORMAL,
 }
 
 _PRIORITY_ORDER = {Priority.HIGH: 0, Priority.NORMAL: 1, Priority.LOW: 2}
@@ -521,6 +524,19 @@ class Inbox:
         A repeat of a still-open item bumps its occurrence count instead of
         adding a row. A repeat of a DECIDED item opens a fresh one: you
         approved that failure once, and its recurrence is new information.
+
+        A repeat refreshes ``detail`` AND ``evidence`` together. They are
+        two descriptions of the same observation, and refreshing only the
+        prose left the structured half - the half ``ks inbox`` and the
+        TUI render, and the durable one - reporting the first occurrence
+        while the text reported the latest. Measured on a health-breach
+        item: ``detail`` said value 0.9 over 20 runs while ``evidence``
+        still said 0.4 over 8. ``title`` is deliberately NOT refreshed:
+        it is the row's label, and a repeat must not relabel a row an
+        operator has already read. Neither is ``run_id``: it is the run
+        that first raised the item, which is where an operator goes to
+        read what happened, and ``last_seen_at`` with ``occurrences`` is
+        what says the condition is still current.
         """
         now = _utc_now()
         existing = self.find_by_dedupe_key(dedupe_key)
@@ -529,6 +545,8 @@ class Inbox:
             existing.last_seen_at = _iso(now)
             if detail:
                 existing.detail = detail
+            if evidence:
+                existing.evidence = evidence
             self._append(existing)
             return existing
         item = InboxItem(

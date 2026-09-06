@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import functools
+import importlib
 import json
 import os
 import shutil
@@ -16,7 +17,7 @@ from collections.abc import Callable, Mapping
 from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import IO, TYPE_CHECKING, Any, TextIO
+from typing import IO, TYPE_CHECKING, Any, Protocol, TextIO
 
 from kstrl.agents.base import UsageTotals, collect_usage, print_usage_rollup
 from kstrl.agents.proc import kill_active_process_groups
@@ -26,10 +27,11 @@ from kstrl.autonomy import (
     AutonomyLevel,
     AutonomyState,
     DemotionTrigger,
-    commit_transition,
+    apply_demotion,
     flag_bundle_for,
     manual_override_notes,
     resolve_runtime_level,
+    save_ladder_state,
 )
 from kstrl.breaker import BreakerConfig
 from kstrl.commandrun import start_heartbeat as _start_heartbeat
@@ -115,6 +117,7 @@ from kstrl.security import (
     run_security_review,
 )
 from kstrl.shutdown import StopController
+from kstrl.statedir import ControlStateError
 from kstrl.timeout import TimeoutConfig
 from kstrl.ui.bridge import EventBridgeUI
 from kstrl.verify import (
@@ -2731,11 +2734,228 @@ def _expired_futures(
     return [f for f in running if not f.done() and f in deadlines and now >= deadlines[f]]
 
 
+class _HealthBreach(Protocol):
+    """The R8.4 breach record this seam reads and #151 will supply.
+
+    Structural rather than imported: ``kstrl/health.py`` does not exist
+    yet, so the factory must not take a hard dependency on it. These five
+    attributes are the whole contract between #232 and #151; anything
+    else the eventual dataclass carries is invisible here.
+
+    READ-ONLY members, declared as properties rather than as the plain
+    ``metric: str`` a Protocol usually carries. A plain variable member
+    demands a SETTABLE attribute, and the record #151 is contracted to
+    supply is a ``@dataclass(frozen=True)``, whose attributes are
+    read-only: written the obvious way, this Protocol rejects the one
+    implementation it exists to describe, and would have done so at
+    exactly the moment the two changes met.
+    :func:`_health_breach_seam_accepts_the_contract` below is the guard
+    for that: it hands mypy the mandated frozen shape where a
+    ``_HealthBreach`` is expected, so ``uv run mypy kstrl/ --strict``
+    fails here rather than in #151.
+    """
+
+    @property
+    def metric(self) -> str: ...
+
+    @property
+    def rule(self) -> str: ...
+
+    @property
+    def value(self) -> float: ...
+
+    @property
+    def limit(self) -> float: ...
+
+    @property
+    def window_runs(self) -> int: ...
+
+
+if TYPE_CHECKING:
+
+    @dataclass(frozen=True)
+    class _HealthBreachContract:
+        """The record #151 is contracted to supply, spelled as the issue
+        and ``docs/dark-factory-roadmap.md`` spell it."""
+
+        metric: str
+        rule: str
+        value: float
+        limit: float
+        window_runs: int
+
+    def _health_breach_seam_accepts_the_contract(
+        breach: _HealthBreachContract,
+    ) -> _HealthBreach:
+        """A static assertion, and the only guard this seam can have.
+
+        The seam reads a module ``importlib`` returns as ``Any``, so
+        nothing about the two sides is checked where they meet. This
+        function is checked: it hands mypy the FROZEN dataclass the
+        contract mandates where a ``_HealthBreach`` is expected, so a
+        Protocol that dataclass cannot satisfy fails
+        ``uv run mypy kstrl/ --strict`` here rather than in #151.
+        ``TYPE_CHECKING`` only - nothing calls it and nothing is
+        constructed.
+        """
+        return breach
+
+
+def _open_health_breach_items(
+    root_dir: Path,
+    breaches: list[_HealthBreach],
+    *,
+    run_id: str,
+    ui: UI,
+) -> None:
+    """Write one advisory item per breach, non-fatally.
+
+    Honours ``[inbox] enabled``; a failed write warns and never fails the
+    run, because losing the notice must not also lose the demotion the
+    caller goes on to apply.
+
+    One guard PER BREACH, not one around the loop: a failure on the third
+    of five would otherwise drop the remaining two as well, under a
+    single warning that named none of them. The warning names the breach
+    it lost, so the operator can tell which observation is missing.
+    """
+    try:
+        inbox_config = InboxConfig.load(root_dir)
+    except (OSError, TypeError, ValueError, ControlStateError) as exc:
+        # TypeError is this callee's own surface: InboxConfig.load casts
+        # per key, so `[inbox] open_item_cap = 1979-05-27` (a valid TOML
+        # date) raises it rather than a ValueError, and a raw traceback
+        # from a seam whose whole contract is "bookkeeping cannot fail a
+        # run" is the outcome this guard exists to prevent.
+        ui.warn(f"Inbox write failed (non-fatal): {exc}")
+        return
+    if not inbox_config.enabled:
+        return
+    inbox = Inbox(root_dir, inbox_config)
+    for breach in breaches:
+        try:
+            inbox.add(
+                ItemKind.HEALTH_BREACH,
+                f"Health breach: {breach.metric} {breach.rule}",
+                detail=(
+                    f"value {breach.value} beyond limit {breach.limit} "
+                    f"over {breach.window_runs} run(s)"
+                ),
+                run_id=run_id,
+                dedupe_key=f"health:{breach.metric}:{breach.rule}",
+                evidence={
+                    "metric": breach.metric,
+                    "rule": breach.rule,
+                    "value": breach.value,
+                    "limit": breach.limit,
+                    "window_runs": breach.window_runs,
+                },
+            )
+        except (OSError, ValueError, ControlStateError) as exc:
+            # ControlStateError is a RuntimeError, raised by the control
+            # lock Inbox._append takes on every write.
+            ui.warn(f"Inbox write failed for {breach.metric} {breach.rule} (non-fatal): {exc}")
+
+
+def _record_health_breaches(
+    root_dir: Path,
+    state: AutonomyState,
+    autonomy_config: AutonomyConfig,
+    *,
+    run_id: str,
+    ui: UI,
+    bus: EventBus,
+) -> None:
+    """Open an inbox item per R8.4 control-limit breach, and maybe demote.
+
+    Inert until ``kstrl/health.py`` exists (#151). The import guard
+    swallows exactly one thing: THAT module not being importable at all,
+    which is what ``exc.name != "kstrl.health"`` decides. A
+    ``kstrl.health`` that exists and fails on a dependency the operator
+    has not installed raises ``ModuleNotFoundError`` naming that
+    dependency, and must reach the caller's "Autonomy state update
+    failed" warning rather than read as "#151 has not landed". A
+    ``kstrl.health`` that exists and has renamed ``health_breaches``
+    raises ``AttributeError`` and must do the same, so the attribute
+    lookup is INSIDE the guarded block where widening the clause can
+    swallow it and a test can see that it did. A seam that disarms itself
+    silently is worse than one that is loudly broken, and a bare
+    ``except ImportError`` cannot tell the two cases apart.
+
+    Advisory first: the item is always written, the demotion happens only
+    under ``[autonomy] demote_on_health_breach``. It is additionally
+    suppressed while a cool-down is running, because a breach is a
+    WINDOWED TREND rather than an event: it persists across runs, so an
+    ungated trigger would take one level per run down to L1 before the
+    operator had read the first notice. The suppression is announced, not
+    silent: a windowed trend can hold for the whole cool-down, and an
+    unexplained still level is the failure this ladder is meant to make
+    visible.
+
+    ``autonomy_config`` is the run's own snapshot, taken once at run
+    start, rather than a second read here: a run must not have its
+    permissions decided by one resolution of ``[autonomy]`` and its
+    demotion by another.
+
+    The false-alarm arithmetic #151 must choose its rule set against is
+    in ``docs/dark-factory-roadmap.md`` under R8.4, with the cost of a
+    false alarm attached. It is written there once rather than here as
+    well: two copies of an arithmetic nothing keeps in step is how one of
+    them goes wrong.
+    """
+    try:
+        health = importlib.import_module("kstrl.health")
+        breaches_of = health.health_breaches
+    except ModuleNotFoundError as exc:
+        if exc.name != "kstrl.health":
+            raise
+        return
+    # OUTSIDE the guard on purpose: a ModuleNotFoundError raised by
+    # #151's own code, for its own missing dependency, is that module
+    # being broken and not this one being absent.
+    breaches: list[_HealthBreach] = list(breaches_of(root_dir))
+    if not breaches:
+        return
+    _open_health_breach_items(root_dir, breaches, run_id=run_id, ui=ui)
+    if not autonomy_config.demote_on_health_breach:
+        return
+    if state.cooldown_runs_remaining > 0:
+        ui.warn(
+            f"Autonomy: {len(breaches)} health breach(es) recorded; not demoting during "
+            f"cool-down ({state.cooldown_runs_remaining} decisive run(s) remaining)"
+        )
+        return
+    first = breaches[0]
+    apply_demotion(
+        root_dir,
+        DemotionTrigger.HEALTH_BREACH,
+        f"{first.metric}: {first.rule}",
+        evidence={
+            "breaches": [
+                {
+                    "metric": breach.metric,
+                    "rule": breach.rule,
+                    "value": breach.value,
+                    "limit": breach.limit,
+                    "window_runs": breach.window_runs,
+                }
+                for breach in breaches
+            ],
+            "run_id": run_id,
+        },
+        run_id=run_id,
+        ui=ui,
+        bus=bus,
+        state=state,
+    )
+
+
 def _record_autonomy_outcome(
     *,
     root_dir: Path,
     manifest: Manifest,
     factory_result: FactoryResult,
+    autonomy_config: AutonomyConfig,
     bus: EventBus,
     run_id: str,
     ui: UI,
@@ -2760,6 +2980,10 @@ def _record_autonomy_outcome(
       These both block promotion AND fire an immediate demotion, because a
       breach of the envelope is the clearest evidence that the current
       level is not warranted.
+    - **Health breaches** (R8.4, seam only until #151): control-limit
+      breaches over run metrics, opened as inbox items on every path and
+      demoting only under an explicit switch. Read from ``kstrl.health``
+      if that module exists; see ``_record_health_breaches``.
 
     Automatic demotion happens here rather than mid-run: demoting while
     components are still executing would change the flag bundle underneath
@@ -2767,7 +2991,6 @@ def _record_autonomy_outcome(
     when it started.
     """
     state = AutonomyState.load(root_dir)
-    before = state.level
 
     by_id = {comp.id: comp for comp in manifest.components}
 
@@ -2794,58 +3017,33 @@ def _record_autonomy_outcome(
     ]
     if violations:
         state.record_policy_violation(len(violations))
-
-    if not violations:
-        state.save(root_dir)
+        apply_demotion(
+            root_dir,
+            DemotionTrigger.POLICY_VIOLATION,
+            f"policy violation in {', '.join(sorted(violations))}",
+            evidence={"components": sorted(violations), "run_id": run_id},
+            run_id=run_id,
+            ui=ui,
+            bus=bus,
+            state=state,
+        )
+    else:
+        # Through the same save every other path uses, which is what
+        # refuses to overwrite a file ``load`` failed closed on. This
+        # branch is the one an ordinary run takes, and it was the branch
+        # a guard placed in the demotion path could not see.
+        save_ladder_state(state, root_dir, ui)
         if decisive:
             ui.kv(
                 "Autonomy evidence",
                 f"L{state.level}: {state.decisive_runs_at_level} decisive run(s), "
                 f"{state.components_merged_at_level} merged",
             )
-        return
 
-    record = state.demote(
-        DemotionTrigger.POLICY_VIOLATION,
-        f"policy violation in {', '.join(sorted(violations))}",
-        evidence={"components": sorted(violations), "run_id": run_id},
-    )
-    if record is None:
-        # Already at the floor: nothing to revoke, but the violation is
-        # still counted so it blocks the next promotion.
-        state.save(root_dir)
-        ui.warn(
-            f"Autonomy: policy violation recorded ({len(violations)} "
-            "component(s)); already at L1, nothing to revoke"
-        )
-        return
-    commit_transition(state, record, root_dir, bus=bus, run_id=run_id)
-    # R8.2 promised this and R8.3 delivers it: a demotion is exactly the
-    # boundary condition an over-the-loop operator must see, and the
-    # triggering evidence is perishable - it belongs on the item.
-    try:
-        inbox_config = InboxConfig.load(root_dir)
-        if inbox_config.enabled:
-            Inbox(root_dir, inbox_config).add(
-                ItemKind.DEMOTION_NOTICE,
-                f"Autonomy demoted L{record.from_level} -> L{record.to_level}",
-                detail=record.reason,
-                run_id=run_id,
-                dedupe_key=f"demotion:{run_id}:{record.to_level}",
-                evidence={
-                    "trigger": record.trigger,
-                    "from_level": record.from_level,
-                    "to_level": record.to_level,
-                    **record.evidence,
-                },
-            )
-    except (OSError, ValueError) as exc:
-        ui.warn(f"Inbox write failed (non-fatal): {exc}")
-    ui.warn(
-        f"Autonomy DEMOTED L{before} -> L{state.level} "
-        f"({state.autonomy_level.label}) on policy violation; cool-down "
-        f"{state.cooldown_runs_remaining} decisive run(s)"
-    )
+    # The health seam runs on every path, the demoting one included: the
+    # cool-down that demotion just set is what then stops a second
+    # revocation inside one run.
+    _record_health_breaches(root_dir, state, autonomy_config, run_id=run_id, ui=ui, bus=bus)
 
 
 def run_factory(
@@ -4206,6 +4404,7 @@ def _run_factory_locked(
                 root_dir=root_dir,
                 manifest=manifest,
                 factory_result=factory_result,
+                autonomy_config=autonomy_config,
                 bus=bus,
                 run_id=run_id,
                 ui=ui,

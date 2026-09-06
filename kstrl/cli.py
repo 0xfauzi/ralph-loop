@@ -4507,6 +4507,10 @@ def autonomy_replay_cmd(
     Reports what WOULD have fired and whether the sample is large enough
     to calibrate anything. Never mutates ladder state. Exit code 2 means
     "insufficient data", so a script cannot mistake it for a green run.
+
+    This is also the advisory mode for the R8.4 health rules: it reports
+    would-have-fired counts and never demotes, so a candidate rule set is
+    scored against real history before it is allowed to revoke a level.
     """
     from kstrl.autonomy_replay import replay_file
 
