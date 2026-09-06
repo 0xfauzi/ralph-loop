@@ -110,6 +110,18 @@ _LEGACY_LIST_PHASE: dict[str, str] = {
 }
 
 
+def _require_known_phase(phase: str) -> None:
+    """One definition of a phase name this object will accept.
+
+    Entries and readings are joined by this string: an entry is retired
+    when a reading names the same phase. Two copies of the check are two
+    definitions of the vocabulary, and the weaker one is the one that
+    decides.
+    """
+    if phase not in PHASE_RANK:
+        raise ValueError(f"unknown phase {phase!r}; expected one of {sorted(PHASE_RANK)}")
+
+
 @dataclass
 class IterationRecord:
     """Record of a single iteration attempt.
@@ -159,8 +171,8 @@ class PhaseReading:
     and cleared a finding and a reviewer that never looked. That is
     issue #247.
 
-    What it is NOT, drawn the same way ``FailureEntry.infrastructure``
-    draws it from the other end:
+    What it is NOT. ``FailureEntry.infrastructure`` draws the same line
+    from the failure side:
 
     - a phase that was SKIPPED produces no reading, so an entry it
       cleared in an earlier attempt is still shown. That is the whole
@@ -200,7 +212,7 @@ class IterationContext:
 
     records: list[IterationRecord] = field(default_factory=list)
     entries: list[FailureEntry] = field(default_factory=list)
-    readings: list[PhaseReading] = field(default_factory=list)
+    readings: set[PhaseReading] = field(default_factory=set)
 
     # Backward-compatible read-only views. Nothing in kstrl/ reads these
     # any more, but they keep the shape the pre-R10.2 object exposed.
@@ -267,15 +279,13 @@ class IterationContext:
         """Record that ``phase`` ran in ``attempt`` and returned a
         verdict. See ``PhaseReading`` for what does and does not count.
 
-        Idempotent: the merge that writes these runs once per failing
-        gate and the record is carried forward across attempts, so the
-        same (attempt, phase) pair arrives more than once by design.
+        The merge that writes these runs once per failing gate and the
+        record is carried forward across attempts, so the same reading
+        arrives more than once by design; ``readings`` is a set, so that
+        is a no-op rather than a rule to remember.
         """
-        if phase not in PHASE_RANK:
-            raise ValueError(f"unknown phase {phase!r}; expected one of {sorted(PHASE_RANK)}")
-        reading = PhaseReading(attempt=attempt, phase=phase)
-        if reading not in self.readings:
-            self.readings.append(reading)
+        _require_known_phase(phase)
+        self.readings.add(PhaseReading(attempt=attempt, phase=phase))
 
     def _add(
         self,
@@ -286,8 +296,7 @@ class IterationContext:
     ) -> None:
         if not text:
             return
-        if phase not in PHASE_RANK:
-            raise ValueError(f"unknown phase {phase!r}; expected one of {sorted(PHASE_RANK)}")
+        _require_known_phase(phase)
         self.entries.append(
             FailureEntry(
                 attempt=attempt,
@@ -356,15 +365,12 @@ class IterationContext:
         # got that far), but it is not a reading of its own phase, so it
         # cannot supersede an earlier real finding there.
         measured_ranks = {PHASE_RANK[e.phase] for e in latest if not e.infrastructure}
-        # The skippable phases with NO reading in attempt N: the ones
-        # whose older entries the rank rule still may not retire. A
-        # phase that ran and returned a verdict drops out of this set,
-        # which is the observation route #247 added. Computed as a set
-        # here, and through a helper rather than inline, so the branch
-        # below stays a single membership test and this function's
-        # cognitive complexity does not rise (it is already at 18
-        # against a gate of 15, and the pre-commit ratchet fails a rise
-        # in a function that is over).
+        # The skippable phases whose older entries the rank rule still
+        # may not retire. Computed as a set here, and through a helper
+        # rather than inline, so the branch below stays a single
+        # membership test and this function's cognitive complexity does
+        # not rise: it is already at 18 against a gate of 15, and the
+        # pre-commit ratchet fails a rise in a function that is over.
         unread_skippable = SKIPPABLE_PHASES - self._phases_read_in(n)
 
         for entry in self.entries:
@@ -493,7 +499,13 @@ class IterationContext:
                 }
                 for e in self.entries
             ],
-            "readings": [{"attempt": r.attempt, "phase": r.phase} for r in self.readings],
+            # Sorted because the source is a set and this string crosses
+            # a process boundary: unsorted, the same context would
+            # serialise differently under a different PYTHONHASHSEED.
+            "readings": [
+                {"attempt": attempt, "phase": phase}
+                for attempt, phase in sorted((r.attempt, r.phase) for r in self.readings)
+            ],
         }
         return json.dumps(data)
 
@@ -521,7 +533,7 @@ class IterationContext:
         # process degrades to showing the finding rather than to
         # dropping it.
         for reading_data in parsed.get("readings", []):
-            ctx.readings.append(
+            ctx.readings.add(
                 PhaseReading(
                     attempt=reading_data["attempt"],
                     phase=reading_data["phase"],

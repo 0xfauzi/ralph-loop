@@ -13,19 +13,22 @@ nonsense. It is a separate file because ``tests/test_context.py`` is at
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator
-from itertools import product
 
 import pytest
 
 from kstrl.context import (
     PHASE_RANK,
     SKIPPABLE_PHASES,
-    FailureEntry,
     IterationContext,
     PhaseReading,
 )
-from tests.test_context import NOT_REMEASURED, RESOLVED, section
+from tests.test_context import (
+    NOT_REMEASURED,
+    RESOLVED,
+    build_sweep_context,
+    section,
+    sweep_sequences,
+)
 
 
 class TestReadingsRetireOnlyWhatTheyMeasured:
@@ -33,7 +36,7 @@ class TestReadingsRetireOnlyWhatTheyMeasured:
         """The record is attempt-scoped, which is what makes carrying it
         forward safe.
 
-        ``_with_phase_readings`` in the pipeline merges every reading it
+        ``_merge_phase_readings`` in the pipeline merges every reading it
         holds into the context at whichever gate fails, and the context
         then travels to the next attempt with all of them. A reading
         from attempt 1 must not retire anything when attempt 2 is the
@@ -88,16 +91,16 @@ class TestReadingsRetireOnlyWhatTheyMeasured:
         ctx = IterationContext()
         ctx.add_phase_reading("review", attempt=2)
         ctx.add_phase_reading("review", attempt=2)
-        assert ctx.readings == [PhaseReading(attempt=2, phase="review")]
+        assert ctx.readings == {PhaseReading(attempt=2, phase="review")}
 
 
 class TestReadingsCrossTheProcessBoundary:
     def test_readings_survive_the_json_round_trip(self) -> None:
         """The real transport. ``component_contexts`` holds a STRING
         that crosses the ProcessPoolExecutor boundary and is re-parsed in
-        the worker, and ``_with_phase_readings`` itself goes through
-        ``from_json``/``to_json``. A record that does not serialise is a
-        record that does not exist.
+        the worker, and every writer of it serialises through
+        ``to_json``. A record that does not serialise is a record that
+        does not exist.
         """
         ctx = IterationContext()
         ctx.add_review_finding("criterion X", attempt=1, phase="review")
@@ -105,7 +108,7 @@ class TestReadingsCrossTheProcessBoundary:
         ctx.add_phase_reading("review", attempt=2)
 
         back = IterationContext.from_json(ctx.to_json())
-        assert back.readings == [PhaseReading(attempt=2, phase="review")]
+        assert back.readings == {PhaseReading(attempt=2, phase="review")}
         assert back.format_for_prompt() == ctx.format_for_prompt()
         assert "criterion X" not in back.format_for_prompt()
 
@@ -140,7 +143,7 @@ class TestReadingsCrossTheProcessBoundary:
             }
         )
         ctx = IterationContext.from_json(current_shape)
-        assert ctx.readings == []
+        assert ctx.readings == set()
         assert "criterion X" in section(ctx.format_for_prompt(), NOT_REMEASURED)
 
         legacy_shape = json.dumps(
@@ -152,7 +155,7 @@ class TestReadingsCrossTheProcessBoundary:
             }
         )
         legacy = IterationContext.from_json(legacy_shape)
-        assert legacy.readings == []
+        assert legacy.readings == set()
         assert "criterion X" in section(legacy.format_for_prompt(), NOT_REMEASURED)
 
 
@@ -167,22 +170,13 @@ class TestBucketRuleSweepWithReadings:
     """
 
     def build(self, sequence: tuple[str, ...], legacy: bool) -> IterationContext:
-        ctx = IterationContext()
-        if legacy:
-            ctx.entries.append(FailureEntry(0, "review", "legacy"))
-        for attempt, phase in enumerate(sequence, start=1):
-            ctx.add_review_finding(
-                f"{phase}-{attempt}",
-                attempt=attempt,
-                phase=phase,
-            )
+        """The control's corpus, plus a reading for every skippable
+        phase at the latest attempt. Sharing the builder is what keeps
+        the two sweeps over the same entries."""
+        ctx = build_sweep_context(sequence, legacy)
         for phase in sorted(SKIPPABLE_PHASES):
             ctx.add_phase_reading(phase, attempt=len(sequence))
         return ctx
-
-    def sequences(self) -> Iterator[tuple[str, ...]]:
-        for length in range(1, 5):
-            yield from product(PHASE_RANK, repeat=length)
 
     def check_one_partition(self, sequence: tuple[str, ...], legacy: bool) -> None:
         ctx = self.build(sequence, legacy)
@@ -205,7 +199,7 @@ class TestBucketRuleSweepWithReadings:
 
     def test_every_entry_lands_in_exactly_one_bucket(self) -> None:
         cases = 0
-        for sequence in self.sequences():
+        for sequence in sweep_sequences():
             for legacy in (False, True):
                 self.check_one_partition(sequence, legacy)
                 cases += 1
@@ -239,5 +233,5 @@ class TestBucketRuleSweepWithReadings:
         makes this a statement about the record's effect rather than a
         second copy of the rule.
         """
-        moved = sum(self.check_one_difference(seq) for seq in self.sequences())
+        moved = sum(self.check_one_difference(seq) for seq in sweep_sequences())
         assert moved > 0

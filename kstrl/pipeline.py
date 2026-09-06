@@ -185,6 +185,44 @@ class DiffPhaseResult:
     failure: PhaseFailure | None = None
 
 
+def _produced_a_reading(ran: bool, result: ReviewResult | SecurityResult | None) -> bool:
+    """Whether a skippable phase actually measured the change (#247).
+
+    Narrower than ``ran`` on purpose, and the narrowness is the point.
+    The only consumer is the record ``_buckets`` uses to decide whether
+    an OLDER finding may be dropped, so the predicate has to be the one
+    that makes dropping safe.
+
+    ``ran`` is not that predicate. In ADVISORY mode a reviewer that
+    CRASHES yields ``passed = review_mode != HARD`` = True with
+    ``infrastructure_error=True``: it records no failure entry and the
+    phase returns ``ran=True``. Keying on ``ran`` would let a crashed
+    reviewer in attempt N retire attempt N-1's real finding, and if the
+    budget then ran out the finding would never be seen again. That is
+    the fail-open ``FailureEntry.infrastructure`` and
+    ``Finding.infrastructure_error`` (E9) both exist to prevent.
+
+    A review that ran and FAILED does count. Its own entry lands in
+    ``current`` and an older entry at the same rank is retired by the
+    ``rank == q`` branch already, so recording it changes no bucket; it
+    keeps the record a truthful census of the attempt rather than a
+    special case.
+
+    ``result is not None`` cannot be False on a ``ran=True`` path today.
+    It is here so the answer stays the safe one if a future return site
+    makes it possible.
+
+    Review and security answer this the same way, and one definition is
+    the point: two copies drift into two meanings of "the reviewer
+    looked", and the looser one is the one that retires a finding. A
+    shared frozen base is not available, because narrowing ``result``
+    per subclass is an invariant-attribute override ``mypy --strict``
+    rejects; both concrete results declare ``infrastructure_error``, so
+    a function over the union is.
+    """
+    return ran and result is not None and not result.infrastructure_error
+
+
 @dataclass(frozen=True)
 class ReviewPhaseResult:
     """Phase 2 outcome. ``ran=False`` carries a skip reason when the
@@ -198,33 +236,7 @@ class ReviewPhaseResult:
 
     @property
     def produced_a_reading(self) -> bool:
-        """Whether this phase actually measured the change (#247).
-
-        Narrower than ``ran`` on purpose, and the narrowness is the
-        point. The only consumer is the record ``_buckets`` uses to
-        decide whether an OLDER finding may be dropped, so the predicate
-        has to be the one that makes dropping safe.
-
-        ``ran`` is not that predicate. In ADVISORY mode a reviewer that
-        CRASHES yields ``passed = review_mode != HARD`` = True with
-        ``infrastructure_error=True``: it records no failure entry and
-        this phase returns ``ran=True``. Keying on ``ran`` would let a
-        crashed reviewer in attempt N retire attempt N-1's real finding,
-        and if the budget then ran out the finding would never be seen
-        again. That is the fail-open ``FailureEntry.infrastructure`` and
-        ``Finding.infrastructure_error`` (E9) both exist to prevent.
-
-        A review that ran and FAILED does count. Its own entry lands in
-        ``current`` and an older entry at the same rank is retired by the
-        ``rank == q`` branch already, so recording it changes no bucket;
-        it keeps the record a truthful census of the attempt rather than
-        a special case.
-
-        ``result is not None`` cannot be False on a ``ran=True`` path
-        today. It is here so the answer stays the safe one if a future
-        return site makes it possible.
-        """
-        return self.ran and self.result is not None and not self.result.infrastructure_error
+        return _produced_a_reading(self.ran, self.result)
 
 
 @dataclass(frozen=True)
@@ -239,9 +251,7 @@ class SecurityPhaseResult:
 
     @property
     def produced_a_reading(self) -> bool:
-        """Same predicate and same reasoning as
-        ``ReviewPhaseResult.produced_a_reading``; see there."""
-        return self.ran and self.result is not None and not self.result.infrastructure_error
+        return _produced_a_reading(self.ran, self.result)
 
 
 @dataclass(frozen=True)
@@ -1365,18 +1375,17 @@ class ComponentPipeline:
         if produced:
             self._phase_readings.setdefault(comp.id, set()).add((comp.retries + 1, phase))
 
-    def _with_phase_readings(self, comp_id: str, context_json: str) -> str:
+    def _merge_phase_readings(self, comp_id: str, ctx: IterationContext) -> None:
         """Merge this attempt's readings into the context about to be
         stored for the next attempt.
 
-        A record carried forward from an older attempt is inert by
-        construction: ``_buckets`` only consults readings whose attempt
-        equals the latest one.
+        Takes the object rather than JSON so each writer parses and
+        serialises once. A record carried forward from an older attempt
+        is inert by construction: ``_buckets`` only consults readings
+        whose attempt equals the latest one.
         """
-        ctx = IterationContext.from_json(context_json)
-        for attempt, phase in sorted(self._phase_readings.get(comp_id, set())):
+        for attempt, phase in self._phase_readings.get(comp_id, set()):
             ctx.add_phase_reading(phase, attempt=attempt)
-        return ctx.to_json()
 
     def record_contract_failure(self, comp_id: str, attempt: int, test_output: str) -> None:
         """Add a contract-test failure to a component's retry context.
@@ -1398,7 +1407,8 @@ class ComponentPipeline:
         """
         ctx = IterationContext.from_json(self.component_contexts.get(comp_id, "{}"))
         ctx.add_contract_failure(test_output, attempt=attempt)
-        self.component_contexts[comp_id] = self._with_phase_readings(comp_id, ctx.to_json())
+        self._merge_phase_readings(comp_id, ctx)
+        self.component_contexts[comp_id] = ctx.to_json()
 
     def retry_or_fail(
         self,
@@ -1450,10 +1460,9 @@ class ComponentPipeline:
                 # The chokepoint: every failing gate that carries a
                 # context routes here, so this is the one place the
                 # attempt's phase readings have to be merged in (#247).
-                self.component_contexts[comp.id] = self._with_phase_readings(
-                    comp.id,
-                    context_json,
-                )
+                ctx = IterationContext.from_json(context_json)
+                self._merge_phase_readings(comp.id, ctx)
+                self.component_contexts[comp.id] = ctx.to_json()
             self.bus.emit(
                 ev.ComponentRetrying(
                     component=comp.id,

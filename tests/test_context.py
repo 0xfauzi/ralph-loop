@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from itertools import product
 
 from kstrl.context import (
@@ -640,6 +641,32 @@ class TestIterationContext:
         assert ctx.contract_failures == ["tier 0 broke"]
 
 
+def build_sweep_context(sequence: tuple[str, ...], legacy: bool) -> IterationContext:
+    """One failure per attempt, in the order ``sequence`` names.
+
+    Module level because ``tests/test_context_readings.py`` builds the
+    same corpus with readings added and calls this the control. Two
+    copies of the convention could drift, and the control would then be
+    a different corpus from the one under test.
+    """
+    ctx = IterationContext()
+    if legacy:
+        ctx.entries.append(FailureEntry(0, "review", "legacy"))
+    for attempt, phase in enumerate(sequence, start=1):
+        ctx.add_review_finding(
+            f"{phase}-{attempt}",
+            attempt=attempt,
+            phase=phase,
+        )
+    return ctx
+
+
+def sweep_sequences() -> Iterator[tuple[str, ...]]:
+    """Every phase sequence of one to four attempts."""
+    for length in range(1, 5):
+        yield from product(PHASE_RANK, repeat=length)
+
+
 class TestBucketRuleSweep:
     """Every failure sequence of one to four attempts over the seven
     phases, with and without a legacy entry: 5600 cases.
@@ -650,55 +677,40 @@ class TestBucketRuleSweep:
     them against the shipped implementation rather than the model.
     """
 
-    def build(self, sequence: tuple[str, ...], legacy: bool) -> IterationContext:
-        ctx = IterationContext()
-        if legacy:
-            ctx.entries.append(FailureEntry(0, "review", "legacy"))
-        for attempt, phase in enumerate(sequence, start=1):
-            ctx.add_review_finding(
-                f"{phase}-{attempt}",
-                attempt=attempt,
-                phase=phase,
-            )
-        return ctx
-
     def test_every_entry_lands_in_exactly_one_bucket(self) -> None:
         cases = 0
-        for length in range(1, 5):
-            for sequence in product(PHASE_RANK, repeat=length):
-                for legacy in (False, True):
-                    ctx = self.build(sequence, legacy)
-                    b = ctx._buckets()
-                    total = len(b.current) + len(b.not_remeasured) + len(b.resolved)
-                    assert total == len(ctx.entries)
+        for sequence in sweep_sequences():
+            for legacy in (False, True):
+                ctx = build_sweep_context(sequence, legacy)
+                b = ctx._buckets()
+                total = len(b.current) + len(b.not_remeasured) + len(b.resolved)
+                assert total == len(ctx.entries)
 
-                    n = length
-                    q = PHASE_RANK[sequence[-1]]
-                    assert [e.attempt for e in b.current] == [n]
-                    for e in b.not_remeasured:
-                        rank = PHASE_RANK[e.phase]
-                        assert e.attempt == 0 or (
-                            e.attempt < n
-                            and (rank > q or (rank < q and e.phase in SKIPPABLE_PHASES))
-                        )
-                    for e in b.resolved:
-                        rank = PHASE_RANK[e.phase]
-                        assert 0 < e.attempt < n
-                        # Retired only when observed (same phase re-ran)
-                        # or safely inferred (a phase that always runs).
-                        assert rank == q or (rank < q and e.phase not in SKIPPABLE_PHASES)
-                    cases += 1
+                n = len(sequence)
+                q = PHASE_RANK[sequence[-1]]
+                assert [e.attempt for e in b.current] == [n]
+                for e in b.not_remeasured:
+                    rank = PHASE_RANK[e.phase]
+                    assert e.attempt == 0 or (
+                        e.attempt < n and (rank > q or (rank < q and e.phase in SKIPPABLE_PHASES))
+                    )
+                for e in b.resolved:
+                    rank = PHASE_RANK[e.phase]
+                    assert 0 < e.attempt < n
+                    # Retired only when observed (same phase re-ran)
+                    # or safely inferred (a phase that always runs).
+                    assert rank == q or (rank < q and e.phase not in SKIPPABLE_PHASES)
+                cases += 1
         assert cases == 5600
 
     def test_current_section_does_not_grow_with_repeated_failures(self) -> None:
         sizes = []
         for k in range(1, 5):
-            ctx = self.build(("verification",) * k, legacy=False)
+            ctx = build_sweep_context(("verification",) * k, legacy=False)
             sizes.append(len(ctx._buckets().current))
         assert sizes == [1, 1, 1, 1]
 
     def test_legacy_entry_never_resolves(self) -> None:
-        for length in range(1, 5):
-            for sequence in product(PHASE_RANK, repeat=length):
-                ctx = self.build(sequence, legacy=True)
-                assert all(e.attempt != 0 for e in ctx._buckets().resolved)
+        for sequence in sweep_sequences():
+            ctx = build_sweep_context(sequence, legacy=True)
+            assert all(e.attempt != 0 for e in ctx._buckets().resolved)
