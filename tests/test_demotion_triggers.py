@@ -29,7 +29,9 @@ from kstrl.autonomy import (
     AutonomyLevel,
     AutonomyState,
     DemotionTrigger,
+    Transition,
     apply_demotion,
+    commit_transition,
 )
 from kstrl.config import ConfigError
 from kstrl.config_preflight import config_problem_lines
@@ -197,6 +199,35 @@ class TestApplyDemotion:
         assert AutonomyState.load(tmp_path).level == int(AutonomyLevel.L2_GATED_MERGE)
         assert "Inbox write failed (non-fatal)" in buffer.getvalue()
         assert "Autonomy DEMOTED L3 -> L2" in buffer.getvalue()
+
+    def test_commit_transition_does_not_journal_a_refused_save(self, tmp_path: Path) -> None:
+        """A transition the state file did not take is not a transition.
+
+        ``commit_transition`` exists so the state save and the two audit
+        streams cannot drift apart, and the save is the load-bearing one.
+        Once ``save`` can refuse, journalling anyway would record a level
+        nothing holds. Driven directly because the reachable callers
+        cannot get here: ``load`` fails closed to L1, and a demotion at
+        L1 returns None before this function.
+        """
+        AutonomyState(level=int(AutonomyLevel.L3_ENVELOPED_AUTO)).save(tmp_path)
+        path = control_file(tmp_path, CONTROL_AUTONOMY)
+        path.write_text("{ not json", encoding="utf-8")
+        state = AutonomyState.load(tmp_path)
+        assert state.degraded_reason is not None
+        record = Transition(
+            at="2026-09-06T00:00:00+00:00",
+            from_level=1,
+            to_level=2,
+            direction="promote",
+            actor="operator",
+            reason="manual",
+        )
+
+        commit_transition(state, record, tmp_path)
+
+        assert path.read_text(encoding="utf-8") == "{ not json"
+        assert not (tmp_path / ".kstrl" / "evolution.jsonl").exists()
 
     def test_notice_honours_inbox_disabled(self, tmp_path: Path) -> None:
         """An inbox an operator switched off is not re-opened by a demotion.
