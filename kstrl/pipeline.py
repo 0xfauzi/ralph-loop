@@ -3215,9 +3215,9 @@ class ComponentPipeline:
             # ONTO is the refusal: keyed the other way, a mode added
             # later would merge unreviewed by default, which is the
             # fail-open direction and the exact outcome #226 exists to
-            # remove. SKIP returned above and both remaining members are
-            # named here, so this is the same behaviour today as
-            # ``== HARD`` was, measured by the suite staying green.
+            # remove. SKIP returned above, so the two arms reachable
+            # today are exactly HARD and ADVISORY and this is the same
+            # behaviour ``== HARD`` had, with the suite green either way.
             # Phase 2.5 has the same shape for the same reason.
             if review_mode != ReviewMode.ADVISORY:
                 comp.review_passed = False
