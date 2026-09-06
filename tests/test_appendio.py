@@ -31,6 +31,7 @@ from kstrl.appendio import (
     handle_ends_without_newline,
     open_for_append,
 )
+from tests.helpers.rootperms import skip_as_root
 
 REPAIR = '{"event_type":"' + JOURNAL_REPAIR_EVENT + '"}\n'
 
@@ -137,6 +138,7 @@ class TestTheHandleForm:
             assert append_terminated(handle, '{"c":3}\n', repair=REPAIR) is False
         assert path.read_bytes().endswith(b'{"b":2}\n{"c":3}\n')
 
+    @skip_as_root
     def test_open_for_append_raises_on_a_file_it_cannot_read(self, tmp_path: Path) -> None:
         """The point of ``"a+b"``: write-only is refused, not probed blind.
 

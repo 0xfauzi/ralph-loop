@@ -31,7 +31,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from pathlib import Path
 
 import pytest
@@ -51,6 +50,7 @@ from tests.helpers.journal import (
     tear,
     terminate,
 )
+from tests.helpers.rootperms import skip_as_root
 
 
 class TestTheEntryAfterATear:
@@ -417,10 +417,7 @@ class TestAnUnreadableJournal:
     """#327 round 1, F3: a probe that could not read must never be taken
     for "not torn"."""
 
-    @pytest.mark.skipif(
-        hasattr(os, "geteuid") and os.geteuid() == 0,
-        reason="root ignores the mode bits this test sets",
-    )
+    @skip_as_root
     def test_a_write_only_journal_refuses_rather_than_appending_blind(
         self,
         tmp_path: Path,
