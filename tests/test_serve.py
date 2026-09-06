@@ -262,6 +262,11 @@ def _no_spend(monkeypatch: pytest.MonkeyPatch):
     )
 
 
+#: Nothing here is about flow control; the fixture's docstring in
+#: tests/conftest.py says why the R10.7 bound has to be held open.
+pytestmark = pytest.mark.usefixtures("no_open_prs")
+
+
 # --------------------------------------------------------------------------
 # The classifier
 # --------------------------------------------------------------------------

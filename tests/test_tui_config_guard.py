@@ -79,7 +79,13 @@ EXPECTED_RUNTIMEERROR_SPELLINGS: dict[str, int] = {
     "inbox.py": 1,
     "intake_github.py": 1,
     "pr.py": 4,  # no subclass: four bare raises
-    "serve.py": 1,
+    # One bare raise, plus four from the R10.7 open-PR bound (#228), all
+    # in count_open_kstrl_prs: a failed gh result, the two bad-payload
+    # shapes, and a row that is not a PR record. check_open_pr_bound
+    # catches `Exception`, not `RuntimeError`, so it contributes none.
+    # The transport failures belong to run_gh, counted against
+    # intake_github.py rather than here.
+    "serve.py": 5,
     # One since #232: ControlLockedError and ControlUnavailableError now
     # derive from a shared ControlStateError, which is the only class in
     # the module that spells RuntimeError. They are still kstrl's, so

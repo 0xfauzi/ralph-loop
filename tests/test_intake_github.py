@@ -54,6 +54,11 @@ from kstrl.workqueue import (
 REPO = "0xfauzi/claude-skills"
 
 
+#: Nothing here is about flow control; the fixture's docstring in
+#: tests/conftest.py says why the R10.7 bound has to be held open.
+pytestmark = pytest.mark.usefixtures("no_open_prs")
+
+
 def _queue(root: Path, **kwargs: object) -> Queue:
     return Queue(root, QueueConfig(**kwargs))  # type: ignore[arg-type]
 

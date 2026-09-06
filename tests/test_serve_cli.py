@@ -42,6 +42,11 @@ def _no_spend(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+#: Nothing here is about flow control; the fixture's docstring in
+#: tests/conftest.py says why the R10.7 bound has to be held open.
+pytestmark = pytest.mark.usefixtures("no_open_prs")
+
+
 class TestServeHelp:
     def test_the_command_is_registered(self) -> None:
         result = CliRunner().invoke(cli, ["--help"])
@@ -91,7 +96,13 @@ class TestDryRun:
 
     def test_dry_run_reports_every_gate(self, tmp_path: Path) -> None:
         result = _invoke(["serve", "--dry-run"], tmp_path)
-        for gate in ("poison breaker", "cost coverage", "budget", "inbox cap"):
+        for gate in (
+            "poison breaker",
+            "cost coverage",
+            "budget",
+            "inbox cap",
+            "open-PR bound",
+        ):
             assert gate in result.output
 
     def test_dry_run_reports_safe_mode_above_the_gates(

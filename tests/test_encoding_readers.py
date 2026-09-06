@@ -105,7 +105,12 @@ EXPECTED_READ_SPELLINGS: dict[str, int] = {
     "prd.py": 1,
     "proposals.py": 4,
     "security.py": 1,
-    "serve.py": 4,
+    # Four reads, plus the string literal "open" in the ``gh pr list
+    # --state open`` argv of ``count_open_kstrl_prs`` (#228). The net is
+    # over the TOKEN, not over reads, and a net that decided which
+    # spellings to leave out is a net that can be wrong about what it
+    # left out - so the row moves and says which one is not a read.
+    "serve.py": 5,
     "statedir.py": 1,
     "tui/embed.py": 1,
     "tui/runs.py": 2,

@@ -162,6 +162,24 @@ stage, runtime feedback, and an earned-autonomy ladder). See
 
 ### Added
 
+- **Breaking:** for daemon users, `ks serve` now stops admitting work
+  while a kstrl-authored pull request is open. A repository with one
+  open kstrl PR will admit nothing until it is merged or closed. The new
+  `[serve] max_open_prs` defaults to 1; set it to 0 to restore the old
+  unbounded behaviour, or raise it. The refusal is a wait rather than a
+  pause: nothing needs resuming, and the next cycle proceeds on its own
+  once the PR is gone. A PR counts as kstrl-authored when its body ENDS
+  with the footer line kstrl writes, so pull requests opened since the
+  footer took its current wording are counted too, and a pull request
+  that merely quotes the footer in prose is not. Anything that is not a
+  usable count refuses admission, because an unknown number of open PRs
+  is not zero; that includes a `gh pr list` page filled to its limit,
+  where the count is only a lower bound. After three consecutive polls
+  with an unusable count the daemon files one inbox item, since an
+  expired `gh` token and a `gh` missing from launchd's PATH never clear
+  themselves. Manual `ks factory` and `ks run` are unaffected: a human
+  typing the command is the authorisation. `ks serve --dry-run` lists
+  the new gate last (R10.7, #228).
 - The architect's non-blocker spec findings now reach the engineer. They
   were written to `scripts/kstrl/spec-issues.json` on every decompose and
   nothing in `kstrl/` ever opened that file: across five recorded runs

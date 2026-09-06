@@ -272,6 +272,29 @@ def clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
     _clear_kstrl_env(monkeypatch)
 
 
+@pytest.fixture
+def no_open_prs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hold the R10.7 open-PR bound open for a whole module.
+
+    For the serve and intake suites, none of which is about flow
+    control. ``max_open_prs`` defaults to 1 and a ``tmp_path`` is not a
+    git checkout, so the real counter fails there and the gate refuses -
+    correctly, since an unknown number of open PRs is not zero. Stubbing
+    the COUNTER rather than the gate keeps the gate itself in the code
+    path those tests execute.
+
+    Opt-in via ``pytestmark = pytest.mark.usefixtures("no_open_prs")``,
+    NOT autouse: ``tests/test_flow_control.py`` asserts the bound's real
+    behaviour, including the counter, and must not be stubbed out.
+    """
+    from kstrl.serve import OpenPrCount
+
+    monkeypatch.setattr(
+        "kstrl.serve.count_open_kstrl_prs",
+        lambda root: OpenPrCount(count=0, saturated=False),
+    )
+
+
 # ---------------------------------------------------------------------------
 # A real repository for the reviewer roles (#266)
 # ---------------------------------------------------------------------------

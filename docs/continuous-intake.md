@@ -98,7 +98,7 @@ context. Raising the ceiling or narrowing the spec is a human decision.
 Poisoned items wait for a human. `ks queue ls --state poison` lists them;
 `ks inbox ls` carries the decision.
 
-### Four backstops, because a correct classifier is not enough
+### Five backstops, because a correct classifier is not enough
 
 A *persistent* infrastructure fault is retryable by the rules above and
 still burns money. So:
@@ -112,6 +112,49 @@ still burns money. So:
 4. **`[serve] max_consecutive_poison`** - pauses the whole queue. If the
    base branch is broken, every run fails verification, each failure is
    individually legitimate, and no per-item bound ever notices.
+5. **`[serve] max_open_prs`** - flow control on the OUTPUT rather than
+   the spend. The first four bound what the daemon starts; this one
+   bounds what it leaves behind for a human to read.
+
+### Flow control: `max_open_prs`
+
+Scheduled admission stops while `max_open_prs` kstrl-authored pull
+requests are open. The default is 1. Without a bound, a daily loop can
+generate several unreviewed pull requests in a week, producing review
+fatigue and merge conflicts. The rule: a loop may be handed only as much
+autonomy as its output can be cheaply and reliably verified.
+
+A pull request counts as kstrl-authored when its body ENDS with the
+footer line kstrl writes, which is where both writers put it. Anchoring
+at the end rather than matching anywhere in the body is deliberate, and
+both error directions are worth knowing:
+
+- **False negative.** A pull request opened before the footer took its
+  current wording is not counted; the literal was a different one until
+  the project was renamed. Neither is one whose body a human has edited.
+- **False positive.** A pull request whose body was written by hand to
+  end with exactly that line. Merely quoting or discussing the footer
+  does not count, which is the case that mattered: a substring match
+  counted a pull request whose description quoted the constant.
+
+The count comes from `gh pr list` in the repo root and looks at the
+newest 100 open pull requests. Anything that is not a usable number
+refuses admission rather than reading as zero, and that includes a full
+page: with 100 or more open pull requests the count is a lower bound, so
+it is conclusive only when it already reaches the bound.
+
+The refusal is a wait, not a pause: nothing needs to be resumed, and the
+next cycle admits work as soon as the pull request is merged or closed.
+That is right for a rate limit or a brief outage. It is not right for a
+count that never works - an expired `gh` token, or `gh` missing from
+launchd's PATH - so after three consecutive polls with an unusable count
+the daemon files one inbox item and keeps waiting. One item per streak,
+not one per poll; a successful count resets it.
+
+**Manual `ks factory` and `ks run` bypass the bound entirely**, because a
+human typing the command is the authorisation. Only the daemon's own
+admission consults it. Set `max_open_prs = 0` to switch it off, or raise
+it if 1 chafes.
 
 ### What `daily_budget_usd` can and cannot do
 
@@ -333,6 +376,8 @@ gone - a crash, an OOM kill, a reboot - not for an ordinary lid close.
 | `serve.out.log` is empty | expected - the UI writes to stderr; read `serve.err.log` |
 | Component failed, cause unclear | an unevidenced failure now prints the component's own error; check it before suspecting the spec |
 | Every poll fails silently under launchd | `PATH` - `gh` is not findable (§4) |
+| Daemon says `N kstrl PR(s) open` | flow control is holding the queue; merge or close the PR, or set `[serve] max_open_prs = 0` |
+| Daemon says `cannot count open kstrl PRs` | the open-PR bound has no usable number; check `gh auth status` and that `gh` is on the daemon's PATH. After three polls it files an inbox item |
 
 ---
 
