@@ -73,11 +73,15 @@ INT_LIMIT_TOML = b"[run]\nmax_iterations = " + b"9" * _INT_DIGITS + b"\n"
 #: ``ValueError``, and so walked past everything round 2 shipped. That is
 #: #318 round 3.
 #:
-#: Measured by binary search on this machine: 496 standalone, 495 through
-#: the CLI (the seam's own frames cost one level). Scaled off the live
-#: recursion limit rather than fixed at 600, so a run with a raised limit
-#: still nests past it: any depth above the limit exhausts the stack
-#: whatever the limit is, which is also why there is no ``max(600, ...)``
+#: Measured by binary search on this machine at the default limit: the
+#: first depth that raises is 497 from a one-frame caller and 490
+#: through ``ks status``. There is no one threshold. The caller's own
+#: stack sets it, and the CLI parse runs 9 to 16 frames deep, which at
+#: roughly two interpreter frames per array level is the 7 levels the
+#: two numbers differ by. Scaled off the live recursion limit rather
+#: than fixed at 600, so a run with a raised limit still nests past it:
+#: any depth above the limit exhausts the stack whatever the limit is,
+#: which is also why there is no ``max(600, ...)``
 #: floor - it could never bind. Inline tables recurse identically;
 #: arrays are used because they are terser per level. Measured cost of
 #: building it: 0.21 us, 2205 bytes.
