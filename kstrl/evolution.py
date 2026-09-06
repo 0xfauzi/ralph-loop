@@ -12,7 +12,8 @@ import json
 import logging
 import os
 import re
-from collections.abc import Callable, Iterable, Iterator
+from collections import Counter
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -577,23 +578,24 @@ def category_for_check(check_name: str) -> str:
     return _CATEGORY_BY_CHECK.get(check_name, "iteration")
 
 
-def _check_signatures(check: CheckResult, limit: int | None) -> Iterator[str]:
-    """One FAILED check's signatures, one yield per OCCURRENCE, in first-seen order.
+def _check_signatures(check: CheckResult, limit: int | None) -> Counter[str]:
+    """One FAILED check's signatures, counted by OCCURRENCE, in first-seen order.
 
     ``limit`` caps the DISTINCT codes, not the occurrences: a check that hit
     E501 twelve times and F401 once contributes both under ``limit=2``, twelve
     times and once.
+
+    ``Counter`` over a list because a ``Counter`` built from an iterable is a
+    dict subclass that keeps first-seen order, so ``list(tally)`` is the same
+    sequence ``dict.fromkeys`` gave, and the count is read rather than
+    accumulated one occurrence at a time.
     """
     parsed = check.parsed
-    codes = [f.code for f in parsed.failures if f.code] if parsed is not None else []
-    if not codes:
-        yield signature_for_error(check.name, check.message)
-        return
-    distinct = list(dict.fromkeys(codes))
-    kept = set(distinct if limit is None else distinct[:limit])
-    for code in codes:
-        if code in kept:
-            yield f"{check.name}:{code}"
+    tally = Counter(f.code for f in parsed.failures if f.code) if parsed is not None else Counter()
+    if not tally:
+        return Counter({signature_for_error(check.name, check.message): 1})
+    kept = list(tally) if limit is None else list(tally)[:limit]
+    return Counter({f"{check.name}:{code}": tally[code] for code in kept})
 
 
 def signature_counts_from_verification(
@@ -618,13 +620,11 @@ def signature_counts_from_verification(
     :func:`signatures_from_verification` reads its keys, so a format spelled
     twice cannot get changed in one place only.
     """
-    counts: dict[str, int] = {}
+    counts: Counter[str] = Counter()
     for check in checks:
-        if check.passed:
-            continue
-        for signature in _check_signatures(check, limit):
-            counts[signature] = counts.get(signature, 0) + 1
-    return counts
+        if not check.passed:
+            counts.update(_check_signatures(check, limit))
+    return dict(counts)
 
 
 def signatures_from_verification(

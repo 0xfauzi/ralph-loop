@@ -64,18 +64,17 @@ MARKDOWN_MARKER = "<!-- kstrl-sense-dampener -->"
 FORMAT_HUMAN = "human"
 FORMAT_MARKDOWN = "markdown"
 
+#: Why the fourth bucket is not the third. Both renderers title that bucket
+#: with it, so a reworded explanation cannot land in one report and not the
+#: other.
+UNMEASURED_NOTE = "a check that did not run cannot prove a fix"
+
 #: ``--write-baseline`` and ``--compare-baseline`` take an OPTIONAL path. Click
 #: spells that with ``is_flag=False, flag_value=<sentinel>``, so the bare flag
 #: yields this string. A NUL byte cannot appear in an argv element, so no
 #: operator can type it: the sentinel is closed by construction rather than by a
 #: reserved word somebody might pass. Measured: it does not appear in ``--help``.
 OPTIONAL_VALUE_SENTINEL = "\x00default"
-
-#: Which of the two things the command was asked to do. Not a status enum and
-#: nothing routes on it (roadmap doctrine 6): it is a two-way dispatch inside one
-#: command, and the only verdict the dampener produces is one boolean.
-ACTION_WRITE = "write"
-ACTION_COMPARE = "compare"
 
 
 class BaselineError(ValueError):
@@ -136,7 +135,7 @@ def _str_tuple_field(document: Mapping[str, Any], key: str) -> tuple[str, ...]:
     for index, item in enumerate(value):
         if not isinstance(item, str) or not item:
             _fail(f"baseline {key!r}[{index}] must be a non-empty string, got {item!r}")
-    return tuple(str(item) for item in value)
+    return tuple(value)
 
 
 def _signatures_field(document: Mapping[str, Any], key: str) -> dict[str, int]:
@@ -149,7 +148,7 @@ def _signatures_field(document: Mapping[str, Any], key: str) -> dict[str, int]:
             _fail(f"baseline {key!r} has a key that is not a non-empty string: {name!r}")
         if isinstance(count, bool) or not isinstance(count, int) or count < 0:
             _fail(f"baseline {key!r}[{name!r}] must be a non-negative integer, got {count!r}")
-        counts[str(name)] = int(count)
+        counts[name] = count
     return counts
 
 
@@ -217,7 +216,11 @@ class Baseline:
                 "run ks sense --write-baseline --force to regenerate it"
             )
         return cls(
-            generated_at=str(raw.get("generated_at", "")),
+            # Provenance, like ``base_ref``: nothing gates on it, so null is
+            # accepted, but a wrong TYPE is still a refusal. Read through the
+            # same helper as every other field rather than a lenient
+            # ``raw.get``, so the paragraph above stays true of all seven.
+            generated_at=_optional_str_field(raw, "generated_at") or "",
             base_ref=_optional_str_field(raw, "base_ref"),
             passed=_bool_field(raw, "passed"),
             sense_schema_version=_int_field(raw, "sense_schema_version"),
@@ -227,7 +230,7 @@ class Baseline:
         )
 
 
-def measured_and_unmeasured(
+def _measured_and_unmeasured(
     result: VerificationResult,
 ) -> tuple[list[CheckResult], tuple[str, ...]]:
     """Split a verification into the rows that measured and the names that did not.
@@ -262,7 +265,7 @@ def baseline_from_result(
     catastrophic run cannot flood a journal entry, but a baseline that dropped
     the sixth would report it as new on the very next run.
     """
-    measured, unmeasured = measured_and_unmeasured(result)
+    measured, unmeasured = _measured_and_unmeasured(result)
     counts = signature_counts_from_verification(measured, limit=None)
     return Baseline(
         generated_at=generated_at,
@@ -415,14 +418,35 @@ def exit_code_for(comparison: Comparison, *, fail_on_regression: bool) -> int:
 
 
 @dataclass(frozen=True)
-class Mode:
-    """What the dampener flags on ``ks sense`` resolved to."""
+class WriteMode:
+    """``--write-baseline``: where to write, and whether it may replace."""
 
-    action: str
     path: Path
     force: bool
+
+
+@dataclass(frozen=True)
+class CompareMode:
+    """``--compare-baseline``: the baseline already read, and how to report it.
+
+    The baseline is a FIELD rather than something a later phase fetches,
+    because it is read before the sensors run (see :func:`resolve_mode`) and
+    carrying it here is what makes "resolved" mean the command has everything
+    it needs.
+    """
+
+    path: Path
+    baseline: Baseline
     fail_on_regression: bool
     output_format: str
+
+
+#: Two shapes, not one shape with a discriminant string. Roadmap doctrine 6
+#: forbids a new status vocabulary, and the earlier ``action="write"`` /
+#: ``action="compare"`` pair was one: it also forced three fields to be
+#: hard-coded dead on whichever side did not use them, and an
+#: ``assert baseline is not None`` in the CLI to say what the type could not.
+Mode = WriteMode | CompareMode
 
 
 def _baseline_path(value: str, root_dir: Path) -> Path:
@@ -477,6 +501,15 @@ def resolve_mode(
 
     ``None`` is the whole of the "plain ``ks sense`` is unchanged" promise: the
     command takes exactly the same path it took before this feature existed.
+
+    THE BASELINE IS SETTLED HERE, BEFORE THE SENSORS RUN, and that is a product
+    attribute rather than tidiness: a full sense run on this repository costs
+    327 measured seconds, so telling an operator who forgot ``--force`` after
+    five minutes instead of a tenth of a second is latency they feel. Both ways
+    this can refuse - :class:`DampenerUsage` for a flag that would do nothing,
+    :class:`BaselineError` for a baseline that cannot be read - reach the CLI's
+    one fail-closed handler and exit 2. The ``--force`` refusal is made again
+    inside :func:`write_baseline`, and that second one is authoritative.
     """
     _refuse_dead_flags(
         write_baseline=write_baseline,
@@ -487,18 +520,14 @@ def resolve_mode(
         as_json=as_json,
     )
     if write_baseline is not None:
-        return Mode(
-            action=ACTION_WRITE,
-            path=_baseline_path(write_baseline, root_dir),
-            force=force,
-            fail_on_regression=False,
-            output_format=FORMAT_HUMAN,
-        )
+        path = _baseline_path(write_baseline, root_dir)
+        refuse_existing_baseline(path, force=force)
+        return WriteMode(path=path, force=force)
     if compare_baseline is not None:
-        return Mode(
-            action=ACTION_COMPARE,
-            path=_baseline_path(compare_baseline, root_dir),
-            force=False,
+        path = _baseline_path(compare_baseline, root_dir)
+        return CompareMode(
+            path=path,
+            baseline=read_baseline(path),
             fail_on_regression=fail_on_regression,
             output_format=output_format or FORMAT_HUMAN,
         )
@@ -550,7 +579,7 @@ def render_human(comparison: Comparison, baseline: Baseline, path: Path) -> list
     lines.extend(_human_bucket("fixed", (f"{s}  {n}" for s, n in comparison.fixed.items())))
     lines.extend(
         _human_bucket(
-            "unmeasured (a check that did not run cannot prove a fix)",
+            f"unmeasured ({UNMEASURED_NOTE})",
             (f"{s}  {n}" for s, n in comparison.unmeasured.items()),
         )
     )
@@ -613,7 +642,7 @@ def render_markdown(comparison: Comparison, baseline: Baseline, path: Path) -> s
     )
     lines.extend(
         _markdown_table(
-            "Unmeasured (a check that did not run cannot prove a fix)",
+            f"Unmeasured ({UNMEASURED_NOTE})",
             "| signature | was |",
             [f"| `{s}` | {n} |" for s, n in comparison.unmeasured.items()],
         )

@@ -22,6 +22,8 @@ from kstrl.evolution import (
 )
 from kstrl.factory import FactoryResult
 from kstrl.manifest import Component, ComponentStatus, Manifest
+from kstrl.parsers import ParsedFailure, ParsedOutput
+from kstrl.verify import CheckResult
 from tests.helpers.journal import audit, journal_at
 
 
@@ -1232,6 +1234,23 @@ class TestSpecAudits:
 # ---------------------------------------------------------------------------
 
 
+def _linter_failing(*codes: str) -> CheckResult:
+    """One failed linter check whose parser reported ``codes``, in order.
+
+    An empty string in ``codes`` is a failure the parser could not name, which
+    is the case that falls through to the message slug.
+    """
+    return CheckResult(
+        name="linter",
+        passed=False,
+        message="Linter failed",
+        parsed=ParsedOutput(
+            tool="ruff",
+            failures=[ParsedFailure(code=code, message=code or "unnamed") for code in codes],
+        ),
+    )
+
+
 class TestSignatureCounts:
     """``limit`` and the occurrence counter.
 
@@ -1242,20 +1261,8 @@ class TestSignatureCounts:
     journal still gets.
     """
 
-    @staticmethod
-    def _seven_codes() -> list[Any]:
-        from kstrl.parsers import ParsedFailure, ParsedOutput
-        from kstrl.verify import CheckResult
-
-        codes = ["E501", "F401", "S608", "E731", "B008", "C901", "N802"]
-        parsed = ParsedOutput(
-            tool="ruff",
-            failures=[ParsedFailure(code=code, message=code) for code in codes],
-        )
-        return [CheckResult(name="linter", passed=False, message="Linter failed", parsed=parsed)]
-
     def test_signatures_from_verification_limit_none_counts_all(self) -> None:
-        checks = self._seven_codes()
+        checks = [_linter_failing("E501", "F401", "S608", "E731", "B008", "C901", "N802")]
 
         assert len(signatures_from_verification(checks, limit=None)) == 7
         # The journal's behaviour, unchanged: five distinct codes per check.
@@ -1288,20 +1295,11 @@ class TestSignatureCounts:
         ``increased`` bucket could never fire. That is why the counter is a
         sibling rather than a wrapper over it.
         """
-        from kstrl.parsers import ParsedFailure, ParsedOutput
-        from kstrl.verify import CheckResult
-
-        parsed = ParsedOutput(
-            tool="ruff",
-            failures=[ParsedFailure(code="E501", message="long") for _ in range(12)],
-        )
-        checks = [CheckResult(name="linter", passed=False, message="failed", parsed=parsed)]
+        checks = [_linter_failing(*["E501"] * 12)]
 
         assert signature_counts_from_verification(checks, limit=None) == {"linter:E501": 12}
 
     def test_a_check_with_no_codes_counts_its_message_slug_once(self) -> None:
-        from kstrl.verify import CheckResult
-
         checks = [
             CheckResult(name="diff_scope", passed=False, message="3 files outside allowed scope")
         ]
@@ -1312,22 +1310,8 @@ class TestSignatureCounts:
 
     def test_signatures_from_verification_is_the_keys_of_the_counter(self) -> None:
         """One decision, read two ways, so the two cannot drift apart."""
-        from kstrl.parsers import ParsedFailure, ParsedOutput
-        from kstrl.verify import CheckResult
-
         checks = [
-            CheckResult(
-                name="linter",
-                passed=False,
-                message="Linter failed",
-                parsed=ParsedOutput(
-                    tool="ruff",
-                    failures=[
-                        ParsedFailure(code=code, message=code)
-                        for code in ["E501", "F401", "E501", "", "S608"]
-                    ],
-                ),
-            ),
+            _linter_failing("E501", "F401", "E501", "", "S608"),
             CheckResult(name="typecheck", passed=True, message="ok"),
             CheckResult(name="diff_scope", passed=False, message="out of scope"),
         ]
@@ -1339,17 +1323,7 @@ class TestSignatureCounts:
 
     def test_the_limit_caps_distinct_codes_not_occurrences(self) -> None:
         """A cap of 2 keeps the first two DISTINCT codes and all their hits."""
-        from kstrl.parsers import ParsedFailure, ParsedOutput
-        from kstrl.verify import CheckResult
-
-        parsed = ParsedOutput(
-            tool="ruff",
-            failures=[
-                ParsedFailure(code=code, message=code)
-                for code in ["E501", "F401", "E501", "S608", "F401"]
-            ],
-        )
-        checks = [CheckResult(name="linter", passed=False, message="failed", parsed=parsed)]
+        checks = [_linter_failing("E501", "F401", "E501", "S608", "F401")]
 
         assert signature_counts_from_verification(checks, limit=2) == {
             "linter:E501": 2,

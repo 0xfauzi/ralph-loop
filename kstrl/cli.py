@@ -3691,7 +3691,6 @@ def _sense_dampener_report(
     result: VerificationResult,
     *,
     mode: dampener.Mode,
-    baseline: dampener.Baseline | None,
     as_json: bool,
 ) -> NoReturn:
     """The #227 dampener's own output, printed instead of the check table.
@@ -3701,6 +3700,10 @@ def _sense_dampener_report(
     COMPARISON and never on ``result.passed``: a red tree is the normal state
     for the brownfield repository this exists for, and the issue's own
     acceptance requires exit 0 on a tree carrying a fresh E501.
+
+    ``mode`` already carries the baseline on the compare side, read before the
+    sensors ran, so there is nothing here to fetch and nothing to assert about
+    two functions having agreed offstage.
     """
     current = dampener.baseline_from_result(
         result,
@@ -3708,7 +3711,7 @@ def _sense_dampener_report(
         generated_at=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         sense_schema_version=SENSE_SCHEMA_VERSION,
     )
-    if mode.action == dampener.ACTION_WRITE:
+    if isinstance(mode, dampener.WriteMode):
         try:
             dampener.write_baseline(mode.path, current, force=mode.force)
         except (OSError, dampener.BaselineError) as exc:
@@ -3716,37 +3719,16 @@ def _sense_dampener_report(
         click.echo(dampener.write_summary_line(mode.path, current))
         sys.exit(0 if result.passed else 1)
 
-    assert baseline is not None  # resolve_mode + _sense_baseline pair these up
-    comparison = dampener.compare(baseline, current)
+    comparison = dampener.compare(mode.baseline, current)
     if as_json:
-        block = dampener.comparison_document(comparison, baseline, current, mode.path)
+        block = dampener.comparison_document(comparison, mode.baseline, current, mode.path)
         click.echo(json.dumps(_sense_document(path, base, result, block), indent=2))
     elif mode.output_format == dampener.FORMAT_MARKDOWN:
-        click.echo(dampener.render_markdown(comparison, baseline, mode.path))
+        click.echo(dampener.render_markdown(comparison, mode.baseline, mode.path))
     else:
-        for line in dampener.render_human(comparison, baseline, mode.path):
+        for line in dampener.render_human(comparison, mode.baseline, mode.path):
             click.echo(line)
     sys.exit(dampener.exit_code_for(comparison, fail_on_regression=mode.fail_on_regression))
-
-
-def _sense_baseline(mode: dampener.Mode | None, as_json: bool) -> dampener.Baseline | None:
-    """Read and validate the baseline BEFORE the sensors run, or exit 2.
-
-    Order of operations, and it is a product attribute: a full sense run on
-    this repository costs 327 measured seconds. Telling an operator who forgot
-    ``--force`` after five minutes instead of a tenth of a second is latency
-    they feel. The ``--force`` refusal is made again immediately before the
-    write, and that second one is the authoritative check.
-    """
-    if mode is None:
-        return None
-    try:
-        if mode.action == dampener.ACTION_WRITE:
-            dampener.refuse_existing_baseline(mode.path, force=mode.force)
-            return None
-        return dampener.read_baseline(mode.path)
-    except dampener.BaselineError as exc:
-        _sense_error(str(exc), as_json)
 
 
 def _sense_report(
@@ -3755,20 +3737,21 @@ def _sense_report(
     result: VerificationResult,
     *,
     mode: dampener.Mode | None,
-    baseline: dampener.Baseline | None,
     as_json: bool,
     ui: str,
     no_color: bool,
 ) -> NoReturn:
     """Print the measurement and exit: 0 when every check passed, 1 otherwise.
 
-    Its own function because ``sense`` is a 200-line command sitting at
+    Its own function because ``sense`` is a 200-line command that was at
     cyclomatic 9 against a gate of 10, and the rendering is the half of it
     that has nothing to do with deciding WHAT to measure. Lifting it out is
-    what leaves room for a branch in the command body.
+    what left room for the dampener branch in the command body: measured
+    against the ratchet's pinned ruff, ``sense`` is at 7 with this extracted
+    and the branch added.
     """
     if mode is not None:
-        _sense_dampener_report(path, base, result, mode=mode, baseline=baseline, as_json=as_json)
+        _sense_dampener_report(path, base, result, mode=mode, as_json=as_json)
 
     if as_json:
         click.echo(json.dumps(_sense_document(path, base, result), indent=2))
@@ -3963,6 +3946,9 @@ def sense(
     if not path.is_dir():
         _sense_error(f"path is not a directory: {path}", as_json)
 
+    # Before the sensors, not after: a full run here costs minutes, so a
+    # refused flag combination or an unreadable baseline is reported in a
+    # tenth of a second rather than after the test suite.
     try:
         mode = dampener.resolve_mode(
             write_baseline=write_baseline,
@@ -3973,10 +3959,8 @@ def sense(
             as_json=as_json,
             root_dir=root_dir,
         )
-    except dampener.DampenerUsage as exc:
+    except (dampener.DampenerUsage, dampener.BaselineError) as exc:
         _sense_error(str(exc), as_json)
-    # Before the sensors, not after: a full run here costs minutes.
-    baseline = _sense_baseline(mode, as_json)
 
     from kstrl.adequacy import AdequacyConfig
     from kstrl.config_preflight import preflight_config
@@ -4056,7 +4040,6 @@ def sense(
         base,
         result,
         mode=mode,
-        baseline=baseline,
         as_json=as_json,
         ui=ui,
         no_color=no_color,

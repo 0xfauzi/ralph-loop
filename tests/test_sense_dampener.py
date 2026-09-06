@@ -620,6 +620,25 @@ def test_the_workflow_finds_its_comment_by_the_marker_constant() -> None:
     assert any(dampener.MARKDOWN_MARKER in run for run in _runs())
 
 
+def test_the_comment_lookup_picks_one_id_across_every_page() -> None:
+    """``gh api --paginate`` applies ``--jq`` once PER PAGE, so a ``first``
+    inside the filter is the first match on that page rather than the first
+    overall.
+
+    Measured against gh 2.73.0 on a 3-comment pull request forced to
+    ``per_page=1``: ``[.[] | select(...)] | first | .id`` printed three ids on
+    three lines. Past the 30-comment default page size that hands ``gh api
+    --method PATCH .../issues/comments/$id`` a multi-line id, so the update
+    fails and the dampener starts posting a second comment on every push.
+    """
+    lookup = [run for run in _runs() if "--paginate" in run]
+
+    assert len(lookup) == 1
+    assert "| first |" not in lookup[0]
+    # The filter emits every match; exactly one shell stage picks one of them.
+    assert "head -n 1" in lookup[0]
+
+
 def test_the_workflow_is_advisory() -> None:
     """The contract in one line: no step asks the dampener to fail the job.
 

@@ -108,8 +108,15 @@ jobs:
           NUMBER: ${{ github.event.pull_request.number }}
         run: |
           marker='<!-- kstrl-sense-dampener -->'
+          # `--jq` runs once PER PAGE, so a `first` inside it is the first
+          # match on THAT page, not the first overall. Measured against gh
+          # 2.73.0 on a 3-comment pull request forced to per_page=1: the
+          # `first` form printed three ids on three lines, which would hand
+          # the PATCH below a multi-line id once a pull request passes the
+          # 30-comment default page size. `--slurp` is refused alongside
+          # `--jq`, so the filter emits every match and `head` picks one.
           id="$(gh api --paginate "repos/$REPO/issues/$NUMBER/comments" \
-            --jq "[.[] | select(.body | startswith(\"$marker\"))] | first | .id // empty")"
+            --jq "map(select(.body | startswith(\"$marker\"))) | .[].id" | head -n 1)"
           if [ -n "$id" ]; then
             gh api --method PATCH "repos/$REPO/issues/comments/$id" -F body=@sense.md
           else
