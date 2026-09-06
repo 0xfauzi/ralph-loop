@@ -400,6 +400,26 @@ class TestMutationInventory:
 
 
 class TestConfigLoadInventory:
+    def test_the_config_load_net_fires(self) -> None:
+        """This layer's own control.
+
+        Layers 1 and 2 have one each; without this, switching off the
+        resolver that decides a call IS ``InboxConfig.load`` returns an
+        empty inventory, and an empty inventory compared against an empty
+        expectation is what a passing guard looks like. The control is
+        the same source both other layers use, so one planted string
+        cannot satisfy one layer while the next reads nothing.
+        """
+        tree = astwalk.parse(CONTROL_MUTATION)
+        table = astwalk.bindings(tree)
+        found = [
+            node
+            for scope, _ in astwalk.scopes(tree)
+            for node in astwalk.own_nodes(scope)
+            if isinstance(node, ast.Call) and table.resolve(node.func) == INBOX_CONFIG_LOAD
+        ]
+        assert len(found) == 1
+
     def test_every_config_load_is_pinned(self) -> None:
         rows = _all_rows("configs")
         assert set(rows) == set(EXPECTED_CONFIG_LOADS), (
