@@ -8,7 +8,7 @@ import sys
 import time
 from collections.abc import Callable
 from dataclasses import fields as dataclass_fields
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NoReturn
 
@@ -29,7 +29,7 @@ from dataclasses import replace
 import click
 from click.core import ParameterSource
 
-from kstrl import __version__
+from kstrl import __version__, dampener
 from kstrl.agents import (
     AGENT_TYPE_ALIASES,
     ClaudeCodeAgent,
@@ -78,7 +78,7 @@ from kstrl.factory import (
     validate_token_ceiling,
 )
 from kstrl.feature_cmd import FeatureParams, run_feature
-from kstrl.git import detect_base_branch, resolve_base_branch
+from kstrl.git import detect_base_branch, get_head_sha, resolve_base_branch
 from kstrl.init_cmd import DEFAULT_FEATURE_UNDERSTAND, run_init, staleness_notice
 from kstrl.interaction import (
     PromptKind,
@@ -3633,18 +3633,32 @@ def status(
 #: no ``progress_file_path`` and no PRD emits neither a row nor a gap.
 #: Both predate this and both are follow-ups on #306; a reader must not
 #: read an empty array as "everything enabled was measured".
+#:
+#: #227 added a ``dampener`` key and did NOT bump this, on the rule the v2
+#: bump was made under: a bump is for an addition that changes what an
+#: EXISTING key means. That key is absent exactly when ``--compare-baseline``
+#: was not asked for, it restates nothing, and a reader that does not know it
+#: ignores it. No existing key changes meaning.
 SENSE_SCHEMA_VERSION = 2
 
 
-def _sense_document(path: Path, base: str, result: VerificationResult) -> dict[str, Any]:
+def _sense_document(
+    path: Path,
+    base: str,
+    result: VerificationResult,
+    dampener_block: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """The ``ks sense --json`` document, at :data:`SENSE_SCHEMA_VERSION`.
 
     Its own function because it is a published contract and ``sense``
     is a 200-line command: a reader checking what v2 promises should not
     have to find it among the preflight, the base resolution and the
     terminal rendering.
+
+    ``dampener_block`` is the #227 comparison, present only when
+    ``--compare-baseline`` was given and omitted entirely otherwise.
     """
-    return {
+    document: dict[str, Any] = {
         "schema_version": SENSE_SCHEMA_VERSION,
         "path": str(path),
         "base_branch": base,
@@ -3666,6 +3680,73 @@ def _sense_document(path: Path, base: str, result: VerificationResult) -> dict[s
         # Empty for a tree where every enabled check measured something.
         "not_measured": [gap.to_dict() for gap in result.not_measured],
     }
+    if dampener_block is not None:
+        document["dampener"] = dampener_block
+    return document
+
+
+def _sense_dampener_report(
+    path: Path,
+    base: str,
+    result: VerificationResult,
+    *,
+    mode: dampener.Mode,
+    baseline: dampener.Baseline | None,
+    as_json: bool,
+) -> NoReturn:
+    """The #227 dampener's own output, printed instead of the check table.
+
+    ``--write-baseline`` exits on the SENSOR's verdict, because writing a
+    baseline is a measurement of the tree. ``--compare-baseline`` exits on the
+    COMPARISON and never on ``result.passed``: a red tree is the normal state
+    for the brownfield repository this exists for, and the issue's own
+    acceptance requires exit 0 on a tree carrying a fresh E501.
+    """
+    current = dampener.baseline_from_result(
+        result,
+        base_ref=get_head_sha(path),
+        generated_at=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        sense_schema_version=SENSE_SCHEMA_VERSION,
+    )
+    if mode.action == dampener.ACTION_WRITE:
+        try:
+            dampener.write_baseline(mode.path, current, force=mode.force)
+        except (OSError, dampener.BaselineError) as exc:
+            _sense_error(str(exc), as_json)
+        click.echo(dampener.write_summary_line(mode.path, current))
+        sys.exit(0 if result.passed else 1)
+
+    assert baseline is not None  # resolve_mode + _sense_baseline pair these up
+    comparison = dampener.compare(baseline, current)
+    if as_json:
+        block = dampener.comparison_document(comparison, baseline, current, mode.path)
+        click.echo(json.dumps(_sense_document(path, base, result, block), indent=2))
+    elif mode.output_format == dampener.FORMAT_MARKDOWN:
+        click.echo(dampener.render_markdown(comparison, baseline, mode.path))
+    else:
+        for line in dampener.render_human(comparison, baseline, mode.path):
+            click.echo(line)
+    sys.exit(dampener.exit_code_for(comparison, fail_on_regression=mode.fail_on_regression))
+
+
+def _sense_baseline(mode: dampener.Mode | None, as_json: bool) -> dampener.Baseline | None:
+    """Read and validate the baseline BEFORE the sensors run, or exit 2.
+
+    Order of operations, and it is a product attribute: a full sense run on
+    this repository costs 327 measured seconds. Telling an operator who forgot
+    ``--force`` after five minutes instead of a tenth of a second is latency
+    they feel. The ``--force`` refusal is made again immediately before the
+    write, and that second one is the authoritative check.
+    """
+    if mode is None:
+        return None
+    try:
+        if mode.action == dampener.ACTION_WRITE:
+            dampener.refuse_existing_baseline(mode.path, force=mode.force)
+            return None
+        return dampener.read_baseline(mode.path)
+    except dampener.BaselineError as exc:
+        _sense_error(str(exc), as_json)
 
 
 def _sense_report(
@@ -3673,6 +3754,8 @@ def _sense_report(
     base: str,
     result: VerificationResult,
     *,
+    mode: dampener.Mode | None,
+    baseline: dampener.Baseline | None,
     as_json: bool,
     ui: str,
     no_color: bool,
@@ -3684,6 +3767,9 @@ def _sense_report(
     that has nothing to do with deciding WHAT to measure. Lifting it out is
     what leaves room for a branch in the command body.
     """
+    if mode is not None:
+        _sense_dampener_report(path, base, result, mode=mode, baseline=baseline, as_json=as_json)
+
     if as_json:
         click.echo(json.dumps(_sense_document(path, base, result), indent=2))
         sys.exit(0 if result.passed else 1)
@@ -3758,6 +3844,53 @@ def _sense_error(message: str, as_json: bool) -> NoReturn:
     "diff-scope reports no scope constraints",
 )
 @click.option(
+    "--write-baseline",
+    "write_baseline",
+    # An option with an OPTIONAL value: `is_flag=False` plus a `flag_value`
+    # makes the bare flag yield the sentinel. `type=str`, not `click.Path`, so
+    # the sentinel is never handed to a path converter. Measured against click
+    # 8.4.2: `--write-baseline --force` does not swallow `--force` as the
+    # value, and the sentinel does not appear in `--help`.
+    is_flag=False,
+    flag_value=dampener.OPTIONAL_VALUE_SENTINEL,
+    default=None,
+    type=str,
+    metavar="[PATH]",
+    help="Record the current signature counts as a baseline "
+    "(default: scripts/kstrl/sense-baseline.json under --root)",
+)
+@click.option(
+    "--compare-baseline",
+    "compare_baseline",
+    is_flag=False,
+    flag_value=dampener.OPTIONAL_VALUE_SENTINEL,
+    default=None,
+    type=str,
+    metavar="[PATH]",
+    help="Report what this tree added to a recorded baseline "
+    "(default: scripts/kstrl/sense-baseline.json under --root)",
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    help="With --write-baseline: replace an existing baseline file",
+)
+@click.option(
+    "--fail-on-regression",
+    "fail_on_regression",
+    is_flag=True,
+    help="With --compare-baseline: exit 1 on a regression (default: advisory, always exit 0)",
+)
+@click.option(
+    "--format",
+    "output_format",
+    type=click.Choice([dampener.FORMAT_HUMAN, dampener.FORMAT_MARKDOWN]),
+    # None, not "human", so an explicit --format human can be told apart from
+    # the default and refused alongside the other flags that would do nothing.
+    default=None,
+    help="With --compare-baseline: report format (markdown suits a PR comment)",
+)
+@click.option(
     "--json",
     "as_json",
     is_flag=True,
@@ -3780,6 +3913,11 @@ def sense(
     base_branch: str | None,
     prd_path: Path | None,
     allowed_paths: tuple[str, ...],
+    write_baseline: str | None,
+    compare_baseline: str | None,
+    force: bool,
+    fail_on_regression: bool,
+    output_format: str | None,
     as_json: bool,
     ui: str,
     no_color: bool,
@@ -3809,6 +3947,13 @@ def sense(
     Exit 0 when every check passed, 1 when any failed, 2 when the
     measurement itself could not run (missing path, bad kstrl.toml, or
     git cannot produce the diff).
+
+    R10.6 (#227): --write-baseline records the signature counts to a file the
+    repository tracks and --compare-baseline reports what this tree added to
+    one. The comparison is ADVISORY - it exits 0 whether or not it found a
+    regression - until --fail-on-regression is passed. Its exit code never
+    follows result.passed, because a red tree is the normal state for the
+    brownfield repositories the dampener exists for.
     """
     root_dir = root.resolve() if root else Path.cwd()
     path = tree_path.resolve() if tree_path else root_dir
@@ -3817,6 +3962,21 @@ def sense(
         _sense_error(f"root is not a directory: {root_dir}", as_json)
     if not path.is_dir():
         _sense_error(f"path is not a directory: {path}", as_json)
+
+    try:
+        mode = dampener.resolve_mode(
+            write_baseline=write_baseline,
+            compare_baseline=compare_baseline,
+            force=force,
+            fail_on_regression=fail_on_regression,
+            output_format=output_format,
+            as_json=as_json,
+            root_dir=root_dir,
+        )
+    except dampener.DampenerUsage as exc:
+        _sense_error(str(exc), as_json)
+    # Before the sensors, not after: a full run here costs minutes.
+    baseline = _sense_baseline(mode, as_json)
 
     from kstrl.adequacy import AdequacyConfig
     from kstrl.config_preflight import preflight_config
@@ -3891,7 +4051,16 @@ def sense(
         read_only=True,
     )
 
-    _sense_report(path, base, result, as_json=as_json, ui=ui, no_color=no_color)
+    _sense_report(
+        path,
+        base,
+        result,
+        mode=mode,
+        baseline=baseline,
+        as_json=as_json,
+        ui=ui,
+        no_color=no_color,
+    )
 
 
 @cli.command()
