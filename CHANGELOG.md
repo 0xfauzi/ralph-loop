@@ -13,9 +13,13 @@ stage, runtime feedback, and an earned-autonomy ladder). See
 
 ### Fixed
 
-- `ks decompose --project-name` and `ks factory --project-name` refuse an
-  empty or whitespace-only name at the command line, exiting 2 and naming
-  the option, instead of running the architect against it. The name is an
+- `ks decompose --project-name`, `ks factory --project-name` and
+  `ks queue add --project-name` refuse an explicit empty or
+  whitespace-only name at the command line, exiting 2 and naming the
+  option, instead of running the architect against it. `queue add`
+  keeps its `""` default, which is how a queued item asks `serve` to
+  name it `queue-<id>`: the refusal is gated on the parameter source,
+  so only a blank the operator typed is refused. The name is an
   identity: it keys the journal audits, the decision register and, under
   `--single-pr`, the branch. Related, and the reason the boundary check
   is worth having: the convergence report's accounting of audits the

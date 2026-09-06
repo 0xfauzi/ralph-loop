@@ -186,13 +186,22 @@ def _reject_blank_project_name(
     substituting "x" would write a manifest, a branch and a journal
     audit under something else.
 
-    Not on ``ks queue add``: its ``--project-name`` defaults to "" as
-    the sentinel ``serve`` derives ``queue-<id>`` from, and Click runs
-    a callback over an option's own default. A queued item with a
-    whitespace name still reaches this check, because ``serve`` spawns
-    a child ``ks factory --project-name``, which refuses it with exit 2.
+    On all three ``--project-name`` options, ``ks queue add``
+    included, whose "" default is the sentinel ``serve`` derives
+    ``queue-<id>`` from. Click runs a callback over an option's own
+    default, so the refusal is gated on the parameter SOURCE rather
+    than left off the option: a "" the operator never typed is
+    returned untouched, an explicit "" or "   " is refused. A source
+    this cannot resolve is refused too, because a check that cannot
+    prove the value came from the default must flag, not clear.
+
+    ``tests/test_project_name_boundary.py`` walks the Click tree and
+    fails if a fourth ``project_name`` parameter appears without this
+    callback, so the boundary is closed by census rather than by a
+    list of the options someone remembered.
     """
-    if value is not None and not value.strip():
+    source = ctx.get_parameter_source(param.name) if param.name else None
+    if value is not None and not value.strip() and source is not ParameterSource.DEFAULT:
         raise click.BadParameter("must not be empty or whitespace-only", ctx=ctx, param=param)
     return value
 
@@ -4810,7 +4819,12 @@ def _resolve_queue_item(queue: Any, item_id: str, ui_impl: UI) -> Any:
 @click.argument("spec", type=click.Path(exists=True, path_type=Path))
 @click.option("--priority", type=int, default=0, help="Higher runs first")
 @click.option("--title", default="", help="Human label (default: spec filename)")
-@click.option("--project-name", default="", help="Factory project name")
+@click.option(
+    "--project-name",
+    default="",
+    callback=_reject_blank_project_name,
+    help="Factory project name",
+)
 @click.option(
     "--auto-merge/--stop-at-pr",
     "auto_merge",
