@@ -17,6 +17,9 @@ prompt the split, because it reports rather than fails once a file is
 already over, and ``test_evolution.py`` was at 1407 lines.
 
 TWO LAYERS, because one of them is a net and the other is a message.
+They walk different corpora, and the claim each makes is the corpus it
+walks: layer 2 covers ``kstrl/`` and ``tests/``, layer 1 covers
+``kstrl/``.
 
 LAYER 1, :func:`event_name_spellings`, counts every expression in
 ``kstrl/`` whose folded value IS an enrolled event name, per module. It
@@ -27,9 +30,19 @@ and enumerates no node types, which is the point. #324 records that this
 repo has about eleven AST guards each re-implementing that resolution and
 each holed independently, and layer 2 below was the twelfth: round 1 of
 review on #336 measured six ordinary shapes walking straight past it.
+It stops at ``kstrl/`` deliberately (#337). Measured over ``tests/`` it
+counts 46 spellings in 13 modules, 24 of them in ``test_decompose.py``
+alone, where they are the architect's own JSON key inside a fixture
+payload. A pinned dict over that would move on every fixture that adds
+an architect payload, which is the guard that gets silenced
+``_assignment_hits`` warns about.
 
 LAYER 2, :func:`literal_event_names`, enumerates shapes and names the
-offending line and its direction. It is not redundant. Layer 1 can only
+offending line and its direction. It walks ``kstrl/`` AND ``tests/``
+(#337): a test that spells the name for itself while asserting on
+production behaviour is asserting partly on its own copy of it, and the
+six sites the widened corpus found were all of that kind. It is not
+redundant. Layer 1 can only
 say "this module's spelling count moved", which is the wrong message when
 the answer is "you wrote a journal row with a bare literal, import the
 constant". Layer 1 in turn catches what layer 2 cannot, and after #336
@@ -52,6 +65,7 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from kstrl.evolution import JOURNAL_REPAIR_EVENT, SPEC_ISSUES_EVENT
+from tests.helpers import astwalk
 from tests.helpers.astwalk import (
     Sees,
     assert_census,
@@ -63,8 +77,8 @@ from tests.helpers.astwalk import (
 )
 
 #: The journal event names that have been hoisted to a constant, and so
-#: must never be spelled as a literal in ``kstrl/`` again. Five more are
-#: still bare literals (``component_result`` nine times in
+#: must never be spelled as a literal in ``kstrl/`` or ``tests/`` again.
+#: Five more are still bare literals (``component_result`` nine times in
 #: ``evolution.py`` alone, which is exactly what layer 2 counts there,
 #: plus ``role_usage``, ``contract_result``, ``autonomy_transition`` and
 #: ``findings_superseded``); converting them is a follow-up, and
@@ -551,9 +565,19 @@ class TestJournalEventNamesHaveOneHome:
         )
 
     def test_no_module_names_an_enrolled_event_as_a_literal(self) -> None:
-        """Layer 2, the message: name the offending line and its direction."""
+        """Layer 2, the message: name the offending line and its direction.
+
+        Over ``kstrl/`` AND ``tests/`` (#337). Widening the corpus
+        found six sites in the test tree, three writes and three
+        reads, across ``test_decompose.py``, ``test_evolution.py``
+        and ``test_journal_torn_tail.py``. None was deliberate, and
+        a test asserting on production behaviour with its own bare
+        spelling of the event name is asserting partly on its own
+        copy of it. Layer 1 stays on ``kstrl/``; the module
+        docstring carries the measurement for why.
+        """
         found: dict[str, list[str]] = {}
-        for source_file in package_sources():
+        for source_file in package_sources() + astwalk.test_sources():
             tree = parsed(source_file)
             aliases = event_type_aliases(tree)
             hits = [

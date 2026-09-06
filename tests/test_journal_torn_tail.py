@@ -36,7 +36,7 @@ from pathlib import Path
 
 import pytest
 
-from kstrl.evolution import EXPERIMENTS_HEADER, JOURNAL_REPAIR_EVENT
+from kstrl.evolution import EXPERIMENTS_HEADER, JOURNAL_REPAIR_EVENT, SPEC_ISSUES_EVENT
 from kstrl.observability import handle_ends_without_newline, read_progress_events
 from tests.helpers.journal import (
     DANGLING_UTF8,
@@ -85,7 +85,7 @@ class TestTheEntryAfterATear:
         path = journal.config.journal_path
         assert TORN_FRAGMENT in path.read_text(encoding="utf-8")
         parsed_types = [e.get("event_type") for e in read_progress_events(path)]
-        assert parsed_types == ["spec_issues", JOURNAL_REPAIR_EVENT, "spec_issues"]
+        assert parsed_types == [SPEC_ISSUES_EVENT, JOURNAL_REPAIR_EVENT, SPEC_ISSUES_EVENT]
 
     def test_a_tail_that_lost_only_its_newline_keeps_its_record(self, tmp_path: Path) -> None:
         """The tear that costs TWO records, not one.
@@ -139,7 +139,7 @@ class TestTheEntryAfterATear:
 
         events = read_progress_events(journal.config.journal_path)
         assert [e.get("event_type") for e in events] == [
-            "spec_issues",
+            SPEC_ISSUES_EVENT,
             JOURNAL_REPAIR_EVENT,
             "autonomy_transition",
         ]

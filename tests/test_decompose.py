@@ -1423,7 +1423,7 @@ def _read_spec_issue_events(tmp_path: Path) -> list[dict[str, object]]:
     journal = tmp_path / ".kstrl" / "evolution.jsonl"
     assert journal.exists(), "journal event was not written"
     entries = [json.loads(line) for line in journal.read_text().splitlines() if line.strip()]
-    return [e for e in entries if e.get("event_type") == "spec_issues"]
+    return [e for e in entries if e.get("event_type") == SPEC_ISSUES_EVENT]
 
 
 class TestSpecIssuesPersistence:
@@ -1668,7 +1668,7 @@ class TestSpecConvergenceReport:
         spec_file: str = "spec.md",
     ) -> dict[str, object]:
         """One prior journal entry, in the shape decompose writes."""
-        entry: dict[str, object] = {"event_type": "spec_issues", "spec_file": spec_file}
+        entry: dict[str, object] = {"event_type": SPEC_ISSUES_EVENT, "spec_file": spec_file}
         if issues is not None:
             entry["issues"] = _issue_dicts(issues)
         return entry
@@ -1763,7 +1763,7 @@ class TestSpecConvergenceReport:
         operator hand-edited, must read rather than raise."""
         history: list[dict[str, object]] = [
             {
-                "event_type": "spec_issues",
+                "event_type": SPEC_ISSUES_EVENT,
                 "issues": [
                     "not a dict",
                     {"severity": "blocker"},
