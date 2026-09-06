@@ -1846,6 +1846,35 @@ class EvolutionJournal:
     # get_repair_count
     # ------------------------------------------------------------------
 
+    def repair_summary(self) -> str | None:
+        """The operator-facing sentence about this journal's repairs, or None.
+
+        ONE HOME for prose two surfaces render (#352 round 2, N4).
+        ``cli._echo_journal_repairs`` and ``EvolveScreen._show_repairs``
+        each held their own copy and each said the wording was
+        deliberately the same on both, with nothing keeping it so. That
+        is the same argument this PR made for hoisting
+        ``REPAIR_DETAIL``, where three copies had already drifted.
+
+        ``None`` at zero rather than a sentence saying zero, which is
+        what both callers already did separately and for the same
+        reason: a healthy journal that prints "0 repairs" every time
+        teaches an operator to skip the line that matters. Deciding it
+        here also keeps the file read ONCE. What stays per-surface is
+        the prefix, two spaces for the CLI and an alert glyph for the
+        TUI, and the widget or stream it goes to.
+        """
+        repairs = self.get_repair_count()
+        if not repairs:
+            return None
+        return (
+            f"journal: {repairs} interrupted write(s) repaired. "
+            f"A crash left {self.config.journal_path} without a trailing newline. "
+            "The line above each journal_repair row is what that write left behind: "
+            "either a torn fragment, which is lost, or a whole record that lost only "
+            "its newline, which is readable again. Read it to tell which."
+        )
+
     def get_repair_count(self) -> int:
         """How many interrupted writes this journal has been repaired from.
 

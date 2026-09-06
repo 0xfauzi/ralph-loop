@@ -230,10 +230,11 @@ class EvolveScreen(Screen[None]):
         makes and for the same reason: a line that prints on every
         healthy journal is a line an operator learns to skip. The facts
         are the CLI's facts, because they are facts about the file
-        rather than about a surface. What is NOT shared is the helper:
-        ``cli._echo_journal_repairs`` writes through ``UI`` in the click
-        module, so this is a second renderer of one measurement, not a
-        second measurement.
+        rather than about a surface, and since #352 round 2 they are one
+        STRING as well: ``EvolutionJournal.repair_summary``. What is NOT
+        shared is the helper, because ``cli._echo_journal_repairs``
+        writes through ``UI`` in the click module, so this is a second
+        renderer of one measurement, not a second measurement.
 
         Takes the journal rather than a count so the count and the path
         printed beside it cannot come from two different journals. None
@@ -242,26 +243,22 @@ class EvolveScreen(Screen[None]):
         from before a ``reload``.
 
         COST, and it is a whole extra read of the journal rather than
-        nothing: ``get_repair_count`` goes through
-        ``_read_all_entries`` while the patterns tab beside it goes
-        through ``_read_journal_entries``, so this screen reads the file
-        twice per load and per ``r``. Measured here, 20 calls each on a
-        warm cache: 0.016 ms at 1 line, 0.097 ms at 100, 1.12 ms at 989
-        (194 KiB, which is the largest real journal #333 found), 12.7 ms
-        at 10,000 lines. Linear in the file, and the last of those is
-        the one to watch if journals ever get that big.
+        nothing: ``repair_summary`` goes through ``_read_all_entries``
+        while the patterns tab beside it goes through
+        ``_read_journal_entries``, so this screen reads the file twice
+        per load and per ``r``, on the Textual event loop. Measured
+        here, 20 calls each: 0.016 ms at 1 line, 0.097 ms at 100,
+        1.12 ms at 989 (194 KiB, the largest real journal #333 found),
+        and on a 10,000-line journal 9.3 ms for the repair read against
+        9.2 ms for the patterns read, so the screen pays 18.5 ms where
+        one read would cost 9.3. Linear in the file.
 
-        The window is NOT the reason it is a second read, and that
+        The lookback window is NOT why it is a second read, and that
         sentence used to be here and was wrong (#352 round 2, F5).
         ``get_cross_run_patterns`` goes through ``_read_journal_entries``,
-        which calls ``_read_all_entries()`` and applies its lookback in
-        MEMORY, so both reads take the whole file and the window costs
-        nothing at the read. The file is therefore read twice per load
-        and per ``r``, on the Textual event loop. Measured directly, 20
-        calls each on a 10,000-line journal: ``get_repair_count`` 9.3 ms
-        and ``get_cross_run_patterns`` 9.2 ms, so the screen pays
-        18.5 ms where one read would cost 9.3. The two are within a few
-        percent of each other, which is the window costing nothing.
+        which calls ``_read_all_entries()`` and applies its window in
+        MEMORY. The two figures being within a few percent of each other
+        is that window costing nothing at the read.
 
         Kept as a second read anyway, and this is the real reason: the
         two are methods on the same journal called from two places on
@@ -276,20 +273,12 @@ class EvolveScreen(Screen[None]):
         decides on the number rather than on the sentence.
         """
         line = self.query_one("#evolve-repairs", Static)
-        if journal is None or not (repairs := journal.get_repair_count()):
+        summary = None if journal is None else journal.repair_summary()
+        if summary is None:
             line.display = False
             return
         line.display = True
-        line.update(
-            Text(
-                f"▲ journal: {repairs} interrupted write(s) repaired. A crash left "
-                f"{journal.config.journal_path} without a trailing newline. The line "
-                "above each journal_repair row is what that write left behind: either "
-                "a torn fragment, which is lost, or a whole record that lost only its "
-                "newline, which is readable again. Read it to tell which.",
-                style=theme.WARNING,
-            )
-        )
+        line.update(Text(f"▲ {summary}", style=theme.WARNING))
 
     @staticmethod
     def _trend_cells(row: dict[str, Any]) -> tuple[Text | str, ...]:

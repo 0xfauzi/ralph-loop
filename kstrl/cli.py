@@ -716,8 +716,10 @@ def _echo_journal_repairs(journal: EvolutionJournal, ui_impl: UI) -> None:
     because ``get_repair_count`` is click-free and on the journal. This
     helper writes through ``UI`` in the click module and cannot be
     reused as is, so the two are one measurement rendered twice rather
-    than two measurements, and the wording is deliberately the same on
-    both.
+    than two measurements. The wording is one string now, on the journal
+    (``repair_summary``): saying it was deliberately the same on both
+    was a claim with nothing keeping it (#352 round 2, N4). What is
+    still per-surface is the prefix and the decision to show anything.
 
     Takes the journal and asks IT for the path, rather than being handed
     both: a count from one journal printed beside another one's path is
@@ -727,15 +729,9 @@ def _echo_journal_repairs(journal: EvolutionJournal, ui_impl: UI) -> None:
     the staged complexity ratchet on a function this change is not
     otherwise touching.
     """
-    repairs = journal.get_repair_count()
-    if repairs:
-        ui_impl.warn(
-            f"  journal: {repairs} interrupted write(s) repaired. A crash left "
-            f"{journal.config.journal_path} without a trailing newline. The line above "
-            "each journal_repair row is what that write left behind: either a torn "
-            "fragment, which is lost, or a whole record that lost only its newline, "
-            "which is readable again. Read it to tell which."
-        )
+    summary = journal.repair_summary()
+    if summary is not None:
+        ui_impl.warn(f"  {summary}")
 
 
 def _preflight_root(ctx: click.Context) -> Path:
