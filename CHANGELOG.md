@@ -199,8 +199,14 @@ stage, runtime feedback, and an earned-autonomy ladder). See
   14 of the 17 failure signatures in this repository's own journal, so the phase
   dropped under budget pressure was the one doing most of the catching. The halt
   is recorded as `failed_check = adversarial_budget`, journalled as
-  `review:budget-exhausted` or `security:budget-exhausted`, and carries an
-  `infrastructure_error` finding for the phase. It does not retry, and `ks
+  `adversarial_budget:review` or `adversarial_budget:security`, and carries an
+  `infrastructure_error` finding for the phase. The signature leads with the
+  check name rather than the phase so that the journal and `ks autonomy replay`
+  answer the same way about the run: the replay reads everything before the
+  first colon as the check name, and `adversarial_budget` is enrolled as
+  infrastructure, so a run whose reviewer never ran is not counted as a verdict
+  about the factory's judgement. The set-point gate's own budget refusal moved
+  to `adversarial_budget:setpoint` in the same sweep. It does not retry, and `ks
   serve` now classifies such a run as the existing terminal `budget_halt`
   verdict rather than as retryable infrastructure, so the queue item is not
   requeued against a cap that starts again at zero. Two consequences of a halt:

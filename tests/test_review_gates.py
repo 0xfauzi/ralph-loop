@@ -855,7 +855,7 @@ class TestFactorySkipTraces:
         assert any(f.is_phase_skip and f.phase == "review" for f in comp_b.findings)
         entry = run.journal_entry("comp-b")
         assert entry["failed_check"] == "adversarial_budget"
-        assert "security:budget-exhausted" in entry["failure_signatures"]  # type: ignore[operator]
+        assert "adversarial_budget:security" in entry["failure_signatures"]  # type: ignore[operator]
 
     def test_unbounded_default_unchanged(
         self,
@@ -889,7 +889,15 @@ class TestFactorySkipTraces:
         )
         entry = run.journal_entry("comp-b")
         assert entry["failed_check"] == "adversarial_budget"
-        assert "review:budget-exhausted" in entry["failure_signatures"]  # type: ignore[operator]
+        # The signature leads with the CHECK, not with the phase. #226
+        # specified "review:budget-exhausted"; that spelling made
+        # autonomy_replay count a run whose reviewer never ran as a
+        # verdict about the factory's judgement, because its prefix
+        # taxonomy reads everything before the first colon as the check
+        # name and "review" is not an infrastructure check. See
+        # tests/test_infrastructure_category_consumers.py for the two
+        # consumers agreeing on this name.
+        assert "adversarial_budget:review" in entry["failure_signatures"]  # type: ignore[operator]
 
     def test_advisory_security_budget_exhausted_still_skips(
         self,

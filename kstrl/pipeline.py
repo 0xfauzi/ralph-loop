@@ -2936,11 +2936,26 @@ class ComponentPipeline:
         would burn engineer iterations against the same exhausted cap.
         The infrastructure Finding is the record in the findings stream
         and the PR body; ``check=ADVERSARIAL_BUDGET_CHECK`` and the
-        ``<phase>:budget-exhausted`` signature are the record in the
+        ``adversarial_budget:<phase>`` signature are the record in the
         journal, and ``ks serve`` reads the first of those to make the
         run terminal rather than retrying it (``serve.
         _budget_halt_outcome``). Advisory mode never reaches here: it
         keeps the recorded skip.
+
+        THE SIGNATURE LEADS WITH THE CHECK, not with the phase, and that
+        is what makes the journal and the replay agree about this run.
+        ``evolution.split_signature`` takes everything before the first
+        colon as the check name and ``_CATEGORY_BY_CHECK`` categorises
+        it, which ``autonomy_replay.INFRA_FAILURE_PREFIXES`` is derived
+        from. A ``review:`` prefix would file a reviewer that never ran
+        under the reviewer's own category, and the replay would then
+        count the run as a verdict about the factory's judgement while
+        ``factory``'s live accounting, which asks the FINDING question,
+        counts it as an infrastructure casualty and does not. #315's
+        rule is that a taxonomy answering a question twice will
+        eventually answer it two ways; ``adversarial_budget`` is
+        enrolled as infrastructure, so both consumers read the same
+        answer out of one table.
         """
         cap = self.factory_config.max_adversarial_calls
         # One sentence, used by the banner and by the Finding, so the two
@@ -2961,7 +2976,7 @@ class ComponentPipeline:
             error=error,
             phase=phase,
             check=ADVERSARIAL_BUDGET_CHECK,
-            signatures=[f"{phase}:budget-exhausted"],
+            signatures=[f"{ADVERSARIAL_BUDGET_CHECK}:{phase}"],
         )
 
     def _review_did_not_run(
@@ -3024,7 +3039,14 @@ class ComponentPipeline:
                     error=error,
                     phase="review",
                     check="setpoint",
-                    signatures=["review:setpoint-budget-exhausted"],
+                    # Same class as _budget_refusal's signature and swept
+                    # with it (#226 round 2): the reviewer did not run, so
+                    # a ``review:`` prefix would tell the replay this run
+                    # produced a verdict about the factory's judgement.
+                    # ``check`` stays "setpoint" - the field ``ks serve``
+                    # reads is Component.failed_check, and this refusal is
+                    # the set-point gate's, not the budget branch's.
+                    signatures=[f"{ADVERSARIAL_BUDGET_CHECK}:setpoint"],
                 ),
             )
         return ReviewPhaseResult(ran=False, skip_reason=skip_reason)
