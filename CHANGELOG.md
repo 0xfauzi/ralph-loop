@@ -22,18 +22,29 @@ stage, runtime feedback, and an earned-autonomy ladder). See
   `--root` and, when the ladder is enabled, opens a `calibration_drift`
   inbox item on a regression; `[autonomy] demote_on_calibration_regression`
   (env `KSTRL_AUTONOMY_DEMOTE_ON_CALIBRATION`) additionally revokes one
-  level, once per new baseline however often the comparison is re-run.
-  With the ladder off it says so on stdout rather than doing nothing
-  quietly. The R8.4 half is the seam only: a new `health_breach` inbox
-  kind and `[autonomy] demote_on_health_breach` (env
-  `KSTRL_AUTONOMY_DEMOTE_ON_HEALTH`), inert until `kstrl/health.py`
-  exists and suppressed while a cool-down is running. Both switches
-  default off, because every threshold in the ladder is still an
-  unmeasured placeholder. Every automatic demotion now goes through one
-  `autonomy.apply_demotion`, so the state save, the journal entry, the
-  run event and the inbox notice cannot drift apart per trigger.
-  Compare's exit codes are unchanged, except that a `kstrl.toml` that
-  will not load now exits 2 instead of being read as "ladder off".
+  level, once per comparison however often that comparison is re-run.
+  With the ladder off it says so on stdout, naming the root it consulted,
+  rather than doing nothing quietly. The R8.4 half is the seam only: a
+  new `health_breach` inbox kind and `[autonomy] demote_on_health_breach`
+  (env `KSTRL_AUTONOMY_DEMOTE_ON_HEALTH`), inert until `kstrl/health.py`
+  exists and suppressed - out loud - while a cool-down is running. Both
+  switches default off, because every threshold in the ladder is still an
+  unmeasured placeholder, and both are refused unless written as unquoted
+  booleans, because `= "false"` would otherwise arm them. Every automatic
+  demotion now goes through one `autonomy.apply_demotion`, so its four
+  writes cannot drift apart per trigger. Compare's exit codes are
+  unchanged, except that on a regression a `kstrl.toml` that will not
+  load or cannot be read exits 2 instead of being read as "ladder off".
+
+### Changed
+
+- A repeat of an open inbox item now refreshes its `evidence` alongside
+  its `detail`. Only the prose half was refreshed before, so a deduped
+  item whose numbers move - a health breach, whose whole point is that
+  the value moves - reported the latest observation in `detail` and the
+  first one in the structured payload that `ks inbox` and the TUI render.
+  `title` is still not refreshed: it is the row's label, and a repeat
+  must not relabel a row somebody has already read.
 
 ### Fixed
 
