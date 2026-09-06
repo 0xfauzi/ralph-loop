@@ -930,7 +930,11 @@ def apply_demotion(
     repeated trigger there is a no-op rather than an error. The state is
     still saved on that path, because the caller's own counters (a policy
     violation, say) were mutated before the demotion was attempted and
-    they are what blocks the next promotion.
+    they are what blocks the next promotion. One exception, warned about:
+    a state that ``load`` already failed closed on is not written back,
+    because saving a fresh L1 over damaged bytes destroys the only thing
+    an operator could have repaired, and the counters that save would
+    carry were lost with the file they came from anyway.
 
     ``state`` is for callers that already hold a mutated, unsaved state.
     ``factory._record_autonomy_outcome`` counts the run's violations on an
