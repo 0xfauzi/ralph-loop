@@ -4203,18 +4203,18 @@ def _run_factory_locked(
                 # Remove from completed list
                 if cr.breaker in factory_result.completed:
                     factory_result.completed.remove(cr.breaker)
-                ctx = IterationContext.from_json(component_contexts.get(cr.breaker, "{}"))
-                # breaker.retries was already incremented above, so it
-                # now names the attempt whose contract test failed, not
-                # the next one. (Issue #223's table says retries + 1;
-                # that holds at the pipeline sites, where the increment
-                # happens inside retry_or_fail AFTER the entry is
-                # recorded. Here it would be off by one.)
-                ctx.add_contract_failure(
+                # The context write lives on the pipeline (#247): it is
+                # one of exactly two writers of the retry context and
+                # both must merge the attempt's phase readings, or a
+                # contract failure re-raises a review finding the
+                # reviewer already cleared. breaker.retries was
+                # incremented above and so names the attempt whose
+                # contract test failed; see record_contract_failure.
+                pipeline.record_contract_failure(
+                    cr.breaker,
+                    breaker.retries,
                     cr.test_output[:500],
-                    attempt=breaker.retries,
                 )
-                component_contexts[cr.breaker] = ctx.to_json()
                 manifest.save(manifest_path)
                 any_breaker_reset = True
                 ui.warn(f"  Contract breaker '{cr.breaker}' sent back for retry")

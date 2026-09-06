@@ -57,14 +57,23 @@ PHASE_RANK: dict[str, int] = {
 #: retired by a fresh reading from the same phase, which is observed
 #: rather than inferred.
 #:
-#: The cost, accepted deliberately: when the reviewer DID run in attempt
-#: N and passed, it records no entry, so an earlier review finding it
-#: cleared still renders under "Not re-measured". The agent is told to
-#: re-check it rather than that it is current, so the error is a bounded
-#: over-show. The alternative error is dropping a live finding in
-#: silence, which the halt-over-heroics doctrine rules out. Retiring on
-#: an observed pass needs the context to record which phases ran, and
-#: the context is only built on failure paths today; that is issue #247.
+#: An entry from one of these phases is therefore retired only by an
+#: OBSERVED reading, and there are exactly two: a fresh entry at the
+#: same rank in attempt N, or a ``PhaseReading`` recorded because the
+#: phase ran in attempt N and returned a verdict. Neither is an
+#: inference from a higher-ranked failure.
+#:
+#: #247 supplied the second route. Before it there was only the first,
+#: and a passing phase records no entry, so a reviewer that ran in
+#: attempt N and cleared an earlier finding still left that finding
+#: under "Not re-measured" and the agent was told to re-check something
+#: it had already fixed. The reason that cost was accepted rather than
+#: fixed cheaply is that the opposite error - dropping a live finding
+#: when the budget had skipped the reviewer - is silent, and the
+#: halt-over-heroics doctrine rules it out. So the record has to
+#: distinguish "ran and passed" from "did not run", which is why
+#: ``PhaseReading`` keys on the phase producing a verdict rather than on
+#: the phase being invoked.
 #: #226 removed the HARD-mode case: hard mode now halts instead of
 #: skipping, so the remaining causes are an advisory budget downgrade
 #: and an explicit skip. Both are live, so this set stays.
@@ -99,6 +108,18 @@ _LEGACY_LIST_PHASE: dict[str, str] = {
     "verification_failures": "verification",
     "contract_failures": "contract",
 }
+
+
+def _require_known_phase(phase: str) -> None:
+    """One definition of a phase name this object will accept.
+
+    Entries and readings are joined by this string: an entry is retired
+    when a reading names the same phase. Two copies of the check are two
+    definitions of the vocabulary, and the weaker one is the one that
+    decides.
+    """
+    if phase not in PHASE_RANK:
+        raise ValueError(f"unknown phase {phase!r}; expected one of {sorted(PHASE_RANK)}")
 
 
 @dataclass
@@ -140,6 +161,38 @@ class FailureEntry:
 
 
 @dataclass(frozen=True)
+class PhaseReading:
+    """Positive evidence that a phase RAN in an attempt and returned a
+    verdict about the change, whether that verdict was pass or fail.
+
+    The counterpart to ``FailureEntry``, which records only what went
+    wrong: a phase that passes writes no entry, so without this there is
+    no difference in the context between a reviewer that looked again
+    and cleared a finding and a reviewer that never looked. That is
+    issue #247.
+
+    What it is NOT. ``FailureEntry.infrastructure`` draws the same line
+    from the failure side:
+
+    - a phase that was SKIPPED produces no reading, so an entry it
+      cleared in an earlier attempt is still shown. That is the whole
+      reason ``SKIPPABLE_PHASES`` exists and it must not regress.
+    - a phase whose sensor CRASHED produces no reading either. An
+      advisory-mode reviewer that raises is reported as passing, and
+      treating that as evidence would retire a live finding on the
+      strength of an exception.
+
+    Only ``SKIPPABLE_PHASES`` phases are ever recorded. For every other
+    phase, having run is already inferable from a higher-ranked failure
+    in the same attempt, so a record would be redundant and would give
+    the rank rule a second, overlapping source of truth.
+    """
+
+    attempt: int
+    phase: str
+
+
+@dataclass(frozen=True)
 class _Buckets:
     """The three groups ``format_for_prompt`` renders, plus the latest
     attempt any of them was measured in."""
@@ -159,6 +212,7 @@ class IterationContext:
 
     records: list[IterationRecord] = field(default_factory=list)
     entries: list[FailureEntry] = field(default_factory=list)
+    readings: set[PhaseReading] = field(default_factory=set)
 
     # Backward-compatible read-only views. Nothing in kstrl/ reads these
     # any more, but they keep the shape the pre-R10.2 object exposed.
@@ -221,6 +275,18 @@ class IterationContext:
     def add_contract_failure(self, failure: str, *, attempt: int) -> None:
         self._add(failure, attempt, "contract")
 
+    def add_phase_reading(self, phase: str, *, attempt: int) -> None:
+        """Record that ``phase`` ran in ``attempt`` and returned a
+        verdict. See ``PhaseReading`` for what does and does not count.
+
+        The merge that writes these runs once per failing gate and the
+        record is carried forward across attempts, so the same reading
+        arrives more than once by design; ``readings`` is a set, so that
+        is a no-op rather than a rule to remember.
+        """
+        _require_known_phase(phase)
+        self.readings.add(PhaseReading(attempt=attempt, phase=phase))
+
     def _add(
         self,
         text: str,
@@ -230,8 +296,7 @@ class IterationContext:
     ) -> None:
         if not text:
             return
-        if phase not in PHASE_RANK:
-            raise ValueError(f"unknown phase {phase!r}; expected one of {sorted(PHASE_RANK)}")
+        _require_known_phase(phase)
         self.entries.append(
             FailureEntry(
                 attempt=attempt,
@@ -254,6 +319,10 @@ class IterationContext:
             len(self.records),
         )
 
+    def _phases_read_in(self, attempt: int) -> set[str]:
+        """Phases that ran in ``attempt`` and returned a verdict."""
+        return {r.phase for r in self.readings if r.attempt == attempt}
+
     def _buckets(self) -> _Buckets:
         """Sort the entries into current, not re-measured, and resolved.
 
@@ -273,7 +342,11 @@ class IterationContext:
         - rank below ``Q``: the phase ran in attempt ``N`` and passed, or
           ``Q`` would be lower. That is an inference, and it is only
           sound for a phase that always runs once its predecessor
-          passes, so ``SKIPPABLE_PHASES`` is excluded from it.
+          passes, so ``SKIPPABLE_PHASES`` is excluded from it. The
+          inference stays barred for those phases; what #247 adds is the
+          other route to the same conclusion, which is OBSERVATION: the
+          phase recorded a ``PhaseReading`` for attempt ``N`` and no
+          entry, so it ran and it passed.
 
         When attempt ``N`` produced no entry at all, ``Q`` sits below
         every rank and nothing is retired: a plain engineer-loop failure
@@ -292,6 +365,13 @@ class IterationContext:
         # got that far), but it is not a reading of its own phase, so it
         # cannot supersede an earlier real finding there.
         measured_ranks = {PHASE_RANK[e.phase] for e in latest if not e.infrastructure}
+        # The skippable phases whose older entries the rank rule still
+        # may not retire. Computed as a set here, and through a helper
+        # rather than inline, so the branch below stays a single
+        # membership test and this function's cognitive complexity does
+        # not rise: it is already at 18 against a gate of 15, and the
+        # pre-commit ratchet fails a rise in a function that is over.
+        unread_skippable = SKIPPABLE_PHASES - self._phases_read_in(n)
 
         for entry in self.entries:
             if entry.attempt == LEGACY_ATTEMPT:
@@ -312,7 +392,7 @@ class IterationContext:
                     resolved.append(entry)
                 else:
                     not_remeasured.append(entry)
-            elif entry.phase in SKIPPABLE_PHASES:
+            elif entry.phase in unread_skippable:
                 not_remeasured.append(entry)
             else:
                 resolved.append(entry)
@@ -419,6 +499,13 @@ class IterationContext:
                 }
                 for e in self.entries
             ],
+            # Sorted because the source is a set and this string crosses
+            # a process boundary: unsorted, the same context would
+            # serialise differently under a different PYTHONHASHSEED.
+            "readings": [
+                {"attempt": attempt, "phase": phase}
+                for attempt, phase in sorted((r.attempt, r.phase) for r in self.readings)
+            ],
         }
         return json.dumps(data)
 
@@ -438,6 +525,18 @@ class IterationContext:
                     error=rec_data.get("error"),
                     summary=rec_data.get("summary", ""),
                     attempt=rec_data.get("attempt", LEGACY_ATTEMPT),
+                )
+            )
+        # Placed ahead of the two shape branches so one loop serves both.
+        # An absent key means no readings, which is exactly the rule
+        # that held before #247: a context written by an older parent
+        # process degrades to showing the finding rather than to
+        # dropping it.
+        for reading_data in parsed.get("readings", []):
+            ctx.readings.add(
+                PhaseReading(
+                    attempt=reading_data["attempt"],
+                    phase=reading_data["phase"],
                 )
             )
         if "entries" in parsed:
