@@ -45,8 +45,9 @@ from kstrl.calibration_ladder import LADDER_DISABLED_LINE
 from kstrl.events import EventBus
 from kstrl.factory import FactoryResult, _record_autonomy_outcome
 from kstrl.inbox import Inbox, InboxConfig, ItemKind, Priority
-from kstrl.manifest import Component, Manifest
 from kstrl.ui.plain import PlainUI
+from tests.helpers.bad_toml import TOML_PARSE_FAULTS
+from tests.spine_utils import component, make_manifest
 
 OLD_TS = "20260901-000000"
 NEW_TS = "20260905-000000"
@@ -138,26 +139,6 @@ def _ui() -> tuple[PlainUI, io.StringIO]:
     return PlainUI(no_color=True, file=buffer), buffer
 
 
-def _manifest() -> Manifest:
-    return Manifest(
-        version="1",
-        spec_file="spec.md",
-        project_name="test",
-        base_branch="main",
-        single_pr=False,
-        components=[
-            Component(
-                "comp-a",
-                "Component A",
-                "Desc",
-                [],
-                "scripts/kstrl/feature/comp-a/prd.json",
-                "kstrl/factory/comp-a",
-            )
-        ],
-    )
-
-
 def _breach(
     metric: str = "retry_rate",
     rule: str = "WE1: 1 point beyond 3 sigma",
@@ -172,15 +153,28 @@ def _fake_health(*breaches: object, with_function: bool = True) -> ModuleType:
     return module
 
 
-def _run_outcome(tmp_path: Path, ui: PlainUI) -> None:
+def _compare(tmp_path: Path, old: Path, new: Path) -> int:
+    """``python -m kstrl.calibration compare`` against a project root."""
+    return calibration.main(["compare", str(old), str(new), "--root", str(tmp_path)])
+
+
+def _run_outcome(tmp_path: Path) -> str:
+    """One factory run's outcome folded into the ladder; returns the UI text.
+
+    ``autonomy_config`` is resolved here, once, exactly as
+    ``_run_factory_locked`` resolves it at run start and threads it down.
+    """
+    ui, buffer = _ui()
     _record_autonomy_outcome(
         root_dir=tmp_path,
-        manifest=_manifest(),
+        manifest=make_manifest([component("comp-a")]),
         factory_result=FactoryResult(completed=["comp-a"]),
+        autonomy_config=AutonomyConfig.load(tmp_path),
         bus=EventBus(),
         run_id="run-1",
         ui=ui,
     )
+    return buffer.getvalue()
 
 
 # ---------------------------------------------------------------------------
@@ -262,15 +256,14 @@ class TestApplyDemotion:
 
 
 class TestCompareLadder:
-    def test_compare_regression_opens_inbox_item(self, tmp_path: Path, capsys) -> None:
+    def test_compare_regression_opens_inbox_item(self, tmp_path: Path) -> None:
         _write_config(tmp_path)
         AutonomyState(level=int(AutonomyLevel.L2_GATED_MERGE)).save(tmp_path)
         old, new = _baseline_pair(tmp_path, missed=_MISSED_IN_NEW)
 
-        code = calibration.main(["compare", str(old), str(new), "--root", str(tmp_path)])
+        code = _compare(tmp_path, old, new)
 
         assert code == 1
-        capsys.readouterr()
         drift = _items(tmp_path, ItemKind.CALIBRATION_DRIFT)
         assert len(drift) == 1
         assert (
@@ -283,15 +276,14 @@ class TestCompareLadder:
         assert AutonomyState.load(tmp_path).level == int(AutonomyLevel.L2_GATED_MERGE)
         assert _items(tmp_path, ItemKind.DEMOTION_NOTICE) == []
 
-    def test_compare_regression_demotes_when_enabled(self, tmp_path: Path, capsys) -> None:
+    def test_compare_regression_demotes_when_enabled(self, tmp_path: Path) -> None:
         _write_config(tmp_path, demote_on_calibration=True)
         AutonomyState(level=int(AutonomyLevel.L2_GATED_MERGE)).save(tmp_path)
         old, new = _baseline_pair(tmp_path, missed=_MISSED_IN_NEW)
 
-        code = calibration.main(["compare", str(old), str(new), "--root", str(tmp_path)])
+        code = _compare(tmp_path, old, new)
 
         assert code == 1
-        capsys.readouterr()
         state = AutonomyState.load(tmp_path)
         assert state.level == int(AutonomyLevel.L1_SUPERVISED)
         assert state.history[-1].trigger == "calibration_regression"
@@ -299,20 +291,21 @@ class TestCompareLadder:
         kinds = {item.kind for item in _items(tmp_path)}
         assert kinds == {ItemKind.CALIBRATION_DRIFT, ItemKind.DEMOTION_NOTICE}
 
-    def test_compare_regression_dedupes_inbox_item(self, tmp_path: Path, capsys) -> None:
+    def test_compare_regression_dedupes_inbox_item(self, tmp_path: Path) -> None:
         _write_config(tmp_path)
         AutonomyState(level=int(AutonomyLevel.L2_GATED_MERGE)).save(tmp_path)
         old, new = _baseline_pair(tmp_path, missed=_MISSED_IN_NEW)
 
         for _ in range(2):
-            assert calibration.main(["compare", str(old), str(new), "--root", str(tmp_path)]) == 1
-        capsys.readouterr()
+            assert _compare(tmp_path, old, new) == 1
 
         drift = _items(tmp_path, ItemKind.CALIBRATION_DRIFT)
         assert len(drift) == 1
         assert drift[0].occurrences == 2
 
-    def test_compare_demotes_once_for_the_same_baseline(self, tmp_path: Path, capsys) -> None:
+    def test_compare_demotes_once_for_the_same_baseline(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
         """Re-reading one measurement must not cost a second level.
 
         The compare command is human-invoked and gets re-run. Deduping on
@@ -324,7 +317,7 @@ class TestCompareLadder:
         old, new = _baseline_pair(tmp_path, missed=_MISSED_IN_NEW)
 
         for _ in range(2):
-            assert calibration.main(["compare", str(old), str(new), "--root", str(tmp_path)]) == 1
+            assert _compare(tmp_path, old, new) == 1
         out = capsys.readouterr().out
 
         state = AutonomyState.load(tmp_path)
@@ -333,12 +326,14 @@ class TestCompareLadder:
         assert len(_items(tmp_path, ItemKind.DEMOTION_NOTICE)) == 1
         assert f"baseline {NEW_TS} already cost a level" in out
 
-    def test_compare_no_regression_writes_nothing(self, tmp_path: Path, capsys) -> None:
+    def test_compare_no_regression_writes_nothing(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
         _write_config(tmp_path, demote_on_calibration=True)
         AutonomyState(level=int(AutonomyLevel.L2_GATED_MERGE)).save(tmp_path)
         old, new = _baseline_pair(tmp_path, missed=frozenset())
 
-        code = calibration.main(["compare", str(old), str(new), "--root", str(tmp_path)])
+        code = _compare(tmp_path, old, new)
 
         assert code == 0
         assert LADDER_DISABLED_LINE not in capsys.readouterr().out
@@ -346,27 +341,43 @@ class TestCompareLadder:
         assert AutonomyState.load(tmp_path).level == int(AutonomyLevel.L2_GATED_MERGE)
 
     def test_compare_autonomy_disabled_writes_nothing_and_says_so(
-        self, tmp_path: Path, capsys
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         AutonomyState(level=int(AutonomyLevel.L2_GATED_MERGE)).save(tmp_path)
         old, new = _baseline_pair(tmp_path, missed=_MISSED_IN_NEW)
 
-        code = calibration.main(["compare", str(old), str(new), "--root", str(tmp_path)])
+        code = _compare(tmp_path, old, new)
 
         assert code == 1
         assert LADDER_DISABLED_LINE in capsys.readouterr().out
         assert _items(tmp_path) == []
         assert AutonomyState.load(tmp_path).level == int(AutonomyLevel.L2_GATED_MERGE)
 
-    def test_compare_unloadable_config_exits_2(self, tmp_path: Path, capsys) -> None:
-        """A broken config is a refusal, never a silent "ladder is off"."""
-        (tmp_path / "kstrl.toml").write_text("[autonomy\nenabled = true\n", encoding="utf-8")
+    @pytest.mark.parametrize("body,fragment", TOML_PARSE_FAULTS)
+    def test_compare_unloadable_config_exits_2(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+        body: bytes,
+        fragment: str,
+    ) -> None:
+        """A broken config is a refusal, never a silent "ladder is off".
+
+        Parametrized on the shared #318 table rather than one hand-rolled
+        syntax error: ``report_to_ladder`` is a new config-reading seam,
+        and the three faults that each escaped a shipped handler (not
+        utf-8, a 4301-digit integer, 496 nested arrays) are exactly the
+        ones a single malformed-header fixture would never have reached.
+        """
+        (tmp_path / "kstrl.toml").write_bytes(body)
         old, new = _baseline_pair(tmp_path, missed=_MISSED_IN_NEW)
 
-        code = calibration.main(["compare", str(old), str(new), "--root", str(tmp_path)])
+        code = _compare(tmp_path, old, new)
 
         assert code == 2
-        assert "error:" in capsys.readouterr().err
+        err = capsys.readouterr().err
+        assert err.startswith("error:")
+        assert fragment in err
         assert _items(tmp_path) == []
 
 
@@ -382,9 +393,7 @@ class TestHealthSeam:
         assert importlib.util.find_spec("kstrl.health") is None
         _write_config(tmp_path, demote_on_health=True)
         AutonomyState(level=int(AutonomyLevel.L2_GATED_MERGE)).save(tmp_path)
-        ui, _ = _ui()
-
-        _run_outcome(tmp_path, ui)
+        _run_outcome(tmp_path)
 
         assert _items(tmp_path) == []
         assert AutonomyState.load(tmp_path).level == int(AutonomyLevel.L2_GATED_MERGE)
@@ -403,10 +412,8 @@ class TestHealthSeam:
         monkeypatch.setitem(sys.modules, "kstrl.health", _fake_health(with_function=False))
         _write_config(tmp_path)
         AutonomyState(level=int(AutonomyLevel.L2_GATED_MERGE)).save(tmp_path)
-        ui, _ = _ui()
-
         with pytest.raises(AttributeError):
-            _run_outcome(tmp_path, ui)
+            _run_outcome(tmp_path)
 
     def test_health_breach_opens_inbox_item(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -414,9 +421,7 @@ class TestHealthSeam:
         monkeypatch.setitem(sys.modules, "kstrl.health", _fake_health(_breach()))
         _write_config(tmp_path)
         AutonomyState(level=int(AutonomyLevel.L2_GATED_MERGE)).save(tmp_path)
-        ui, _ = _ui()
-
-        _run_outcome(tmp_path, ui)
+        _run_outcome(tmp_path)
 
         breaches = _items(tmp_path, ItemKind.HEALTH_BREACH)
         assert len(breaches) == 1
@@ -435,9 +440,7 @@ class TestHealthSeam:
         monkeypatch.setitem(sys.modules, "kstrl.health", _fake_health(_breach()))
         _write_config(tmp_path, demote_on_health=True)
         AutonomyState(level=int(AutonomyLevel.L2_GATED_MERGE)).save(tmp_path)
-        ui, _ = _ui()
-
-        _run_outcome(tmp_path, ui)
+        _run_outcome(tmp_path)
 
         state = AutonomyState.load(tmp_path)
         assert state.level == int(AutonomyLevel.L1_SUPERVISED)
@@ -458,9 +461,7 @@ class TestHealthSeam:
         state = AutonomyState(level=int(AutonomyLevel.L3_ENVELOPED_AUTO))
         state.cooldown_runs_remaining = 3
         state.save(tmp_path)
-        ui, _ = _ui()
-
-        _run_outcome(tmp_path, ui)
+        _run_outcome(tmp_path)
 
         assert _items(tmp_path, ItemKind.HEALTH_BREACH)
         assert AutonomyState.load(tmp_path).level == int(AutonomyLevel.L3_ENVELOPED_AUTO)
@@ -472,50 +473,44 @@ class TestHealthSeam:
 # ---------------------------------------------------------------------------
 
 
+#: The toml key and the dataclass attribute are the same name by design,
+#: so the table carries it once: a second column could only ever disagree.
 @pytest.mark.parametrize(
-    "key,env_var,attr",
+    "key,env_var",
     [
-        (
-            "demote_on_calibration_regression",
-            "KSTRL_AUTONOMY_DEMOTE_ON_CALIBRATION",
-            "demote_on_calibration_regression",
-        ),
-        (
-            "demote_on_health_breach",
-            "KSTRL_AUTONOMY_DEMOTE_ON_HEALTH",
-            "demote_on_health_breach",
-        ),
+        ("demote_on_calibration_regression", "KSTRL_AUTONOMY_DEMOTE_ON_CALIBRATION"),
+        ("demote_on_health_breach", "KSTRL_AUTONOMY_DEMOTE_ON_HEALTH"),
     ],
 )
 class TestConfigFlags:
     def test_defaults_off(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, key: str, env_var: str, attr: str
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, key: str, env_var: str
     ) -> None:
         monkeypatch.delenv(env_var, raising=False)
-        assert getattr(AutonomyConfig.load(tmp_path), attr) is False
-        assert getattr(AutonomyConfig(), attr) is False
+        assert getattr(AutonomyConfig.load(tmp_path), key) is False
+        assert getattr(AutonomyConfig(), key) is False
 
     def test_toml_alone_enables(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, key: str, env_var: str, attr: str
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, key: str, env_var: str
     ) -> None:
         monkeypatch.delenv(env_var, raising=False)
         (tmp_path / "kstrl.toml").write_text(f"[autonomy]\n{key} = true\n", encoding="utf-8")
-        assert getattr(AutonomyConfig.load(tmp_path), attr) is True
+        assert getattr(AutonomyConfig.load(tmp_path), key) is True
 
     def test_env_beats_toml(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, key: str, env_var: str, attr: str
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, key: str, env_var: str
     ) -> None:
         (tmp_path / "kstrl.toml").write_text(f"[autonomy]\n{key} = true\n", encoding="utf-8")
         monkeypatch.setenv(env_var, "0")
-        assert getattr(AutonomyConfig.load(tmp_path), attr) is False
+        assert getattr(AutonomyConfig.load(tmp_path), key) is False
         monkeypatch.setenv(env_var, "1")
         (tmp_path / "kstrl.toml").write_text(f"[autonomy]\n{key} = false\n", encoding="utf-8")
-        assert getattr(AutonomyConfig.load(tmp_path), attr) is True
+        assert getattr(AutonomyConfig.load(tmp_path), key) is True
 
     def test_from_env_reads_the_var(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, key: str, env_var: str, attr: str
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, key: str, env_var: str
     ) -> None:
         monkeypatch.delenv(env_var, raising=False)
-        assert getattr(AutonomyConfig.from_env(), attr) is False
+        assert getattr(AutonomyConfig.from_env(), key) is False
         monkeypatch.setenv(env_var, "1")
-        assert getattr(AutonomyConfig.from_env(), attr) is True
+        assert getattr(AutonomyConfig.from_env(), key) is True

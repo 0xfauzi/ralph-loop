@@ -2748,9 +2748,50 @@ class _HealthBreach(Protocol):
     window_runs: int
 
 
+def _open_health_breach_items(
+    root_dir: Path,
+    breaches: list[_HealthBreach],
+    *,
+    run_id: str,
+    ui: UI,
+) -> None:
+    """Write one advisory item per breach, non-fatally.
+
+    Honours ``[inbox] enabled``; a failed write warns and never fails the
+    run, because losing the notice must not also lose the demotion the
+    caller goes on to apply.
+    """
+    try:
+        inbox_config = InboxConfig.load(root_dir)
+        if not inbox_config.enabled:
+            return
+        inbox = Inbox(root_dir, inbox_config)
+        for breach in breaches:
+            inbox.add(
+                ItemKind.HEALTH_BREACH,
+                f"Health breach: {breach.metric} {breach.rule}",
+                detail=(
+                    f"value {breach.value} beyond limit {breach.limit} "
+                    f"over {breach.window_runs} run(s)"
+                ),
+                run_id=run_id,
+                dedupe_key=f"health:{breach.metric}:{breach.rule}",
+                evidence={
+                    "metric": breach.metric,
+                    "rule": breach.rule,
+                    "value": breach.value,
+                    "limit": breach.limit,
+                    "window_runs": breach.window_runs,
+                },
+            )
+    except (OSError, ValueError) as exc:
+        ui.warn(f"Inbox write failed (non-fatal): {exc}")
+
+
 def _record_health_breaches(
     root_dir: Path,
     state: AutonomyState,
+    autonomy_config: AutonomyConfig,
     *,
     run_id: str,
     ui: UI,
@@ -2773,6 +2814,11 @@ def _record_health_breaches(
     ungated trigger would take one level per run down to L1 before the
     operator had read the first notice.
 
+    ``autonomy_config`` is the run's own snapshot, taken once at run
+    start, rather than a second read here: a run must not have its
+    permissions decided by one resolution of ``[autonomy]`` and its
+    demotion by another.
+
     The false-alarm arithmetic #151 must choose its rule set against, so
     the choice is made with the cost in front of it: one point beyond
     three sigma fires by chance about once in 370 observations, and all
@@ -2790,31 +2836,8 @@ def _record_health_breaches(
     breaches: list[_HealthBreach] = list(health.health_breaches(root_dir))
     if not breaches:
         return
-    try:
-        inbox_config = InboxConfig.load(root_dir)
-        if inbox_config.enabled:
-            inbox = Inbox(root_dir, inbox_config)
-            for breach in breaches:
-                inbox.add(
-                    ItemKind.HEALTH_BREACH,
-                    f"Health breach: {breach.metric} {breach.rule}",
-                    detail=(
-                        f"value {breach.value} beyond limit {breach.limit} "
-                        f"over {breach.window_runs} run(s)"
-                    ),
-                    run_id=run_id,
-                    dedupe_key=f"health:{breach.metric}:{breach.rule}",
-                    evidence={
-                        "metric": breach.metric,
-                        "rule": breach.rule,
-                        "value": breach.value,
-                        "limit": breach.limit,
-                        "window_runs": breach.window_runs,
-                    },
-                )
-    except (OSError, ValueError) as exc:
-        ui.warn(f"Inbox write failed (non-fatal): {exc}")
-    if not AutonomyConfig.load(root_dir).demote_on_health_breach:
+    _open_health_breach_items(root_dir, breaches, run_id=run_id, ui=ui)
+    if not autonomy_config.demote_on_health_breach:
         return
     if state.cooldown_runs_remaining > 0:
         return
@@ -2847,6 +2870,7 @@ def _record_autonomy_outcome(
     root_dir: Path,
     manifest: Manifest,
     factory_result: FactoryResult,
+    autonomy_config: AutonomyConfig,
     bus: EventBus,
     run_id: str,
     ui: UI,
@@ -2930,7 +2954,7 @@ def _record_autonomy_outcome(
     # The health seam runs on every path, the demoting one included: the
     # cool-down that demotion just set is what then stops a second
     # revocation inside one run.
-    _record_health_breaches(root_dir, state, run_id=run_id, ui=ui, bus=bus)
+    _record_health_breaches(root_dir, state, autonomy_config, run_id=run_id, ui=ui, bus=bus)
 
 
 def run_factory(
@@ -4291,6 +4315,7 @@ def _run_factory_locked(
                 root_dir=root_dir,
                 manifest=manifest,
                 factory_result=factory_result,
+                autonomy_config=autonomy_config,
                 bus=bus,
                 run_id=run_id,
                 ui=ui,

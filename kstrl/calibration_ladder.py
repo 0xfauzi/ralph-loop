@@ -63,19 +63,20 @@ def _already_demoted_for(state: AutonomyState, new_baseline: str) -> bool:
     )
 
 
-def _open_drift_item(
-    root_dir: Path,
-    failures: list[str],
-    new_baseline: str,
-    evidence: dict[str, Any],
-) -> None:
+def _open_drift_item(root_dir: Path, evidence: dict[str, Any]) -> None:
     """Open the advisory ``calibration_drift`` item, non-fatally.
 
     Honours ``[inbox] enabled`` exactly as the factory's demotion notice
     does. An inbox that an operator switched off must not be re-enabled
     by a second emitter, and a failed write must not change the compare
     command's exit code, which is the measurement's answer.
+
+    The title, the dedupe key and the payload are all read off the one
+    ``evidence`` dict rather than passed separately, so an item cannot
+    describe the regression three ways.
     """
+    failures: list[str] = evidence["failures"]
+    new_baseline: str = evidence["new_baseline"]
     try:
         inbox_config = InboxConfig.load(root_dir)
         if not inbox_config.enabled:
@@ -120,7 +121,7 @@ def report_to_ladder(comparison: Comparison, root_dir: Path) -> int | None:
         "old": str(comparison.old.path),
         "new": str(comparison.new.path),
     }
-    _open_drift_item(root_dir, failures, new_baseline, evidence)
+    _open_drift_item(root_dir, evidence)
 
     if not config.demote_on_calibration_regression:
         return None
