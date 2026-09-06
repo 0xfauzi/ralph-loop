@@ -950,6 +950,15 @@ class JsonlSink:
         no-probe branch, on an unterminated tail. Everything the first
         emit has to get right is under the one ``try`` now.
 
+        THIS flush is the mechanism; the ``else`` scoping of the other
+        one is not, and that is measured rather than assumed. Moving
+        ``emit``'s flush back out of the ``else`` leaves the sink
+        unbound and the probe repeated, because this one already ran:
+        that mutation is green and benign. Deleting THIS line binds the
+        sink and drops the second probe. The ``else`` earns its place by
+        not flushing an already-flushed handle, which is a smaller
+        claim.
+
         Assigning first was a real hole. ``EventBus.emit`` catches every
         exception per sink and increments ``dropped``, which nothing in
         the product reads, so a first emit that hit ``ENOSPC`` on the
