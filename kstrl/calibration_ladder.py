@@ -3,9 +3,9 @@
 ``python -m kstrl.calibration compare`` measures the regression; this
 module is the consequence. It sits beside ``kstrl.calibration`` rather
 than inside it so the measurement half stays free of control-plane
-imports, and because ``kstrl/calibration.py`` is close enough to the
-repo's 800-line growth ratchet that a fifty-line helper would have to be
-trimmed to fit rather than written plainly.
+imports, and because folding it back in would not fit: measured, that is
+752 lines plus this module's 202 of body plus the 8 import lines it does
+not already have, so 962 against the repo's 800-line growth ratchet.
 
 Advisory first, in two tiers. A regression always opens a
 ``calibration_drift`` inbox item when the ladder is enabled; it demotes
@@ -56,9 +56,12 @@ if TYPE_CHECKING:
 #: otherwise tell an operator the ladder is off when it is on.
 LADDER_DISABLED_LINE = "autonomy ladder disabled; regression recorded in the report only"
 
-#: What ``save_report`` stamps a baseline with. Parsed rather than
-#: compared as text so a foreign file with some other timestamp shape is
-#: read as "order unknown" instead of silently ordered by ASCII.
+#: The shape a captured baseline's ``timestamp`` has. ``save_report``
+#: writes whatever its caller passed, so this is the CAPTURE's format,
+#: checked rather than assumed: all 10 baselines committed under
+#: ``tests/adversarial_fixtures/_results/`` match it and none does not.
+#: Parsed rather than compared as text so a foreign file with some other
+#: shape is read as "order unknown" instead of silently ordered by ASCII.
 _TIMESTAMP_FORMAT = "%Y%m%d-%H%M%S"
 
 

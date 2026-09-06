@@ -299,6 +299,10 @@ flag_assertionless_tests = true    # report tests that assert nothing
 enabled = false
 max_level = 4                      # hard local ceiling: refuse to run above this level
 # Advisory first: an inbox item always; demotion only when true.
+# These two revoke autonomy, so unlike every other key here they are REFUSED
+# unless written as an unquoted true or false. `= "false"` is a string, and
+# every non-empty string reads as true; a typo that arms a revocation switch
+# is worse than one that disarms it.
 demote_on_calibration_regression = false
 demote_on_health_breach = false
 
