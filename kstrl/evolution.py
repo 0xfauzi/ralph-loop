@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import re
+from collections import Counter
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -577,7 +578,60 @@ def category_for_check(check_name: str) -> str:
     return _CATEGORY_BY_CHECK.get(check_name, "iteration")
 
 
-def signatures_from_verification(checks: Iterable[CheckResult]) -> list[str]:
+def _check_signatures(check: CheckResult, limit: int | None) -> Counter[str]:
+    """One FAILED check's signatures, counted by OCCURRENCE, in first-seen order.
+
+    ``limit`` caps the DISTINCT codes, not the occurrences: a check that hit
+    E501 twelve times and F401 once contributes both under ``limit=2``, twelve
+    times and once.
+
+    ``Counter`` over a list because a ``Counter`` built from an iterable is a
+    dict subclass that keeps first-seen order, so ``list(tally)`` is the same
+    sequence ``dict.fromkeys`` gave, and the count is read rather than
+    accumulated one occurrence at a time.
+    """
+    parsed = check.parsed
+    tally = Counter(f.code for f in parsed.failures if f.code) if parsed is not None else Counter()
+    if not tally:
+        return Counter({signature_for_error(check.name, check.message): 1})
+    kept = list(tally) if limit is None else list(tally)[:limit]
+    return Counter({f"{check.name}:{code}": tally[code] for code in kept})
+
+
+def signature_counts_from_verification(
+    checks: Iterable[CheckResult],
+    *,
+    limit: int | None = _MAX_SIGNATURES_PER_CHECK,
+) -> dict[str, int]:
+    """How many times each structured signature occurred in failed checks.
+
+    OCCURRENCES, not presence: twelve E501 failures count twelve. That is
+    what :mod:`kstrl.dampener`'s baseline needs and what
+    :func:`signatures_from_verification` cannot give, because it ends in a
+    dedupe - every count built from its return value would be 1 and a
+    dampener's "this got worse" bucket could never fire (#227).
+
+    ``limit`` caps the DISTINCT codes one check contributes, in first-seen
+    order, before anything is counted. ``None`` means no cap. The default is
+    the journal's own constant, so a defaulted call is byte-identical to what
+    the journal recorded before this parameter existed.
+
+    This is the one place the ``"<check>:<code>"`` spelling is written, and
+    :func:`signatures_from_verification` reads its keys, so a format spelled
+    twice cannot get changed in one place only.
+    """
+    counts: Counter[str] = Counter()
+    for check in checks:
+        if not check.passed:
+            counts.update(_check_signatures(check, limit))
+    return dict(counts)
+
+
+def signatures_from_verification(
+    checks: Iterable[CheckResult],
+    *,
+    limit: int | None = _MAX_SIGNATURES_PER_CHECK,
+) -> list[str]:
     """Derive structured signatures from failed mechanical checks.
 
     Prefers the parser's structured codes (linter rule, checker error
@@ -591,19 +645,19 @@ def signatures_from_verification(checks: Iterable[CheckResult]) -> list[str]:
     through to the prose slug, and the unioned label a chained command
     produces ("pytest+vitest") matched nothing at all. The parser now
     names its own signature in ``ParsedFailure.code``, so this reads a
-    capability instead of guessing from a label."""
-    signatures: list[str] = []
-    for check in checks:
-        if check.passed:
-            continue
-        parsed = check.parsed
-        codes = [f.code for f in parsed.failures if f.code] if parsed is not None else []
-        if codes:
-            distinct = list(dict.fromkeys(codes))[:_MAX_SIGNATURES_PER_CHECK]
-            signatures.extend(f"{check.name}:{code}" for code in distinct)
-        else:
-            signatures.append(signature_for_error(check.name, check.message))
-    return list(dict.fromkeys(signatures))
+    capability instead of guessing from a label.
+
+    #227: the answer is now the KEYS of
+    :func:`signature_counts_from_verification`, which returns each signature
+    once in the same first-seen order the old ``dict.fromkeys`` produced.
+    ``limit`` is keyword-only with the journal's cap as its default: the one
+    production caller passes neither, so its expression text does not move,
+    and a defaulted call still records exactly what it recorded before.
+    ``limit=None`` is the uncapped read the dampener baseline asks for -
+    a baseline that dropped a check's sixth signature would report it as new
+    on the very next run.
+    """
+    return list(signature_counts_from_verification(checks, limit=limit))
 
 
 def signatures_from_findings(phase: str, findings: Iterable[Finding]) -> list[str]:

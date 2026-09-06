@@ -1,0 +1,134 @@
+name: sense dampener
+
+# R10.6 (#227). The dampener: run the same mechanical sensors `ks sense` runs,
+# compare the structured failure signatures against the baseline this
+# repository tracks in scripts/kstrl/sense-baseline.json, and post what the
+# branch ADDED as one pull-request comment.
+#
+# It is ADVISORY. `--fail-on-regression` is deliberately absent, so a
+# regression is reported and never fails the job. The only failure is exit 2,
+# which means the sensor itself could not run: a report nobody can trust is
+# worse than no report, so that one is loud.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+# Least privilege. The comment step is the only thing here that writes, and it
+# writes to a pull request, never to the repository contents.
+permissions:
+  contents: read
+  pull-requests: write
+
+# One run per pull request. A push that supersedes an earlier commit cancels
+# its report rather than paying for a second full sensor run: the measurement
+# is dominated by the project's own test suite, so a duplicate is expensive.
+concurrency:
+  group: sense-dampener-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  dampener:
+    runs-on: ubuntu-latest
+    # A full `ks sense` on this repository was measured at 327 seconds, 326.7
+    # of them the test suite, on a warm developer machine with other work
+    # sharing it. A cold runner also pays mypy's and ruff's first-run cost,
+    # which is NOT measured and is not guessed at here; 20 minutes is the
+    # measured figure with headroom, against ci.yml's 15 for the same suite
+    # minus the spine tier.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # `ks sense` asks git for the diff against the base STRICTLY, and
+          # exits 2 when it cannot get one. A shallow clone cannot reach the
+          # base, so without this the job fails on every pull request.
+          fetch-depth: 0
+          # Nothing here pushes. The comment step authenticates with
+          # GITHUB_TOKEN in its own env, so the checkout token has no job to
+          # do and does not belong in .git/config.
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+        with:
+          version: latest
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Install project
+        run: uv sync --frozen --all-extras --dev
+
+      - name: Measure against the committed baseline
+        id: sense
+        env:
+          # The committed baseline was generated at this timeout, and the
+          # comparison has to be measured the same way or it is not a
+          # comparison. At the default 300s this repository's own test suite
+          # times out, which is a FAILING row rather than a gap, and its
+          # fallback signature has the digits stripped - so a baseline
+          # carrying it reads as FIXED the moment the suite fits.
+          KSTRL_TIMEOUT_VERIFY: "1800"
+          # Through env, not interpolated into the script: a ref name is
+          # attacker-controlled on a fork pull request.
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          set +e
+          uv run ks sense --compare-baseline --format markdown \
+            --base "$BASE_REF" > sense.md 2> sense.err
+          echo "rc=$?" >> "$GITHUB_OUTPUT"
+          set -e
+
+      - name: Publish the report to the job summary
+        # Unconditional, and this is the honest answer to the fork question:
+        # a pull request from a fork gets a read-only token whatever the
+        # permissions block above says, so its author can never be sent a
+        # comment. The step summary is a surface they can read. The
+        # alternative, pull_request_target, would run the pull request's own
+        # test suite with a write token, and is refused outright.
+        run: |
+          if [ -s sense.md ]; then
+            cat sense.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo '## sense dampener: the sensor could not run' >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            cat sense.err >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Post or update the pull-request comment
+        if: >-
+          github.event.pull_request.head.repo.full_name == github.repository
+          && steps.sense.outputs.rc != '2'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          marker='<!-- kstrl-sense-dampener -->'
+          # `--jq` runs once PER PAGE, so a `first` inside it is the first
+          # match on THAT page, not the first overall. Measured against gh
+          # 2.73.0 on a 3-comment pull request forced to per_page=1: the
+          # `first` form printed three ids on three lines, which would hand
+          # the PATCH below a multi-line id once a pull request passes the
+          # 30-comment default page size. `--slurp` is refused alongside
+          # `--jq`, so the filter emits every match and `head` picks one.
+          id="$(gh api --paginate "repos/$REPO/issues/$NUMBER/comments" \
+            --jq "map(select(.body | startswith(\"$marker\"))) | .[].id" | head -n 1)"
+          if [ -n "$id" ]; then
+            gh api --method PATCH "repos/$REPO/issues/comments/$id" -F body=@sense.md
+          else
+            gh api --method POST "repos/$REPO/issues/$NUMBER/comments" -F body=@sense.md
+          fi
+
+      - name: Fail only when the sensor could not run
+        # Exit 2 means the measurement could not happen: a missing baseline, a
+        # malformed one, a bad kstrl.toml, or git could not produce the diff.
+        # A regression is NOT a failure here, on purpose.
+        if: steps.sense.outputs.rc == '2'
+        run: |
+          cat sense.err
+          echo "ks sense exited 2: the measurement could not run." >&2
+          exit 1

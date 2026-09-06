@@ -245,11 +245,22 @@ def test_sense_help_lists_every_option() -> None:
         "--base",
         "--prd",
         "--allowed-path",
+        # R10.6 (#227): the dampener group.
+        "--write-baseline",
+        "--compare-baseline",
+        "--force",
+        "--fail-on-regression",
+        "--format",
         "--json",
         "--ui",
         "--no-color",
     ):
         assert option in result.output
+    # The sentinel that gives --write-baseline/--compare-baseline an optional
+    # value is a NUL byte, which cannot appear in an argv element. It must not
+    # leak into the help text, and the metavar must read as optional.
+    assert "\x00" not in result.output
+    assert "--write-baseline [PATH]" in result.output
 
 
 # --- Read-only contract (R10.1 review, P1) ------------------------------

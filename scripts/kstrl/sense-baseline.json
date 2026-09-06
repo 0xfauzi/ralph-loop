@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-09-06T18:29:59Z",
+  "base_ref": "06cd16d0020636993a77995d77d9176dd471b633",
+  "passed": true,
+  "sense_schema_version": 2,
+  "measured_checks": [
+    "bad_patterns",
+    "diff_scope",
+    "linter",
+    "test_suite",
+    "typecheck"
+  ],
+  "unmeasured_checks": [],
+  "signatures": {}
+}

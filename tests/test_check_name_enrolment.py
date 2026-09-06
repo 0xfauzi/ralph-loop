@@ -284,6 +284,23 @@ EXPECTED_CATEGORIES = {
 #: :func:`_from_the_callers`.
 BLIND_SITES: tuple[tuple[str, str, str, str], ...] = (
     (
+        "kstrl/dampener.py",
+        "Baseline.from_document",
+        "_signatures_field(raw, 'signatures')",
+        "pass-through of a validated baseline FILE (#227): the names in it "
+        "were written by signature_counts_from_verification on some earlier "
+        "run and are censused at that call site. This site decides no name; "
+        "it refuses a document whose keys are not non-empty strings",
+    ),
+    (
+        "kstrl/dampener.py",
+        "baseline_from_result",
+        "dict(sorted(counts.items()))",
+        "runtime composer over signature_counts_from_verification's output "
+        "(#227), from the CheckResult names the gates built; those names are "
+        "censused at their CheckResult call sites",
+    ),
+    (
         "kstrl/pipeline.py",
         "ComponentPipeline._phase_verify",
         "signatures_from_verification(verification.checks)",

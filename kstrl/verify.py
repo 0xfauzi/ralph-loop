@@ -215,6 +215,20 @@ class CheckResult:
     # decision lands in the audit trail (PR body, journal) and not only in
     # the retry context. Empty for checks that emit prose only.
     findings: list[Finding] = field(default_factory=list)
+    # #227: whether this row is a MEASUREMENT. False when the check ran and
+    # measured nothing anyway - it timed out, or its detector is not
+    # installed. Those still produce a row, so :class:`NotMeasured` cannot
+    # carry them: the sidecar is for checks that produce NO row, and turning
+    # one of these into a gap would make `result.passed` true on a timeout.
+    #
+    # Read by :mod:`kstrl.dampener` and nothing else today. It changes no
+    # existing behaviour and no published surface: `passed` still decides the
+    # verdict, the report table and the `ks sense --json` check objects are
+    # untouched. What it buys is that a signature's disappearance can be told
+    # apart from the sensor's, which a fallback signature cannot say for
+    # itself: `signature_slug` strips digits, so "timed out after 300.0s" and
+    # "timed out after 1800.0s" are the same string.
+    measured: bool = True
 
 
 #: Why a check that was ASKED FOR produced no measurement. Stable
@@ -1198,6 +1212,7 @@ def check_test_suite(
             passed=False,
             message=f"Test suite timed out after {timeout}s",
             duration_seconds=time.monotonic() - start,
+            measured=False,
         )
 
     if result.returncode != 0:
@@ -1237,6 +1252,7 @@ def check_typecheck(
             passed=False,
             message=f"Typecheck timed out after {timeout}s",
             duration_seconds=time.monotonic() - start,
+            measured=False,
         )
 
     if result.returncode != 0:
@@ -1276,6 +1292,7 @@ def check_linter(
             passed=False,
             message=f"Linter timed out after {timeout}s",
             duration_seconds=time.monotonic() - start,
+            measured=False,
         )
 
     if result.returncode != 0:
@@ -2259,12 +2276,14 @@ def check_dead_code(
                 passed=True,
                 message=f"{ruff_note}; vulture not installed",
                 duration_seconds=time.monotonic() - start,
+                measured=False,
             )
         return CheckResult(
             name="dead_code",
             passed=True,
             message="Skipped: neither vulture nor custom command available",
             duration_seconds=time.monotonic() - start,
+            measured=False,
         )
 
     try:
@@ -2275,6 +2294,7 @@ def check_dead_code(
             passed=True,
             message=f"Dead code scan timed out after {timeout}s, skipping",
             duration_seconds=time.monotonic() - start,
+            measured=False,
         )
 
     output = (result.stdout + result.stderr).strip()
