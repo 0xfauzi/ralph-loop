@@ -654,6 +654,13 @@ class TestTheCorpusIsTheOneEveryGuardMeant:
         own = Path(__file__)
         assert own.resolve() not in [p.resolve() for p in astwalk.test_sources(exclude=own)]
 
+    def test_the_corpus_helper_is_not_collected_as_a_test(self) -> None:
+        """A from-import of ``test_sources`` into a guard module makes pytest
+        collect the helper as a test that passes. ``__test__ = False`` is
+        the mechanism; this is its control, since deleting the line fails
+        nothing else (#337 round 2)."""
+        assert astwalk.test_sources.__test__ is False  # type: ignore[attr-defined]
+
     def test_a_label_distinguishes_two_files_of_the_same_basename(self) -> None:
         """Ten basenames occur twice in ``kstrl/``, and a message naming a
         file the reader cannot find is worse than no message."""
