@@ -404,6 +404,59 @@ class TestJsonlSinkSurvivesATornTail:
         assert opens == ["a+b"]
         assert self.names_in(path).count(JOURNAL_REPAIR_EVENT) == 1
 
+    def test_a_first_write_that_raises_leaves_the_probe_to_the_next_emit(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """The handle is bound only once the write it was opened for lands.
+
+        Binding it first put the sink in the no-probe branch for the
+        rest of the run: ``EventBus.emit`` swallows the exception and
+        increments a counter nothing reads, the next emit writes
+        straight through onto the unterminated tail, and ``read_events``
+        returns one ``UnknownEvent`` where two records were written.
+        That is the defect this class exists to close, re-entered
+        through the one path that reports nothing.
+
+        The failure planted here is a raising ``append_terminated``,
+        which is the shape of an ``ENOSPC`` on the write or an ``EIO``
+        on the probe's own read.
+        """
+        import kstrl.events as events_mod
+
+        path = tmp_path / "events.jsonl"
+        path.write_bytes(b'{"event":"x"')  # a torn tail the first emit must repair
+
+        handles: list[Any] = []
+        real_open_for_append = events_mod.open_for_append
+        real_append_terminated = events_mod.append_terminated
+        failures = [OSError(28, "No space left on device")]
+
+        def recording_open(target: Path) -> Any:
+            handle = real_open_for_append(target)
+            handles.append(handle)
+            return handle
+
+        def failing_once(*args: Any, **kwargs: Any) -> bool:
+            if failures:
+                raise failures.pop()
+            return real_append_terminated(*args, **kwargs)
+
+        sink = self.sink_at(path)
+        with pytest.MonkeyPatch.context() as patched:
+            patched.setattr(events_mod, "open_for_append", recording_open)
+            patched.setattr(events_mod, "append_terminated", failing_once)
+            with pytest.raises(OSError, match="No space left"):
+                self.emit(sink, "c1")
+            assert handles and handles[0].closed, (
+                "the handle opened for a write that never landed must be closed, "
+                "not leaked for the life of the run"
+            )
+            self.emit(sink, "c2")
+        sink.close()
+
+        assert self.names_in(path) == [JOURNAL_REPAIR_EVENT, "component_started"]
+
     def test_the_repair_row_is_not_an_unknown_event(self, tmp_path: Path) -> None:
         """``fold`` counts unknown events, and this is not one of them.
 

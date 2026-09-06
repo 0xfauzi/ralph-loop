@@ -516,6 +516,15 @@ class Inbox:
         The ``control_lock`` is unchanged and still wraps the whole
         probe and append, so #330's lock argument does not apply here:
         this file already has the exclusion.
+
+        The ``"a+b"`` open widens what can fail - an inbox this process
+        can write but not read is refused rather than appended to
+        blind - and this is the LOUDEST of the three sites that widened,
+        which is why it is the one with no handler of its own.
+        ``pipeline._inbox_add`` catches ``(OSError, ValueError)`` and
+        warns through the run's UI, so an unreadable inbox says so and
+        the run continues. Before this change the same file was
+        appended to without ever being read.
         """
         ensure_control_state(self.root_dir)
         path = self.path

@@ -886,6 +886,29 @@ class JsonlSink:
     ``engineer.jsonl``. The threading lock below is about threads
     sharing this object, which is a different question and predates
     this change.
+
+    THE ``"a+b"`` WIDENING, and it is the QUIETEST of the three sites
+    that took it, so it is stated here rather than left to the module
+    that opens the handle. A file this process can write but not read
+    can no longer be appended to: the open raises. This sink is reached
+    through ``EventBus.emit``, which catches every exception per sink
+    and increments ``dropped``, and ``dropped`` has no production
+    reader. So on a mode-0200 ``events.jsonl`` the whole stream is lost
+    with no message on any surface, where 568bca4 wrote it. The same is
+    true of ``progress.jsonl``, which the factory reaches through a
+    ``V1CompatSink`` on the same bus, so both file streams of a run go
+    quiet together.
+
+    That was decided rather than overlooked. Reaching it needs a
+    deliberate ``chmod 0200`` or an ACL on a file kstrl created itself
+    at the umask default; the alternative to the widening is the
+    fail-OPEN shape #327 round 1 found, where an unreadable file was
+    reported as "not torn" and appended to blind. A warning on the
+    first drop was considered and left out: ``events`` has no logger,
+    the bus has no UI, and the surface it would reach is
+    ``orchestrator.log``, which is the surface #333 exists because
+    nobody reads. Giving ``dropped`` a real reader is the fix, and it
+    is a change to the run summary rather than to this sink.
     """
 
     def __init__(self, path: Path, *, mkdir: bool = True) -> None:
@@ -899,15 +922,7 @@ class JsonlSink:
         line = event.to_json_line() + "\n"
         with self._lock:
             if self._fh is None:
-                # First emit: open, probe and write in one call, so the
-                # repair row and the event it protects land in ONE
-                # write and nothing can get between them.
-                self._fh = open_for_append(self.path)
-                append_terminated(
-                    self._fh,
-                    line,
-                    repair=JournalRepaired(detail=REPAIR_DETAIL).to_json_line() + "\n",
-                )
+                self._fh = self._probe_and_write(line)
             else:
                 # Every later emit writes straight through. The probe is
                 # not repeated: this handle has been at the end of the
@@ -915,6 +930,40 @@ class JsonlSink:
                 # without this process being dead.
                 self._fh.write(line.encode("utf-8"))
             self._fh.flush()
+
+    def _probe_and_write(self, line: str) -> IO[bytes]:
+        """Open, probe and write the first line, returning the bound handle.
+
+        The handle is returned rather than assigned, and that is the
+        whole point of the method: :meth:`emit` binds ``self._fh`` only
+        after this returns, so a first write that RAISES leaves the sink
+        unbound and the next emit probes again.
+
+        Assigning first was a real hole. ``EventBus.emit`` catches every
+        exception per sink and increments ``dropped``, which nothing in
+        the product reads, so a first emit that hit ``ENOSPC`` on the
+        write or ``EIO`` on the probe's read was silent; the sink then
+        took the no-probe branch for the rest of the run and wrote
+        straight onto the unterminated tail. Measured on a torn
+        ``events.jsonl`` with the first write made to raise:
+        ``read_events`` returned NOTHING, because the concatenated line
+        does not parse at all.
+
+        The handle is closed on the way out. Leaking it would hold a
+        descriptor for the life of the run for a file this sink is
+        about to reopen on the next emit.
+        """
+        handle = open_for_append(self.path)
+        try:
+            append_terminated(
+                handle,
+                line,
+                repair=JournalRepaired(detail=REPAIR_DETAIL).to_json_line() + "\n",
+            )
+        except BaseException:
+            handle.close()
+            raise
+        return handle
 
     def close(self) -> None:
         with self._lock:

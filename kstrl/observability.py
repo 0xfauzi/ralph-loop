@@ -128,19 +128,25 @@ class ProgressLog:
             event["data"] = data
         # #331: through appendio, which repairs an unterminated tail
         # before appending onto it. Without that, a crash mid-write
-        # costs THIS event as well as the torn one, measured through
-        # the reader below: ``['alpha']`` where alpha and beta were
-        # written, and ``reducer.load_run_state`` leaving a component
-        # ``running`` when the lost row was its ``component_completed``.
+        # costs THIS event as well as the torn one, measured through the
+        # reader below: ``['alpha']`` where alpha and beta were written,
+        # and ``reducer.load_run_state`` leaving a component ``running``
+        # when the lost row was its ``component_completed``.
         #
         # utf-8 is pinned inside the helper, matching the reader below.
         # ``json.dumps`` leaves ensure_ascii at its default, so what
         # lands here is pure ASCII today and the locale cannot corrupt
         # it (#291's two-sided contract, #320's sweep).
+        #
+        # The ``"a+b"`` open widens what can fail: a log this process
+        # can write but not read is refused rather than appended to
+        # blind, so this RAISES where it returned. ``JsonlSink``'s
+        # docstring carries the decision, because the factory reaches
+        # this through a sink on the same bus and both go quiet at once.
         repaired = append_records(
             self._path,
             json.dumps(event) + "\n",
-            repair=json.dumps(self._repair_event()) + "\n",
+            repair=json.dumps(self._repair_event(event["ts"])) + "\n",
         )
         if repaired:
             self._warn(
@@ -160,7 +166,7 @@ class ProgressLog:
                     f"progress sink {type(sink).__name__} failed on {event_type}: {exc} (non-fatal)"
                 )
 
-    def _repair_event(self) -> dict[str, Any]:
+    def _repair_event(self, ts: str) -> dict[str, Any]:
         """The row :meth:`emit` writes when it finds an unterminated tail.
 
         Progress-log shaped, so the file stays one schema: ``ts``,
@@ -175,8 +181,12 @@ class ProgressLog:
         and this row is about the FILE; a Linear sink that received it
         would post about a torn journal onto whichever component's
         issue happened to be open.
+
+        ``ts`` is the CALLER's, not a second ``_iso_now()``. This row
+        goes ABOVE the event it protects, so a separate stamp dated the
+        earlier line later across a second boundary.
         """
-        event: dict[str, Any] = {"ts": _iso_now(), "event": JOURNAL_REPAIR_EVENT}
+        event: dict[str, Any] = {"ts": ts, "event": JOURNAL_REPAIR_EVENT}
         if self._run_id:
             event["run_id"] = self._run_id
         event["data"] = {"detail": REPAIR_DETAIL}
