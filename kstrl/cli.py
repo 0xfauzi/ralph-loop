@@ -3668,6 +3668,46 @@ def _sense_document(path: Path, base: str, result: VerificationResult) -> dict[s
     }
 
 
+def _sense_report(
+    path: Path,
+    base: str,
+    result: VerificationResult,
+    *,
+    as_json: bool,
+    ui: str,
+    no_color: bool,
+) -> NoReturn:
+    """Print the measurement and exit: 0 when every check passed, 1 otherwise.
+
+    Its own function because ``sense`` is a 200-line command sitting at
+    cyclomatic 9 against a gate of 10, and the rendering is the half of it
+    that has nothing to do with deciding WHAT to measure. Lifting it out is
+    what leaves room for a branch in the command body.
+    """
+    if as_json:
+        click.echo(json.dumps(_sense_document(path, base, result), indent=2))
+        sys.exit(0 if result.passed else 1)
+
+    force_rich = os.environ.get("GUM_FORCE") == "1"
+    ui_impl = _console_ui(_normalize_ui_mode(ui), no_color, force_rich=force_rich)
+    ui_impl.section("ks sense")
+    ui_impl.kv("Path", str(path))
+    ui_impl.kv("Base branch", base)
+    ui_impl.info("")
+    # Shared with `ks feature`'s #288 report: one renderer for this
+    # object, so a column change cannot land in one command and silently
+    # not the other.
+    for line in result.report_lines():
+        ui_impl.info(line)
+    ui_impl.info("")
+    failed = sum(1 for c in result.checks if not c.passed)
+    if result.passed:
+        ui_impl.ok("sense: PASS")
+        sys.exit(0)
+    ui_impl.err(f"sense: FAIL ({failed} of {len(result.checks)} checks failed)")
+    sys.exit(1)
+
+
 def _sense_error(message: str, as_json: bool) -> NoReturn:
     """Exit 2: the measurement itself could not run.
 
@@ -3851,28 +3891,7 @@ def sense(
         read_only=True,
     )
 
-    if as_json:
-        click.echo(json.dumps(_sense_document(path, base, result), indent=2))
-        sys.exit(0 if result.passed else 1)
-
-    force_rich = os.environ.get("GUM_FORCE") == "1"
-    ui_impl = _console_ui(_normalize_ui_mode(ui), no_color, force_rich=force_rich)
-    ui_impl.section("ks sense")
-    ui_impl.kv("Path", str(path))
-    ui_impl.kv("Base branch", base)
-    ui_impl.info("")
-    # Shared with `ks feature`'s #288 report: one renderer for this
-    # object, so a column change cannot land in one command and silently
-    # not the other.
-    for line in result.report_lines():
-        ui_impl.info(line)
-    ui_impl.info("")
-    failed = sum(1 for c in result.checks if not c.passed)
-    if result.passed:
-        ui_impl.ok("sense: PASS")
-        sys.exit(0)
-    ui_impl.err(f"sense: FAIL ({failed} of {len(result.checks)} checks failed)")
-    sys.exit(1)
+    _sense_report(path, base, result, as_json=as_json, ui=ui, no_color=no_color)
 
 
 @cli.command()
