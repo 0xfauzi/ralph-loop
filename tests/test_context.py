@@ -308,10 +308,12 @@ class TestIterationContext:
         """A review finding survives a later contract failure.
 
         Ranking review below contract would normally mean "review ran in
-        attempt 2 and passed". It does not: `_phase_review` downgrades to
-        SKIP when the adversarial LLM budget runs out and lets the
-        component proceed to contract testing, so the reviewer may never
-        have seen attempt 2 at all.
+        attempt 2 and passed". It does not: an ADVISORY `_phase_review`
+        downgrades to SKIP when the adversarial LLM budget runs out and
+        lets the component proceed to contract testing, so the reviewer
+        may never have seen attempt 2 at all. Hard mode halts instead
+        since #226, which removes one cause of this and leaves the
+        advisory downgrade and an explicit `review_mode = "skip"`.
         """
         ctx = IterationContext()
         ctx.add_review_finding("criterion X", attempt=1, phase="review")

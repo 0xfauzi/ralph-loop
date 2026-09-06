@@ -222,6 +222,11 @@ EXPECTED_CATEGORIES = {
     "token_budget": "infrastructure",
     "pr": "infrastructure",
     "diff": "infrastructure",
+    # #226: a hard-mode adversarial phase that never ran because the
+    # operator's cap was already spent. The fifth member of the same
+    # category, and the reason the signature leads with the check name
+    # rather than the phase.
+    "adversarial_budget": "infrastructure",
     # #315: the fallback's answer, stated rather than inherited.
     "engineer": "iteration",
     "unknown": "iteration",

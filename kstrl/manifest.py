@@ -15,6 +15,15 @@ from kstrl.atomicio import atomic_write_json
 from kstrl.findings import Finding
 from kstrl.names import validate_branch_name, validate_component_id
 
+#: ``Component.failed_check`` for a component a hard-mode adversarial
+#: phase refused because ``max_adversarial_calls`` was already spent
+#: (R10.5, #226). One constant rather than a literal at each end,
+#: because two modules have to agree on it: ``kstrl/pipeline.py`` writes
+#: it and ``kstrl/serve.py`` reads it to decide the run is terminal
+#: rather than retryable infrastructure. It lives here, beside the field
+#: that carries it, so neither module has to import the other.
+ADVERSARIAL_BUDGET_CHECK = "adversarial_budget"
+
 
 def _iso_now() -> str:
     """Current UTC time as ISO 8601, matching the factory's timestamps."""
