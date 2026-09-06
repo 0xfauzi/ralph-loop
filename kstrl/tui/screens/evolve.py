@@ -271,7 +271,7 @@ class EvolveScreen(Screen[None]):
         else read, which is the thing the paragraph above rejects for
         the count and the path. The second changes the surface every
         other caller of the journal sees, for a screen that reloads on
-        one keypress. Neither is worth 12.7 ms at a file size no journal
+        one keypress. Neither is worth 9.3 ms at a file size no journal
         here has reached; the cost is written down so the next reader
         decides on the number rather than on the sentence.
         """

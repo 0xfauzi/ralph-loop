@@ -145,9 +145,14 @@ def experiment_rows(text: str) -> list[dict[str, Any]]:
     So both widths are legal when the file's header is a PREFIX of the
     current one, and only then.
 
-    Blank lines are skipped rather than dropped as malformed: the pad
-    the writer leaves behind is one, and it is not an incident by
-    itself.
+    Blank lines are skipped rather than dropped as malformed, and NOT
+    for the reason this said in round 1. The pad the writer leaves
+    behind does not produce one: it writes ``"\n" + payload``, so the
+    torn tail is terminated and the payload follows on the next line.
+    Measured on both tear shapes, a whole row that lost only its
+    newline and a fragment torn mid-row, and neither leaves a blank
+    line. The skip is still right, for a file a person may have edited;
+    the cause was invented.
 
     THREE RESIDUALS, measured in review of #352 rather than reasoned
     about, because "this writer never emits such a row" was the original
@@ -1136,8 +1141,11 @@ class EvolutionJournal:
         # tracked for the run - zero would misread as "measured, free".
         # unreported_calls > 0 marks the token/cost figures as lower
         # bounds. Files written before R3.1 keep their shorter header;
-        # csv.DictReader in get_experiment_trends drops the extra values
-        # rather than crashing.
+        # experiment_rows keeps such a row while the file's header is a
+        # PREFIX of the current one and drops the extra values, which is
+        # its second legal width. The reader has not been a bare
+        # csv.DictReader since #331 and this comment named one until
+        # #352 round 2.
         if run_usage:
             total_tokens_col = str(run_usage.get("total_tokens", ""))
             total_cost_col = str(run_usage.get("cost_usd", ""))

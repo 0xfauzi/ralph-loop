@@ -70,10 +70,12 @@ did. Reading one of these rows:
   has finished and finds a terminated file: one row is one tear.
   Measured, two processes x 150 appends with 74 tears planted, eight
   runs of each arm: 76 to 86 rows unlocked, exactly 74 locked on every
-  run. On a platform with no `fcntl` (Windows) nothing is excluded and
-  two rows for one tear are possible again, the same degradation
+  run. Where the exclusion is not available nothing is excluded and two
+  rows for one tear are possible again, the same degradation
   `control_lock`, `queue_lock` and the run-level factory lock already
-  take there.
+  take. That is not only a Windows condition: `_flock` takes the same
+  no-exclusion path on any mount whose `flock` raises `OSError`, such as
+  an NFS export without a lock daemon, which returns `ENOLCK`.
 
 ### `component_result` fields
 

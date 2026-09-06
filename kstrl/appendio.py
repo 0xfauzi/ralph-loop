@@ -246,9 +246,14 @@ def _flock(handle: IO[bytes]) -> Iterator[None]:
     written out here rather than left to ``close()``: the handle is a
     ``BufferedRandom``, and unlocking first lets this process's bytes
     land after the exclusion has dropped. The release is NOT guarded:
-    it is reached only when the acquisition succeeded, and by then the
-    bytes are flushed, so an error there is a real anomaly with
-    something to say rather than a lost entry.
+    it is reached only when the acquisition succeeded, so an error
+    there is a real anomaly with something to say rather than a lost
+    entry. Not "and by then the bytes are flushed", which was one step
+    ahead of the code: the flush is the statement immediately above,
+    inside the same ``finally``, so a ``flush()`` that raises skips
+    ``LOCK_UN`` entirely and the exclusion is dropped by ``appending``'s
+    ``handle.close()`` instead. That is the right outcome and it is not
+    the one the sentence described.
     """
     try:
         import fcntl

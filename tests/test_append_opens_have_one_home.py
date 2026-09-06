@@ -212,6 +212,20 @@ def append_open_census() -> dict[str, int]:
     by reading the pinned literal next door: PR #341 recorded a lane
     that reported two identical pins as evidence a refactor moved
     nothing, while executing the guard at those revisions was red.
+
+    NO CALLER IN THIS SUITE, here or in :func:`routed_append_census`,
+    and that is disclosed rather than fixed. Review of #352 mutated each
+    to ``return dict(<its own pin>)`` and both stayed green, and
+    suggested tying them with
+    ``assert append_open_census() == EXPECTED_APPEND_OPENS``. Measured:
+    that assertion does not catch either mutation, because a function
+    replaced BY the pin compared TO the pin agrees by construction.
+    While the pin matches the walk the two mutants are equivalent, so
+    there is nothing here to observe; what could observe one is a caller
+    that runs this over a corpus whose answer is not the pin, and this
+    suite has no such corpus. A check that cannot fail for the reason it
+    names is the shape the whole guard exists to end, so it is not
+    added.
     """
     sources = package_sources()
     return census(sources, append_open_net(sources), key=census_key)
