@@ -95,6 +95,7 @@ class TestTheTwoInfrastructureConsumersAgree:
         fifth is a visible edit in two files."""
         assert set(INFRA_FAILURE_PREFIXES) == {
             "aborted:",
+            "adversarial_budget:",
             "diff:",
             "pr:",
             "provisioning:",
