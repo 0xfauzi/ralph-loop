@@ -1811,12 +1811,12 @@ class TestDeadCodeRowsOnlyExistWhenMeasured:
         """The nine states the issue was filed over, as one census.
 
         It said four; measuring the fused function found nine, and every
-        one of them printed ``dead_code  pass``. Five are the detector
+        one of them printed ``dead_code  pass``. Six are the detector
         not running while ruff did (``vulture-missing`` is the path the
-        issue was filed from, and ``read-only`` is the same path under
-        ``ks sense``); four are ruff not running while the detector did,
-        which the fused row hid completely because it only ever reported
-        the vulture verdict.
+        issue was filed from, and ``vulture-missing-read-only`` is the
+        same path under ``ks sense``); three are ruff not running while
+        the detector did, which the fused row hid completely because it
+        only ever reported the vulture verdict.
 
         Three assertions per row, and the third is the one that makes
         this a split rather than an omission: the phase that DID measure
