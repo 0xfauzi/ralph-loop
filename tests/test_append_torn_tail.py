@@ -464,3 +464,96 @@ class TestJsonlSinkSurvivesATornTail:
         # a record. The other three are.
         for index in (0, 2, 3):
             assert isinstance(json.loads(payload[index].decode("utf-8")), dict)
+
+
+# ---------------------------------------------------------------------------
+# the inbox log
+# ---------------------------------------------------------------------------
+
+
+class TestInboxSurvivesATornTail:
+    """``Inbox._append``, under ``control_lock``, repaired with a BARE PAD.
+
+    No repair row, and the reason is measured rather than stylistic: a
+    valid-JSON row that ``InboxItem.from_dict`` returns None for is
+    counted by ``scan().unparseable_count()``, and ``serve.py`` adds
+    that count to ``open_count`` against the #190 admission cap. A
+    repair row would therefore consume admission capacity until the
+    next compaction, which is a running factory refusing work because a
+    previous one crashed.
+
+    The tear is still surfaced, by that same count: one unparseable
+    line before and after the pad for a fragment, and none for a record
+    that only lost its newline.
+
+    No lock argument to make either. ``control_lock`` already wraps the
+    whole probe and append, so #330 does not reach this file.
+    """
+
+    def inbox_at(self, root: Path) -> Any:
+        from kstrl.inbox import Inbox
+
+        return Inbox(root)
+
+    def add(self, inbox: Any, title: str) -> None:
+        from kstrl.inbox import ItemKind
+
+        inbox.add(ItemKind.HALTED_RUN, title, dedupe_key=title)
+
+    def test_the_item_after_a_torn_fragment_survives(self, tmp_path: Path) -> None:
+        inbox = self.inbox_at(tmp_path)
+        self.add(inbox, "first")
+        tear(inbox.path)
+        self.add(inbox, "second")
+
+        assert sorted(i.title for i in inbox.items()) == ["first", "second"]
+
+    def test_an_item_that_lost_its_newline_is_recovered(self, tmp_path: Path) -> None:
+        inbox = self.inbox_at(tmp_path)
+        self.add(inbox, "first")
+        self.add(inbox, "second")
+        lose_the_newline(inbox.path)
+        self.add(inbox, "third")
+
+        assert sorted(i.title for i in inbox.items()) == ["first", "second", "third"]
+
+    def test_the_pad_adds_no_unparseable_line_and_no_admission_cost(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """The whole reason this file gets a pad and not a row.
+
+        A fragment is one unparseable line before the pad and one
+        after: the pad isolates it, it does not delete it. A record
+        that lost its newline is none either way, because it was always
+        a complete record. Either way the repair itself adds nothing to
+        the count ``serve`` charges against the #190 cap, which a
+        ``JOURNAL_REPAIR_EVENT`` row would, because ``from_dict``
+        returns None for a row with no item fields.
+        """
+        inbox = self.inbox_at(tmp_path)
+        self.add(inbox, "first")
+        tear(inbox.path)
+        before = inbox.scan().unparseable_count()
+        self.add(inbox, "second")
+
+        assert before == 1
+        assert inbox.scan().unparseable_count() == 1
+
+        clean = self.inbox_at(tmp_path / "clean")
+        self.add(clean, "first")
+        lose_the_newline(clean.path)
+        self.add(clean, "second")
+
+        assert clean.scan().unparseable_count() == 0
+        assert repair_rows(list(clean._read_lines())) == []
+
+    def test_an_untorn_inbox_is_appended_to_byte_for_byte(self, tmp_path: Path) -> None:
+        inbox = self.inbox_at(tmp_path)
+        self.add(inbox, "first")
+        before = inbox.path.read_bytes()
+        self.add(inbox, "second")
+        after = inbox.path.read_bytes()
+
+        assert after.startswith(before)
+        assert b"\n\n" not in after

@@ -76,9 +76,9 @@ from tests.helpers.encodingwalk import package_scan, reported_sites, spells_a_to
 #: about what it left out.
 EXPECTED_READ_SPELLINGS: dict[str, int] = {
     "agents/codex.py": 1,
+    "agents/logging.py": 1,
     # The "a+b" append open, moved here from evolution.py by #331.
     "appendio.py": 1,
-    "agents/logging.py": 1,
     "atomicio.py": 1,
     "autonomy.py": 1,
     "autonomy_replay.py": 1,
@@ -93,7 +93,7 @@ EXPECTED_READ_SPELLINGS: dict[str, int] = {
     "feature_cmd.py": 2,
     "feedforward.py": 8,
     "fixtures.py": 3,
-    "inbox.py": 2,
+    "inbox.py": 1,
     "init_cmd.py": 3,
     "init_wizard.py": 1,
     "intake_github.py": 1,
@@ -172,7 +172,6 @@ EXPECTED_CLEARED_READS: tuple[str, ...] = (
     "fixtures.py full_path.read_text(encoding='utf-8')",
     "fixtures.py open(prd_path, encoding='utf-8')",
     "fixtures.py snapshot_path.read_text(encoding='utf-8')",
-    "inbox.py open(path, 'a', encoding='utf-8')",
     "init_cmd.py open(prd_file, encoding='utf-8')",
     "init_cmd.py path.open('a', encoding='utf-8')",
     "init_cmd.py path.read_text(encoding='utf-8')",

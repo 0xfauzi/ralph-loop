@@ -43,6 +43,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
+from kstrl.appendio import append_records
 from kstrl.atomicio import atomic_write_text
 from kstrl.statedir import CONTROL_INBOX, control_file, control_lock, ensure_control_state
 
@@ -494,15 +495,35 @@ class Inbox:
 
     # -- writing -----------------------------------------------------------
     def _append(self, item: InboxItem) -> None:
-        """Append one line, creating the file atomically on first write."""
+        """Append one line, creating the file atomically on first write.
+
+        #331: through ``appendio``, which repairs an unterminated tail
+        before appending onto it. Without that, a crash mid-write cost
+        the NEXT item as well as the torn one, measured through
+        :meth:`items`: ``['first']`` where first and second were both
+        added.
+
+        A BARE PAD, no repair row, and the reason is measured rather
+        than stylistic. A valid-JSON row that ``InboxItem.from_dict``
+        returns None for is counted by
+        ``scan().unparseable_count()``, and ``serve`` adds that count
+        to ``open_count`` against the #190 admission cap. A repair row
+        would therefore consume admission capacity until the next
+        compaction: a running factory refusing work because an earlier
+        one crashed. The tear is still surfaced by that same count,
+        which is the point of the cap counting unreadable lines at all.
+
+        The ``control_lock`` is unchanged and still wraps the whole
+        probe and append, so #330's lock argument does not apply here:
+        this file already has the exclusion.
+        """
         ensure_control_state(self.root_dir)
         path = self.path
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = {"schema_version": INBOX_SCHEMA_VERSION, **item.to_dict()}
         line = json.dumps(payload, separators=(",", ":"), default=str) + "\n"
         with control_lock(self.root_dir):
-            with open(path, "a", encoding="utf-8") as handle:
-                handle.write(line)
+            append_records(path, line, repair="")
 
     def add(
         self,
