@@ -118,11 +118,7 @@ def journal_at(tmp_path: Path) -> EvolutionJournal:
 
 
 def audits_in(journal: EvolutionJournal) -> list[str]:
-    """The projects of every spec audit the journal reads back, in order.
-
-    Through ``EvolutionJournal.get_spec_audits``, not a private copy of
-    its selection rule (#337).
-    """
+    """The projects of every spec audit the journal reads back, in order."""
     return [str(entry.get("project")) for entry in journal.get_spec_audits()]
 
 

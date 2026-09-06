@@ -10,16 +10,13 @@ was the literal.
 Split out of ``tests/test_evolution.py`` on #336, and the seam is the one
 ``tests/test_journal_one_writer.py`` already documents about its own
 split: that file is about what the journal DOES, measured against real
-rows in a real file, and this one is a static guard over the whole
-package with no journal in it at all. Different subject, different
+rows in a real file, and this one is a static guard over the source
+trees with no journal in it at all. Different subject, different
 failure message, different reason to fail. The 800-line ratchet could not
 prompt the split, because it reports rather than fails once a file is
 already over, and ``test_evolution.py`` was at 1407 lines.
 
 TWO LAYERS, because one of them is a net and the other is a message.
-They walk different corpora, and the claim each makes is the corpus it
-walks: layer 2 covers ``kstrl/`` and ``tests/``, layer 1 covers
-``kstrl/``.
 
 LAYER 1, :func:`event_name_spellings`, counts every expression in
 ``kstrl/`` whose folded value IS an enrolled event name, per module. It
@@ -40,16 +37,15 @@ an architect payload, which is the guard that gets silenced
 LAYER 2, :func:`literal_event_names`, enumerates shapes and names the
 offending line and its direction. It walks ``kstrl/`` AND ``tests/``
 (#337): a test that spells the name for itself while asserting on
-production behaviour is asserting partly on its own copy of it, and the
-six sites the widened corpus found were all of that kind. It is not
-redundant. Layer 1 can only
-say "this module's spelling count moved", which is the wrong message when
-the answer is "you wrote a journal row with a bare literal, import the
-constant". Layer 1 in turn catches what layer 2 cannot, and after #336
-that is a longer list than layer 2's residual disclosure: a dispatch
-table keyed by the name, a read behind a function boundary, a parameter
-default, ``setattr``, a tuple-unpacked assignment, a function returning
-the bare name. All measured.
+production behaviour is asserting partly on its own copy of it. It is
+not redundant. Layer 1 can only say "this module's spelling count
+moved", which is the wrong message when the answer is "you wrote a
+journal row with a bare literal, import the constant". Layer 1 in turn
+catches what layer 2 cannot, and after #336 that is a longer list than
+layer 2's residual disclosure: a dispatch table keyed by the name, a
+read behind a function boundary, a parameter default, ``setattr``, a
+tuple-unpacked assignment, a function returning the bare name. All
+measured.
 
 What NEITHER layer sees is one thing, and it is disclosed on
 ``folded_str`` next door and pinned in
@@ -65,9 +61,13 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from kstrl.evolution import JOURNAL_REPAIR_EVENT, SPEC_ISSUES_EVENT
+
+# Reached through the module: a from-import of ``test_sources`` would be
+# collected here as a third test. Its docstring carries the measurement.
 from tests.helpers import astwalk
 from tests.helpers.astwalk import (
     Sees,
+    all_nodes,
     assert_census,
     bound_names,
     folded_str,
@@ -195,14 +195,17 @@ def literal_event_names(
 
     ``aliases`` is a loop invariant the caller may hoist. It depends on
     the tree alone, so recomputing it per event name is pure waste:
-    measured at 254 calls over 127 modules for two names, of which 127
-    were duplicates, and the guard test goes 0.61 s to 0.46 s with this
-    and the node walk hoisted. It is O(names x modules) on a computation
-    that does not depend on names, and this file commits to five more
-    names.
+    measured over ``kstrl/`` at 254 calls over 127 modules for two names,
+    of which 127 were duplicates, and the guard test went 0.61 s to
+    0.46 s with this and the node walk hoisted. It is O(names x modules)
+    on a computation that does not depend on names, and this file commits
+    to five more names. The traversal is still per name, but it goes
+    through ``all_nodes``, which memoises it, so the second name reuses
+    the first name's walk instead of repeating it: measured over the
+    333-module corpus, the guard test went 1.53 s to 1.1 s.
     """
     resolved = event_type_aliases(tree) if aliases is None else aliases
-    return [hit for node in ast.walk(tree) for hit in _hits_at(node, event_name, resolved)]
+    return [hit for node in all_nodes(tree) for hit in _hits_at(node, event_name, resolved)]
 
 
 def _hits_at(node: ast.AST, event_name: str, aliases: frozenset[str]) -> list[str]:
@@ -492,7 +495,7 @@ def event_type_aliases(tree: ast.Module) -> frozenset[str]:
     to be wrong in. Measured: 1 of 127 modules in ``kstrl/`` binds any
     alias at all.
     """
-    nodes = list(ast.walk(tree))
+    nodes = list(all_nodes(tree))
     names: frozenset[str] = frozenset()
     while True:
         found = _alias_sweep(nodes, names)
@@ -567,14 +570,11 @@ class TestJournalEventNamesHaveOneHome:
     def test_no_module_names_an_enrolled_event_as_a_literal(self) -> None:
         """Layer 2, the message: name the offending line and its direction.
 
-        Over ``kstrl/`` AND ``tests/`` (#337). Widening the corpus
-        found six sites in the test tree, three writes and three
-        reads, across ``test_decompose.py``, ``test_evolution.py``
-        and ``test_journal_torn_tail.py``. None was deliberate, and
-        a test asserting on production behaviour with its own bare
-        spelling of the event name is asserting partly on its own
-        copy of it. Layer 1 stays on ``kstrl/``; the module
-        docstring carries the measurement for why.
+        Over ``kstrl/`` AND ``tests/`` (#337); the module docstring
+        carries why. Widening the corpus found six sites in the test
+        tree, three writes and three reads, across ``test_decompose.py``,
+        ``test_evolution.py`` and ``test_journal_torn_tail.py``. None was
+        deliberate, so this layer needs no allowlist.
         """
         found: dict[str, list[str]] = {}
         for source_file in package_sources() + astwalk.test_sources():

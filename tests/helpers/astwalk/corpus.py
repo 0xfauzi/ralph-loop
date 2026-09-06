@@ -81,6 +81,12 @@ def test_sources(exclude: Path | None = None) -> list[Path]:
     A guard naming the shapes it forbids in its own fixtures would
     otherwise scan itself. Never empty, for the reason above: excluding
     the caller cannot empty a directory that holds the caller.
+
+    Reach this through the module, ``astwalk.test_sources()``, and never
+    by a from-import: pytest collects any module-level name matching
+    ``test*``, so the import binds a third "test" in the calling module
+    and pytest runs the helper as one. Measured in
+    ``test_event_names_have_one_home.py``: 2 collected becomes 3.
     """
     skip = exclude.resolve() if exclude is not None else None
     found = [path for path in sorted(TESTS_DIR.rglob("*.py")) if path.resolve() != skip]
