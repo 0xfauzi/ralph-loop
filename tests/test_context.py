@@ -452,17 +452,24 @@ class TestIterationContext:
         assert ctx.entries[0].phase == "engineer"
         assert ctx.review_findings == ["guard tripped"]
 
-    def test_cleared_skippable_finding_is_shown_not_dropped(self) -> None:
-        """The accepted cost of the skippable rule, pinned so it cannot
-        drift in silence.
+    def test_a_skippable_finding_is_retired_only_by_a_recorded_reading(
+        self,
+    ) -> None:
+        """What the skippable rule now costs, and what it stops costing.
 
         Attempt 2 passes review and fails security. A passing review
-        records no entry, so attempt 1's review finding still renders as
-        un-re-measured even though the reviewer cleared it. That is a
-        bounded over-show, flagged to the agent as needing a re-check;
-        the alternative is dropping a live finding when the budget
-        skipped review instead. Issue #247 removes it by recording which
-        phases ran.
+        records no entry, so with nothing else recorded attempt 1's
+        review finding still renders as un-re-measured. That half is the
+        rule ``SKIPPABLE_PHASES`` exists for and it must not regress:
+        when the reviewer was SKIPPED rather than passed, the same
+        absence of an entry has to keep showing the finding.
+
+        The difference #247 makes is the second half: a recorded
+        ``PhaseReading`` for review in attempt 2 says the reviewer ran
+        and returned a verdict, and only then is the finding retired.
+        This test replaces ``test_cleared_skippable_finding_is_shown_
+        not_dropped``, whose three assertions are the first half here
+        verbatim.
         """
         ctx = IterationContext()
         ctx.add_review_finding("criterion X", attempt=1, phase="review")
@@ -472,6 +479,16 @@ class TestIterationContext:
         assert "sql injection" in section(text, CURRENT)
         assert "criterion X" in section(text, NOT_REMEASURED)
         assert "do not assume they still apply" in text
+
+        ctx.add_phase_reading("review", attempt=2)
+
+        text = ctx.format_for_prompt()
+        assert "sql injection" in section(text, CURRENT)
+        assert "criterion X" not in text
+        assert section(text, RESOLVED) == (
+            "1 earlier finding(s) from review passed or were re-measured "
+            "in attempt 2 and are omitted."
+        )
 
     def test_derived_views_group_by_sensor_phase(self) -> None:
         """The two texts that moved view when they were re-ranked."""
