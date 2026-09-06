@@ -2219,6 +2219,49 @@ class TestUnattributedAudits:
         assert len(audits) == 4
         assert history.own_recorded + history.other_audits + history.unattributed == len(audits)
 
+    @pytest.mark.parametrize("name", ["", "mine", "nobody", " mine ", "   "])
+    def test_the_partition_holds_for_every_project_name(self, tmp_path: Path, name: str) -> None:
+        """#338: the test above pins the property at one project name,
+        and the two counts were computed by two predicates that agree
+        everywhere except at "". There ``x == project_name`` and
+        ``not x`` are the same question, so an audit with an absent,
+        null or non-string project was counted as this project's AND as
+        unattributed: seven audits, eleven placements.
+
+        The second assertion is the one that fixes WHICH bucket takes
+        it. ``EvolutionJournal.get_spec_issue_runs`` matches a project
+        by the same ``entry_str`` expression, so at "" the trend counts
+        those audits; ``own_recorded`` has to count them too, or the
+        accounting printed under the trend contradicts it and the note
+        saying neither counts them is false.
+        """
+        entries: list[dict[str, Any]] = [
+            audit("mine"),
+            audit("mine", "b.md"),
+            audit("other"),
+            audit(None, "null.md"),
+            audit(7, "int.md"),
+            audit("", "empty.md"),
+            # The helper always writes the key; an absent one is the
+            # shape a journal from an older version carries.
+            {
+                "timestamp": "2026-08-20T00:00:00Z",
+                "event_type": SPEC_ISSUES_EVENT,
+                "spec_file": "absent.md",
+            },
+        ]
+        journal = journal_at(tmp_path)
+        journal.append_entries(entries)
+
+        audits = _journal_snapshot(journal, name).audits
+        history = _excluded_history(audits, name, "mine.md", 10)
+
+        assert len(audits) == len(entries)
+        assert history.own_recorded + history.other_audits + history.unattributed == len(audits)
+        assert history.own_recorded == len(
+            journal.get_spec_issue_runs(name, len(audits), audits=audits)
+        )
+
 
 class TestOneJournalRead:
     """#280 round 2, findings 6 and 7, and #314: one read, taken through
