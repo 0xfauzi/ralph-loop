@@ -1,9 +1,11 @@
 """An enrolled event name is spelled once where a journal row is written or selected.
 
 That one place is ``kstrl/evolution.py``. The scope of the claim is the
-row, not the word: ``tests/`` holds 46 spellings of ``spec_issues`` that
-are the architect's own JSON key, and both layers deliberately leave
-them alone. Which corpus each layer walks is stated under TWO LAYERS
+row, not the word: ``tests/`` holds 46 spellings both layers
+deliberately leave alone, 44 of ``spec_issues`` and 2 of
+``journal_repair``: mostly the architect's own JSON key, and in five
+places the TUI's artifact label or a guard's own fixture argument.
+Which corpus each layer walks is stated under TWO LAYERS
 below, and each layer's claim is exactly the corpus it walks (#337).
 
 ``spec_issues`` used to be spelled twice: a constant in ``decompose``,
@@ -537,10 +539,11 @@ def event_type_aliases(tree: ast.Module) -> frozenset[str]:
     (#337 round 1: the earlier sentence gave the ``kstrl/`` number only,
     which was two thirds short of the walk). ``kstrl/``: 1 of 129
     modules binds any alias, 6 names, all in ``evolution.py``.
-    ``tests/``: 4 of 206 modules, 10 names, in ``test_factory.py``,
-    ``test_journal_torn_tail.py``, ``test_resume_ergonomics.py`` and
-    ``test_usage_meter.py``. Three of those names are generic
-    (``entry``, ``rows``, ``results``), so an unrelated ``entry ==
+    ``tests/``: 5 of 206 modules, 11 names, in ``test_factory.py``,
+    ``test_journal_torn_tail.py``, ``test_resume_ergonomics.py``,
+    ``test_review_gates.py`` and ``test_usage_meter.py``. Four of those
+    names are generic (``entry``, ``matches``, ``rows``, ``results``), so
+    an unrelated ``entry ==
     "<an enrolled name>"`` later in ``test_factory.py`` would read here
     as an event-type comparison. That is the over-report direction, so
     it costs a false positive somebody reads rather than a miss.
@@ -640,9 +643,14 @@ class TestJournalEventNamesHaveOneHome:
         the suite green. ``ruff`` does report the unused import that
         revert leaves, but ``ruff check --fix`` is what the repo's own
         pre-commit hook runs, and it deletes the import and hands back a
-        clean tree with the mechanism gone. So the assertion below
-        counts what it was HANDED, from the same list it iterates, which
-        is closed by construction rather than a threshold to maintain.
+        clean tree with the mechanism gone. So the loop below COUNTS
+        the ``tests/`` modules it opens and the assertion after it
+        compares that count with the corpus size derived independently:
+        a deleted, sliced or repointed corpus all leave the counter
+        short, with no threshold to maintain. Round 2 measured the
+        earlier form, a truthiness check on the binding, clearing a
+        corpus sliced to one module and a loop repointed at
+        ``package_sources()``.
 
         ``exclude=Path(__file__)`` for the reason the two peers pass it
         (``tests/test_procgroup.py`` and ``tests/test_process_scoping.py``):
@@ -661,15 +669,12 @@ class TestJournalEventNamesHaveOneHome:
         on-disk row with it.
         """
         sources = package_sources() + astwalk.test_sources(exclude=Path(__file__))
-        walked_tests = [path for path in sources if path.is_relative_to(TESTS_DIR)]
-        assert walked_tests, (
-            f"layer 2 was handed {len(sources)} modules and none of them is under "
-            f"{TESTS_DIR}, so this assertion covers kstrl/ only and the corpus #337 "
-            "added is gone. Nothing else in the suite fails when that happens."
-        )
+        expected_tests = len(astwalk.test_sources(exclude=Path(__file__)))
+        walked_tests = 0
 
         found: dict[str, list[str]] = {}
         for source_file in sources:
+            walked_tests += source_file.is_relative_to(TESTS_DIR)
             tree = parsed(source_file)
             aliases = event_type_aliases(tree)
             hits = [
@@ -680,6 +685,11 @@ class TestJournalEventNamesHaveOneHome:
             if hits:
                 found[label(source_file, REPO_ROOT)] = hits
 
+        assert walked_tests == expected_tests, (
+            f"layer 2 opened {walked_tests} modules under {TESTS_DIR} and the corpus "
+            f"holds {expected_tests}, so the walk is narrower than the corpus #337 "
+            "added. Nothing else in the suite fails when that happens."
+        )
         assert found == {}, (
             "A journal row is written or selected by a bare literal instead of the "
             f"constant evolution.py declares for it. Import the constant. Sites: {found}"

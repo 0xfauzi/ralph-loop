@@ -1432,11 +1432,17 @@ def _journal_rows(tmp_path: Path) -> list[dict[str, Any]]:
     and drops the copy.
     """
     journal = tmp_path / ".kstrl" / "evolution.jsonl"
-    return [
-        json.loads(line)
-        for line in journal.read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
+    rows: list[dict[str, Any]] = []
+    for line in journal.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        # Strict in both dimensions: a line that parses but is not an
+        # object would satisfy `"run_id" not in row` and pass silently.
+        if not isinstance(row, dict):
+            raise AssertionError(f"journal line is not an object: {line!r}")
+        rows.append(row)
+    return rows
 
 
 class TestSpecIssuesPersistence:
