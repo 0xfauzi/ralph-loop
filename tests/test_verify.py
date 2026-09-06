@@ -1581,6 +1581,26 @@ class TestCheckDeadCode:
         assert run.call_count == 0
 
 
+def test_a_gap_detail_prefers_a_real_message_over_a_blank_stderr() -> None:
+    """`result.stderr or result.stdout` chose stderr whenever it was
+    truthy, and a bare newline is truthy.
+
+    The line then stripped and split to nothing and the function
+    answered "no output" while the sentence a reader of the gap needs
+    sat in stdout. This is the one line that can throw away the whole
+    content of a `command_failed` detail, and it reaches both the ruff
+    phase and the mutation gate.
+    """
+    from kstrl.verify import _last_output_line
+
+    blank_stderr = _completed("x", 2, "real error in stdout\n", "\n")
+    assert _last_output_line(blank_stderr) == "real error in stdout"
+    # stderr still wins when it says something, which is why it is first.
+    both = _completed("x", 2, "chatter\n", "the real error\n")
+    assert _last_output_line(both) == "the real error"
+    assert _last_output_line(_completed("x", 2, "", "")) == "no output"
+
+
 #: Ruff's own output, copied from runs of ruff 0.16.1 with the phase's
 #: exact flags on a tree holding two unused imports and one unused local
 #: whose fix ruff marks unsafe. The parse recognises SHAPES rather than
