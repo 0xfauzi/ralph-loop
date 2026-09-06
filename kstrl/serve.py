@@ -69,6 +69,7 @@ from pathlib import Path
 from typing import Any, Final, Protocol
 
 from kstrl.agents.base import ARCHITECT_COMPONENT, ARCHITECT_ROLE
+from kstrl.manifest import ADVERSARIAL_BUDGET_CHECK
 from kstrl.procdispose import drain_or_abandon
 from kstrl.procgroup import (
     pid_is_alive,
@@ -864,7 +865,16 @@ def run_dir_names(root_dir: Path) -> frozenset[str]:
 
 
 def budget_halt_reason(root_dir: Path, owned_run_ids: Sequence[str]) -> str:
-    """Why an owned run halted on a ceiling, or "" if none did.
+    """Why an owned run halted on a RUN-LEVEL ceiling, or "" if none did.
+
+    Covers the token and cost ceilings, which emit ``BudgetExceeded``.
+    It does NOT cover the adversarial-call cap: R10.5 (#226) halts a
+    hard-mode review or security phase on an exhausted
+    ``max_adversarial_calls`` without emitting an event for it
+    (doctrine 6), so this function is blind to that halt by
+    construction. ``_classify_failed_components`` reads it from the
+    manifest instead, and the two together are what make every
+    deliberate ceiling terminal.
 
     Found by the first live `ks serve` run, and it is the most expensive
     thing this module could have got wrong. `pipeline.fail_for_budget`
@@ -1071,6 +1081,64 @@ def classify_run(
             },
         )
 
+    # R10.5 (#226). Checked FIRST among the manifest branches, because
+    # every budget-halted component carries an infrastructure_error
+    # finding and would otherwise reach the RETRY_INFRA return at the
+    # bottom of _merits_outcome.
+    budget = _budget_halt_outcome(failed, run.returncode)
+    if budget is not None:
+        return budget
+    return _merits_outcome(failed, run.returncode)
+
+
+def _budget_halt_outcome(failed: Sequence[Any], returncode: int) -> Outcome | None:
+    """BUDGET_HALT when the adversarial call cap ended the run, else None.
+
+    The cap halting a hard-mode review or security phase is a deliberate
+    "stop spending", not transient trouble. Reading it as the latter is
+    the mistake ``budget_halt_reason`` exists to prevent, and that
+    function cannot see this halt: it emits no ``BudgetExceeded`` event
+    (doctrine 6), so the record is ``Component.failed_check`` in the
+    manifest. Positive evidence from a field the pipeline sets from its
+    own counter, never from anything a model reported.
+
+    ANY halted component, not every: the counter is per pipeline
+    instance and starts again at zero on the retry, so the retry gets
+    exactly as far and stops at the same component. A manifest mixing a
+    budget halt with a genuine infrastructure casualty would pay a whole
+    run to re-reach the same cap, and retries cost more than the first
+    attempt because they carry accumulated context.
+    """
+    halted = [comp.id for comp in failed if comp.failed_check == ADVERSARIAL_BUDGET_CHECK]
+    if not halted:
+        return None
+    others = [comp.id for comp in failed if comp.failed_check != ADVERSARIAL_BUDGET_CHECK]
+    # Named for the same reason the sibling_note below exists: a
+    # component that failed for another cause must not disappear from
+    # the reason just because this branch fired first (#197 M3).
+    also = f"; also failed, for other reasons: {', '.join(others)}" if others else ""
+    return Outcome(
+        Verdict.BUDGET_HALT,
+        "the run halted on max_adversarial_calls: "
+        + ", ".join(halted)
+        + " reached a hard-mode review or security phase with the adversarial "
+        "call budget already spent. Raise the cap or set the mode to advisory; "
+        "retrying would re-run the same work against the same cap" + also,
+        {
+            "returncode": returncode,
+            "budget_halted": halted,
+            "other_failures": others,
+        },
+    )
+
+
+def _merits_outcome(failed: Sequence[Any], returncode: int) -> Outcome:
+    """Whether named failures were the spec's fault, unproven, or infra.
+
+    Split out of ``classify_run`` unchanged by #226 round 2, which added
+    the branch above it and would otherwise have pushed that function
+    past the cyclomatic ratchet.
+    """
     # A component that produced FINDINGS, none of them infrastructural, is
     # positive evidence of a merits-based failure. A component that
     # produced NO findings at all is not evidence of anything - and
@@ -1089,11 +1157,9 @@ def classify_run(
     # sibling's "fatal: invalid reference" from both the reason and the
     # evidence - recreating the exact operator misdirection this change
     # exists to remove (#197 M3).
-    sibling_note = ""
-    if unevidenced:
-        sibling_note = "; also failed with no finding to explain it - " + "; ".join(
-            f"{comp.id}: {comp.error or 'no error recorded'}" for comp in unevidenced
-        )
+    detail = _unevidenced_detail(unevidenced)
+    sibling_note = f"; also failed with no finding to explain it - {detail}" if detail else ""
+    evidence = _unevidenced_evidence(unevidenced, returncode)
     if judged:
         return Outcome(
             Verdict.SPEC_FAILURE,
@@ -1101,26 +1167,14 @@ def classify_run(
             + ", ".join(judged)
             + " failed on their own merits, not on infrastructure"
             + sibling_note,
-            {
-                "returncode": run.returncode,
-                "judged_failures": judged,
-                "unevidenced_failures": [comp.id for comp in unevidenced],
-                "component_errors": {comp.id: comp.error for comp in unevidenced},
-            },
+            {**evidence, "judged_failures": judged},
         )
 
     if unevidenced:
-        detail = "; ".join(
-            f"{comp.id}: {comp.error or 'no error recorded'}" for comp in unevidenced
-        )
         return Outcome(
             Verdict.UNCLASSIFIABLE,
             f"failed with no finding to attribute it to, so the cause is unproven - {detail}",
-            {
-                "returncode": run.returncode,
-                "unevidenced_failures": [comp.id for comp in unevidenced],
-                "component_errors": {comp.id: comp.error for comp in unevidenced},
-            },
+            evidence,
         )
 
     return Outcome(
@@ -1128,10 +1182,33 @@ def classify_run(
         "every failed component carried an infrastructure_error finding: "
         + ", ".join(comp.id for comp in failed),
         {
-            "returncode": run.returncode,
+            "returncode": returncode,
             "infra_failures": [comp.id for comp in failed],
         },
     )
+
+
+def _unevidenced_detail(unevidenced: Sequence[Any]) -> str:
+    """``id: error`` for each component that failed with no finding.
+
+    One writer for what was the same join written twice, so the reason a
+    human reads in the inbox cannot say two different things about the
+    same components.
+    """
+    return "; ".join(f"{comp.id}: {comp.error or 'no error recorded'}" for comp in unevidenced)
+
+
+def _unevidenced_evidence(unevidenced: Sequence[Any], returncode: int) -> dict[str, Any]:
+    """The evidence both unevidenced-carrying verdicts record.
+
+    Same reason as ``_unevidenced_detail``: it was written out twice,
+    and the inbox item is what a human reads before deciding to requeue.
+    """
+    return {
+        "returncode": returncode,
+        "unevidenced_failures": [comp.id for comp in unevidenced],
+        "component_errors": {comp.id: comp.error for comp in unevidenced},
+    }
 
 
 # ---------------------------------------------------------------------------

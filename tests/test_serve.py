@@ -28,7 +28,12 @@ import pytest
 from kstrl.agents.base import ARCHITECT_COMPONENT, ARCHITECT_ROLE
 from kstrl.findings import Finding
 from kstrl.inbox import Inbox, InboxConfig, ItemKind
-from kstrl.manifest import Component, ComponentStatus, Manifest
+from kstrl.manifest import (
+    ADVERSARIAL_BUDGET_CHECK,
+    Component,
+    ComponentStatus,
+    Manifest,
+)
 from kstrl.procgroup import safe_pgid
 from kstrl.reducer import ComponentState, RunState
 from kstrl.serve import (
@@ -138,6 +143,7 @@ def _component(
     comp_id: str,
     status: str,
     findings: list[Finding] | None = None,
+    failed_check: str = "",
 ) -> Component:
     component = Component(
         comp_id,
@@ -149,6 +155,7 @@ def _component(
     )
     component.status = ComponentStatus(status)
     component.findings = list(findings or [])
+    component.failed_check = failed_check
     return component
 
 
@@ -281,6 +288,99 @@ class TestClassifierRetriesOnlyWithEvidence:
         )
         assert outcome.verdict is Verdict.RETRY_INFRA
         assert "comp-a" in outcome.reason
+
+    def test_a_budget_halt_is_terminal_not_infrastructure(self, tmp_path: Path) -> None:
+        """R10.5 (#226): the adversarial cap is a decision, not a fault.
+
+        The halted component carries an infrastructure_error finding,
+        which is exactly the evidence the RETRY_INFRA branch reads, so
+        without the failed_check branch this manifest retries. The cap
+        starts again at zero on the retry and the run stops at the same
+        component, so the retry buys nothing and costs a full run.
+        """
+        path = tmp_path / "m.json"
+        _manifest(
+            path,
+            [
+                _component(
+                    "comp-a",
+                    "failed",
+                    [_infra_finding()],
+                    failed_check=ADVERSARIAL_BUDGET_CHECK,
+                )
+            ],
+        )
+        outcome = classify_run(
+            tmp_path,
+            run=RunOutcome(returncode=1),
+            manifest_path=path,
+        )
+        assert outcome.verdict is Verdict.BUDGET_HALT
+        assert outcome.verdict.may_retry is False
+        assert "max_adversarial_calls" in outcome.reason
+        assert outcome.evidence["budget_halted"] == ["comp-a"]
+
+    def test_a_budget_halt_beside_real_infra_still_refuses_to_retry(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """ANY halted component makes the run terminal, not every one.
+
+        A mixed manifest retried would re-reach the same cap, so the
+        genuine infrastructure casualty beside it does not buy a retry.
+        It is still named in the reason, for the same reason the
+        unevidenced sibling note exists (#197 M3): a human deciding
+        whether to requeue must see everything that failed.
+        """
+        path = tmp_path / "m.json"
+        _manifest(
+            path,
+            [
+                _component(
+                    "comp-a",
+                    "failed",
+                    [_infra_finding()],
+                    failed_check=ADVERSARIAL_BUDGET_CHECK,
+                ),
+                _component("comp-b", "failed", [_infra_finding()]),
+            ],
+        )
+        outcome = classify_run(
+            tmp_path,
+            run=RunOutcome(returncode=1),
+            manifest_path=path,
+        )
+        assert outcome.verdict is Verdict.BUDGET_HALT
+        assert outcome.evidence["budget_halted"] == ["comp-a"]
+        assert outcome.evidence["other_failures"] == ["comp-b"]
+        assert "comp-b" in outcome.reason
+
+    def test_a_budget_halt_beside_a_spec_failure_names_both(self, tmp_path: Path) -> None:
+        """Both verdicts are terminal, so the only thing at stake is
+        which one the operator is told to act on. The budget halt wins
+        the verdict because it is the one that makes a retry pointless,
+        and the spec failure is still named."""
+        path = tmp_path / "m.json"
+        _manifest(
+            path,
+            [
+                _component(
+                    "comp-a",
+                    "failed",
+                    [_infra_finding()],
+                    failed_check=ADVERSARIAL_BUDGET_CHECK,
+                ),
+                _component("comp-b", "failed", [_spec_finding()], failed_check="review"),
+            ],
+        )
+        outcome = classify_run(
+            tmp_path,
+            run=RunOutcome(returncode=1),
+            manifest_path=path,
+        )
+        assert outcome.verdict is Verdict.BUDGET_HALT
+        assert outcome.verdict.may_retry is False
+        assert "comp-b" in outcome.reason
 
     def test_one_judged_failure_blocks_the_retry(self, tmp_path: Path) -> None:
         """A mixed run is a SPEC failure: the spec failure is the verdict."""
