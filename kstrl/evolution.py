@@ -70,6 +70,48 @@ EXPERIMENTS_HEADER = (
     "total_tokens\ttotal_cost_usd\tunreported_calls"
 )
 
+
+def _experiment_rows(text: str) -> list[dict[str, Any]]:
+    """Parse experiments.tsv, dropping any row whose WIDTH this writer never emits.
+
+    #331's read half. The write half pads an unterminated tail, but a
+    file torn before that landed still has the concatenated row in it,
+    and this reader is the one that RENDERS corruption rather than
+    dropping it: measured, ``ks evolve --status`` and the TUI trends tab
+    showed a run whose ``completed`` column held a timestamp, because
+    ``csv.DictReader`` zipped a fragment plus a whole row against the
+    header and put the overflow under the key ``None``.
+
+    Width, not content, is the check, and it is deliberately not "the
+    field count equals the header's". Files written before R3.1 have a
+    SHORTER header and this writer appends the full-width row onto them,
+    which the comment on :const:`EXPERIMENTS_HEADER` promises to
+    tolerate; a filter that took the header's own width as the only
+    legal one would answer a rendering defect by silently deleting every
+    row of a legacy file, which is a worse defect than the one it fixes.
+    So both widths are legal when the file's header is a PREFIX of the
+    current one, and only then.
+
+    Blank lines are skipped rather than dropped as malformed: the pad
+    the writer leaves behind is one, and it is not an incident by
+    itself.
+    """
+    reader = csv.reader(io.StringIO(text), delimiter="\t")
+    try:
+        header = next(reader)
+    except StopIteration:
+        return []
+    columns = EXPERIMENTS_HEADER.split("\t")
+    widths = {len(header)}
+    if header == columns[: len(header)]:
+        widths.add(len(columns))
+    return [
+        dict(zip(header, fields, strict=False))
+        for fields in reader
+        if fields and len(fields) in widths
+    ]
+
+
 # #191: what a component_result entry records when no fact-utilization
 # measurement reached the journal - the component never got past the
 # gates to the distill phase, knowledge was off, or the measurement
@@ -938,12 +980,31 @@ class EvolutionJournal:
                 not self.config.experiments_path.exists()
                 or self.config.experiments_path.stat().st_size == 0
             )
-            # The other side of the two-sided contract: this is the
-            # file get_experiment_trends decodes as utf-8.
-            with open(self.config.experiments_path, "a", encoding="utf-8") as f:
-                if needs_header:
-                    f.write(EXPERIMENTS_HEADER + "\n")
-                f.write(row + "\n")
+            # #331: through appendio, which repairs an unterminated
+            # tail before appending onto it. This file is the WORST of
+            # the seven, because its reader RENDERS the corruption
+            # instead of dropping it: measured, a torn row plus this
+            # append put a run into `ks evolve --status` and the TUI
+            # trends tab whose "completed" column held a timestamp,
+            # while the run being recorded here vanished.
+            #
+            # A BARE PAD, no marker row. Every marker a TSV can carry is
+            # a field, and a row of fields is a RUN to this file's
+            # reader; there is no shape here that reads as "not a run"
+            # the way JOURNAL_REPAIR_EVENT does in a JSONL file. The
+            # incident is surfaced on the read side instead, by
+            # get_experiment_trends dropping a row whose width is not
+            # one this writer emits.
+            #
+            # needs_header is unchanged and still asked before the
+            # append: a file that is missing or empty cannot have a torn
+            # tail, so the two never both fire.
+            #
+            # The other side of the two-sided contract: utf-8 is pinned
+            # in the helper, and this is the file get_experiment_trends
+            # decodes as utf-8.
+            payload = (EXPERIMENTS_HEADER + "\n" if needs_header else "") + row + "\n"
+            append_records(self.config.experiments_path, payload, repair="")
         except OSError as exc:
             logger.warning(
                 "experiments.tsv write failed (non-fatal): %s: %s",
@@ -1546,9 +1607,7 @@ class EvolutionJournal:
         except (OSError, ValueError):
             return []
 
-        reader = csv.DictReader(io.StringIO(text), delimiter="\t")
-        rows = list(reader)
-        return rows[-last_n:]
+        return _experiment_rows(text)[-last_n:]
 
     # ------------------------------------------------------------------
     # get_repair_count
