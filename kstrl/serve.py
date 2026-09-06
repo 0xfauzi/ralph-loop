@@ -1086,8 +1086,8 @@ def classify_run(
 def _timeout_outcome(manifest_path: Path | None, returncode: int) -> Outcome:
     """What a run WE killed on ``factory_timeout_seconds`` classifies as.
 
-    Same rule as the ``budget_halt_reason`` check above ``classify_run``\'s
-    timeout branch, one branch over. A run that halted a component on
+    Same rule as the ``budget_halt_reason`` check above the timeout
+    branch in ``classify_run``, one branch over. A run that halted a component on
     ``max_adversarial_calls`` and THEN hung long enough for the timeout
     to kill it is still a run that reached the cap, and requeuing it pays
     a whole run to re-reach a counter that starts again at zero. That is
@@ -1110,7 +1110,12 @@ def _timeout_outcome(manifest_path: Path | None, returncode: int) -> Outcome:
             failed = [comp for comp in manifest.components if str(comp.status) == "failed"]
             halted = _budget_halt_outcome(failed, returncode)
             if halted is not None:
-                return halted
+                # The halt does not erase the hang. Same rule as the
+                # sibling note below: the evidence is what a human reads
+                # before deciding to requeue, and "terminal on the cap"
+                # and "we also had to kill it" are two facts, one of
+                # which is worth investigating on its own.
+                return replace(halted, evidence={**halted.evidence, "timed_out": True})
     # WE killed it. A hang is an infrastructure symptom, and max_attempts
     # plus the daily budget bound the exposure.
     return Outcome(

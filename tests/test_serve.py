@@ -454,6 +454,8 @@ class TestClassifierRetriesOnlyWithEvidence:
         assert outcome.verdict is Verdict.BUDGET_HALT
         assert outcome.verdict.may_retry is False
         assert outcome.evidence["budget_halted"] == ["comp-a"]
+        # The halt does not erase the hang: both facts reach the inbox.
+        assert outcome.evidence["timed_out"] is True
 
     def test_a_timeout_with_no_budget_halt_still_retries(self, tmp_path: Path) -> None:
         """The other direction, or the branch above would be a rename of
