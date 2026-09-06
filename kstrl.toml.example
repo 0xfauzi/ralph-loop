@@ -25,6 +25,7 @@ prd = "scripts/kstrl/prd.json"
 # diff_scope.
 # progress = "scripts/kstrl/progress.txt"
 codebase_map = "scripts/kstrl/codebase_map.md"
+golden_patterns = "scripts/kstrl/golden-patterns.md"
 allowed = []                       # e.g., ["scripts/kstrl/", "src/"]
 
 [git]

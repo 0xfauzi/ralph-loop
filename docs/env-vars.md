@@ -38,6 +38,7 @@ to run and tell you which section, key and value to fix.
 | `PRD_FILE` | path | `scripts/kstrl/prd.json` | |
 | `PROGRESS_FILE` | path | `scripts/kstrl/progress.txt` | Setting it forces that path on every factory component; unset, each component's engineer writes `progress.txt` beside its own PRD, inside the component's `allowedPaths` |
 | `CODEBASE_MAP_FILE` | path | `scripts/kstrl/codebase_map.md` | |
+| `KSTRL_GOLDEN_PATTERNS_FILE` | path | `scripts/kstrl/golden-patterns.md` | Operator-authored patterns injected into every engineer prompt; absent or empty costs nothing, and past 6000 characters the block is truncated with an announcement |
 | `SLEEP_SECONDS` | float | 2.0 | Inter-iteration sleep |
 | `INTERACTIVE` | bool | false | Pause between iterations for human input |
 | `ALLOWED_PATHS` | comma-list | empty | Restrict agent writes to these prefixes |

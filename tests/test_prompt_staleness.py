@@ -280,12 +280,20 @@ _SCAFFOLD_WRITER = "_create_if_missing"
 #: ``init_cmd.py``'s six are the three ledger rows and the three
 #: ``_create_if_missing`` calls. The rest are surfaces that point an
 #: operator at a file: the CLI's messages and options, the config's
-#: prompt-path default, its report row, the wizard's preview and
-#: ``launch``'s resolution of the engineer prompt.
+#: prompt-path default, the wizard's preview and ``launch``'s resolution
+#: of the engineer prompt.
+#:
+#: #229 took ``config.py`` from four to one and dropped
+#: ``config_report.py`` entirely. Neither is a template going quiet: the
+#: three extra config.py spellings and the config_report.py one were
+#: ``root_dir / "scripts/kstrl/prompt.md"`` copied into ``from_env``,
+#: ``from_toml``, ``load`` and ``kstrl_config_defaults``, and all four
+#: now go through ``KstrlConfig.anchored``, which anchors the FIELD
+#: default. The one remaining spelling is that field default, so the net
+#: still sees the filename in the module that owns it.
 EXPECTED_TEMPLATE_FILENAMES: dict[str, int] = {
     "cli.py": 8,
-    "config.py": 4,
-    "config_report.py": 1,
+    "config.py": 1,
     "init_cmd.py": 6,
     "init_wizard.py": 3,
     "launch.py": 1,
