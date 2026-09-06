@@ -564,8 +564,8 @@ def _blamed_toml_value(
     says rather than as a diagnosis.
 
     The ``suppress`` below would swallow a ``RuntimeError`` kstrl did
-    not define, which :func:`raise_if_defect` exists to re-raise. It
-    cannot reach one: this runs only AFTER that function has passed on
+    not define, which :func:`raise_if_defect` exists to re-raise. None
+    has been reproduced: this runs only AFTER that function has passed on
     the exception being reported, and everything ``load_toml_section``
     raises here has already been converted by ``load_toml_document``.
     """

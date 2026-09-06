@@ -567,17 +567,17 @@ def load_toml_document(path: Path) -> dict[str, Any]:
     render the message.
 
     Provenance follows (#323): the parse runs 9 to 16 frames deep under
-    ``ks status``, 13 to 52 on the Textual event loop, so a
-    ``RecursionError`` here is the document's. Not by construction:
-    measured, a CALLER at 991 of 1000 frames gets a valid file called
-    unparseable, and IS the runaway. ``raise_if_defect`` has the rest.
+    ``ks status``, 13 on the Textual event loop's own callbacks (one TUI
+    parse inherits its caller's stack), so a ``RecursionError`` here is
+    the document's. Not by construction: measured, a CALLER with 5 or 6
+    of 1000 frames left gets a valid file called unparseable, and IS the
+    runaway. ``raise_if_defect`` has the rest.
 
     ``OSError`` is not in the catch-all's reach at all, which is the
-    stronger form of the guarantee two callers depend on. An earlier
-    draft re-raised it from inside the guard; that clause was correct
-    and unpinnable, because with the I/O already hoisted out there was
-    no way to make a test reach it. A special case no test can enter is
-    a special case that has not been deleted yet.
+    stronger form of the guarantee two callers depend on. Re-raising it
+    from inside the guard was correct and unpinnable: with the I/O
+    hoisted out, no test could reach that clause, and a special case no
+    test can enter is a special case that has not been deleted yet.
 
     The rule, after being wrong three times: a parser's error taxonomy
     belongs to the parser, and a reader naming any class narrower than

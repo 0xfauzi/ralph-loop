@@ -32,9 +32,9 @@ THE RESIDUAL, WHICH IS STATED RATHER THAN TESTED
 the parse, so kstrl's OWN runaway that happens to bottom out inside a
 parse is reported to the operator as their broken file. Measured on
 CPython 3.12.8 at the default limit with a valid two-line kstrl.toml:
-a caller holding 991 or 992 of the 1000 frames gets that relabelling,
-and at 993 the ``RecursionError`` is raised before the guard and
-escapes it. A caller that deep is itself the runaway, so the residual
+a caller with 5 or 6 of the 1000 frames left gets that relabelling,
+and with 4 or fewer the ``RecursionError`` is raised before the guard
+and escapes it. A caller that deep is itself the runaway, so the residual
 is one runaway reported as a file rather than as a traceback, in a
 two-frame band. No assertion here pins it: a test would have to key on
 the interpreter's recursion limit and on this one function's frame
@@ -133,9 +133,10 @@ class TestRecursionErrorProvenance:
         # two like it existed: that mutation left the file 3 of 3 green.
         assert "raise_if_defect" in [f.name for f in frames]
         # A DISCLOSURE, not a control. This fixture writes VALID_TOML,
-        # so tomllib is never entered and no production mutation can
-        # turn this line red. It records the direction the frames point
-        # in; the kills are the two assertions above.
+        # so the parse returns and leaves no tomllib frame on this
+        # traceback; no production mutation can turn this line red. It
+        # records the direction the frames point in; the kills are the
+        # two assertions above.
         assert not [f for f in frames if Path(f.filename).is_relative_to(_TOMLLIB_DIR)]
         # [evolution] is the one degrading section. Its degrade path must
         # NOT swallow this: a warning line here would hide the cycle.
