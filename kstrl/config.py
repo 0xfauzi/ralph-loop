@@ -567,9 +567,8 @@ def load_toml_document(path: Path) -> dict[str, Any]:
     render the message.
 
     Provenance follows (#323): the parse runs at stack depth 9 to 16
-    under ``ks status``, so a ``RecursionError`` here is the document's,
-    and every block ``config_preflight`` guards reaches tomllib only
-    through this function, so one above is ours - see ``raise_if_defect``.
+    under ``ks status``, so a ``RecursionError`` here is the document's.
+    One above this call is ours; ``raise_if_defect`` carries that half.
 
     ``OSError`` is not in the catch-all's reach at all, which is the
     stronger form of the guarantee two callers depend on. An earlier

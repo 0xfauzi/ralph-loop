@@ -134,9 +134,10 @@ def raise_if_defect(exc: BaseException) -> None:
     rule, and the argument is layering rather than inspection (#323). A
     kstrl.toml with 600 nested arrays exhausts the stack inside
     tomllib's recursive descent, and that is the operator's file, not a
-    defect of ours. It never arrives here. There are four tomllib parses
-    in ``kstrl/`` - ``tests/test_toml_readers.py`` pins the census - and
-    every one of them ends on a bare ``except Exception``:
+    defect of ours. It never arrives here. Every tomllib parse in
+    ``kstrl/`` ends on a bare ``except Exception``, and
+    ``EXPECTED_TOML_PARSES`` in ``tests/test_toml_readers.py`` is what
+    makes that a closed set rather than a count restated here:
     ``config.load_toml_document`` re-raises ``ConfigError`` naming the
     path, and the pyproject.toml and ruff.toml readers in ``verify`` and
     ``feedforward`` fall back to a default. So a ``RecursionError`` that

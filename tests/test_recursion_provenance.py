@@ -14,18 +14,21 @@ series rather than in competition:
   that arrives there is kstrl's own by construction, and re-raising it
   with its traceback intact is right.
 
-These tests pin both directions at two levels: in-process through
-``preflight_config``, and at the CLI seam where an operator actually
-sees the difference between a reported line and a traceback. Direction
-(a) uses real bytes, and direction (b) a real self-calling function
-rather than a constructed ``RecursionError``, because a stub would pass
-in every broken state.
+These tests pin both directions in-process through
+``preflight_config``, and then direction (b) again at the CLI seam,
+where an operator sees the difference between a reported line and a
+traceback. Direction (a) uses real bytes, and direction (b) a real
+self-calling function rather than a constructed ``RecursionError``,
+because a stub would pass in every broken state.
 
 What was already pinned, and why it is not enough. Direction (a) lives
 at the loader in ``test_config_toml.py``
 (``test_a_recursion_error_is_reported_not_raised``), one call below
-:func:`preflight_config`. Direction (b) lives at
-:func:`load_or_report` in ``test_tui_config_guard.py``
+:func:`preflight_config`, and at the seam as the ``deep_nest`` row of
+``TOML_PARSE_FAULTS`` crossed with ``["status"]`` in
+``test_config_preflight.py`` - which is why the seam test below covers
+only direction (b) rather than restating that cell. Direction (b) lives
+at :func:`load_or_report` in ``test_tui_config_guard.py``
 (``test_every_runtimeerror_kstrl_did_not_define_is_re_raised``) and
 raises a CONSTRUCTED ``RecursionError``, so no stack is ever exhausted.
 Neither goes through ``collect_config_problems``, which is the
@@ -56,11 +59,6 @@ def _runaway(root_dir: Path | None = None) -> None:
     return _runaway(root_dir)
 
 
-def _tb_names(exc: BaseException) -> tuple[list[str], list[str]]:
-    frames = traceback.extract_tb(exc.__traceback__)
-    return [f.name for f in frames], [Path(f.filename).name for f in frames]
-
-
 class TestRecursionErrorProvenance:
     def test_a_parse_recursion_is_the_files_fault_and_names_the_file(self, tmp_path: Path) -> None:
         toml = tmp_path / "kstrl.toml"
@@ -81,27 +79,22 @@ class TestRecursionErrorProvenance:
         warned: list[str] = []
         with pytest.raises(RecursionError) as caught:
             preflight_config(tmp_path, warn=warned.append)
-        funcs, files = _tb_names(caught.value)
-        assert "_runaway" in funcs
-        assert "_parser.py" not in files
+        frames = traceback.extract_tb(caught.value.__traceback__)
+        assert "_runaway" in [f.name for f in frames]
+        assert "_parser.py" not in [Path(f.filename).name for f in frames]
         # [evolution] is the one degrading section. Its degrade path must
         # NOT swallow this: a warning line here would hide the cycle.
         assert warned == []
 
-    def test_the_seam_reports_the_file_and_re_raises_ours(
+    def test_the_seam_re_raises_ours_instead_of_reporting_a_file(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.chdir(tmp_path)
-        toml = tmp_path / "kstrl.toml"
-        toml.write_bytes(DEEP_NEST_TOML)
-        result = CliRunner().invoke(cli, ["status"], env={"KSTRL_NO_TUI": "1"})
-        assert not isinstance(result.exception, RecursionError)
-        assert result.exit_code == 1
-        assert "error:" in result.output and BROAD_FRAGMENT in result.output
-
-        toml.write_text(VALID_TOML, encoding="utf-8")
+        (tmp_path / "kstrl.toml").write_text(VALID_TOML, encoding="utf-8")
         monkeypatch.setattr(EvolutionConfig, "load", staticmethod(_runaway))
         result = CliRunner().invoke(cli, ["status"], env={"KSTRL_NO_TUI": "1"})
         assert isinstance(result.exception, RecursionError)
+        # Not reported as the operator's file, in either register: a
+        # kstrl.toml that parses cannot be what an "error:" would name.
         assert "error:" not in result.output
         assert "warning:" not in result.output
