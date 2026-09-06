@@ -30,6 +30,11 @@ write. This census keys every call into ``appendio`` by scope and pins
 what it passes for ``lock``, so an omission is an unexplained row rather
 than a default.
 
+It resolves its callee names the way layer 1 does, and did not until
+#352 round 2: an aliased import or a local rebind walked straight past
+it, which is the same hole one layer down. :func:`appendio_entry_names`
+carries the measurement.
+
 LAYER 2, :func:`unrouted_append_opens`, attributes each of layer 1's
 sites to its innermost SCOPE and demands a row in
 :data:`ALLOWED_APPEND_OPENS`. It is not a nicer message for layer 1: it
@@ -41,9 +46,11 @@ WHICH DIRECTION EACH LAYER IS WRONG IN, per CLAUDE.md's rule 3. Both
 FLAG. Layer 1 over-matches on purpose: it treats an unfoldable mode as
 an append and it pools ``open``'s aliases across the whole package
 rather than per module, so a name bound to ``open`` in one module makes
-a call to that name count in another. The cost of that is a row somebody
-has to read once; the cost of the other direction is a hole. Nothing
-here CLEARS a site on its own evidence. What clears a site is a row a
+a call to that name count in another. Layer 3 pools its own aliases the
+same way and does not check which module an alias was imported from.
+The cost of that is a row somebody has to read once; the cost of the
+other direction is a hole. Nothing here CLEARS a site on its own
+evidence. What clears a site is a row a
 person wrote in the table below, which is why adding one is the point of
 the guard rather than a way around it: the diff that adds a row is where
 somebody says why new code opens a file for append and is not going
@@ -86,13 +93,11 @@ from collections.abc import Iterable
 from enum import StrEnum
 from pathlib import Path
 
-import pytest
-
 from tests.helpers.astwalk import (
     Sees,
     all_nodes,
     assert_census,
-    blind_spot,
+    bound_names,
     census,
     folded_str,
     label,
@@ -305,9 +310,100 @@ EXPECTED_APPEND_OPENS: dict[str, int] = {
 APPENDIO_ENTRY_POINTS = frozenset({"append_records", "appending", "open_for_append"})
 
 
-def routed_append_calls(node: ast.AST) -> bool:
-    """Layer 3's predicate: does this ONE node call into ``appendio``?"""
-    return isinstance(node, ast.Call) and leaf_name(node.func) in APPENDIO_ENTRY_POINTS
+def appendio_entry_names(trees: Iterable[ast.Module]) -> frozenset[str]:
+    """:data:`APPENDIO_ENTRY_POINTS` plus every name bound to one of them.
+
+    The same axis :func:`append_open_names` closes for ``open``, and it
+    was open here until #352 round 2. Measured against the predicate
+    directly: the bare and attribute forms were seen, while
+    ``import append_records as _ar`` plus ``_ar(...)``,
+    ``import appending as _ap`` plus ``with _ap(...)``, and
+    ``_w = append_records`` plus ``_w(...)`` were not. A new appender in
+    any of those three got no exclusion and changed no pinned inventory,
+    which is this layer's own docstring describing the hole it closes.
+
+    TWO BINDING SHAPES. An ``import ... as`` alias, and a local rebind
+    to a FIXED POINT so ``a = append_records`` then ``b = a`` closes at
+    any length. POOLED across the corpus rather than resolved per
+    module, and the module an alias is imported FROM is not checked:
+    both over-match, which is the direction a FLAGGING guard is allowed
+    to be wrong in (CLAUDE.md rule 3) and the same trade
+    :func:`append_open_names` states one screen up. Narrowing to the
+    module name would let an indirection through a re-export past. The
+    cost is a row somebody reads once; the cost of the other direction
+    is a hole, and this layer has had one.
+    """
+    corpus = [list(ast.walk(tree)) for tree in trees]
+    names = set(APPENDIO_ENTRY_POINTS) | _imported_as_aliases(corpus)
+    while True:
+        found = _names_rebound_to(corpus, names)
+        if found <= names:
+            return frozenset(names)
+        names |= found
+
+
+def _imported_as_aliases(corpus: Iterable[list[ast.AST]]) -> set[str]:
+    """``from ... import append_records as _ar`` gives ``{"_ar"}``."""
+    names: set[str] = set()
+    for nodes in corpus:
+        for node in nodes:
+            if not isinstance(node, ast.ImportFrom):
+                continue
+            names.update(
+                alias.asname
+                for alias in node.names
+                if alias.asname and alias.name in APPENDIO_ENTRY_POINTS
+            )
+    return names
+
+
+def _names_rebound_to(corpus: Iterable[list[ast.AST]], names: set[str]) -> set[str]:
+    """One hop of the fixed point: names bound to a name already in ``names``."""
+    found: set[str] = set()
+    for nodes in corpus:
+        for node in nodes:
+            targets, value = bound_names(node)
+            if isinstance(value, ast.Name) and value.id in names:
+                found.update(targets)
+    return found
+
+
+def routes_into_appendio(names: frozenset[str]) -> Sees:
+    """Layer 3's predicate: does this ONE node call into ``appendio``?
+
+    Two disjuncts, because ``leaf_name`` answers the last name in the
+    callee: a bare ``append_records(...)`` and an attribute
+    ``appendio.append_records(...)`` are both hits, and each has its own
+    control below. There is no attribute-form call in ``kstrl/``, so
+    that half was uncontrolled and narrowing the predicate to
+    ``ast.Name`` stayed green over 692 tests.
+    """
+
+    def sees(node: ast.AST) -> bool:
+        return isinstance(node, ast.Call) and leaf_name(node.func) in names
+
+    return sees
+
+
+def routed_append_net(sources: Iterable[Path]) -> Sees:
+    """Layer 3's predicate, built once from the names that corpus binds.
+
+    One home for a construction the census and its assertion both need,
+    for :func:`append_open_net`'s reason: rebuilding it per call site is
+    how two of them pool names over different corpora and disagree.
+    """
+    return routes_into_appendio(appendio_entry_names([parsed(source) for source in sources]))
+
+
+def routed_calls_in(source: str) -> list[str]:
+    """Layer 3's predicate over a snippet, for the anti-vacuity bodies.
+
+    Names are pooled from the snippet itself, so an alias written in it
+    is resolved the way one in ``kstrl/`` would be.
+    """
+    tree = parse(source)
+    sees = routes_into_appendio(appendio_entry_names([tree]))
+    return [ast.unparse(node) for node in all_nodes(tree) if sees(node)]
 
 
 def lock_argument(node: ast.Call) -> str:
@@ -336,7 +432,8 @@ def routed_key(source_file: Path, node: ast.AST) -> str:
 
 def routed_append_census() -> dict[str, int]:
     """Layer 3's inventory over ``kstrl/``, re-derived by RUNNING it."""
-    return census(package_sources(), routed_append_calls, key=routed_key)
+    sources = package_sources()
+    return census(sources, routed_append_net(sources), key=routed_key)
 
 
 #: Layer 3's pin: every call into ``appendio`` and the exclusion it asks
@@ -442,6 +539,9 @@ def unrouted_append_opens(source_file: Path, sees: Sees) -> list[str]:
 def append_opens_in(source: str) -> list[str]:
     """Layer 1's predicate over a snippet, for the anti-vacuity body.
 
+    Fed source in ``tests/test_append_guard_detects.py``, which is where
+    every positive control and every disclosed limit lives.
+
     Names are pooled from the snippet itself, so an alias written in it
     is resolved the way one in ``kstrl/`` would be.
     """
@@ -511,15 +611,27 @@ class TestEveryAppendOpenHasOneHome:
         while changing no pinned inventory, which is the opposite of
         what adding a row to ``ALLOWED_APPEND_OPENS`` is for.
         """
+        sources = package_sources()
         assert_census(
-            sources=package_sources(),
-            sees=routed_append_calls,
+            sources=sources,
+            sees=routed_append_net(sources),
             key=routed_key,
             expected=EXPECTED_ROUTED_APPENDS,
             control=(
                 'append_records(p, line, repair="")\n',
                 "appending(p, lock=True)\n",
                 "open_for_append(p)\n",
+                # The attribute disjunct of `routes_into_appendio`. There
+                # is no attribute-form call into appendio anywhere in
+                # kstrl/, so without this control narrowing the predicate
+                # to ast.Name stayed green over 692 tests (#352 round 2).
+                'appendio.append_records(p, line, repair="")\n',
+                # The alias axis is NOT controllable from here, and for
+                # layer 1's reason: `sees` is built from the names the
+                # CORPUS binds, so a snippet's own alias is not in the
+                # set no matter what the snippet says. Its anti-vacuity
+                # rows are in TestTheGuardDetects, which pools names from
+                # the snippet, exactly as layer 1's `_o = open` row is.
             ),
             message=(
                 "The set of calls into kstrl.appendio changed. If this is a new "
@@ -557,61 +669,3 @@ class TestEveryAppendOpenHasOneHome:
             "ALLOWED_APPEND_OPENS has rows for scopes that no longer open anything "
             f"in append mode: {sorted(set(ALLOWED_APPEND_OPENS) - live)}. Delete them."
         )
-
-
-class TestTheGuardDetects:
-    """The net fired at source it is supposed to see, and stayed quiet at
-    source it is not. A guard whose only assertion is that an inventory
-    matches cannot notice its own detector being switched off, and #324
-    records eleven instances of exactly that, every one in the direction
-    of going blind."""
-
-    @pytest.mark.parametrize(
-        "source",
-        [
-            'open(p, "a")\n',
-            'open(p, mode="a")\n',
-            'open(p, "ab")\n',
-            'open(p, "a+b")\n',
-            'p.open("a")\n',
-            'p.open(mode="a")\n',
-            "os.open(p, flags)\n",
-            'os.fdopen(fd, "a")\n',
-            'tempfile.NamedTemporaryFile(mode="a")\n',
-            '_o = open\n_o(p, "a")\n',
-        ],
-    )
-    def test_an_append_open_is_seen(self, source: str) -> None:
-        assert append_opens_in(source), f"the walk missed an append open: {source!r}"
-
-    @pytest.mark.parametrize(
-        "source",
-        [
-            'open(p, "r")\n',
-            'open(p, "w")\n',
-            'open(p, "rb")\n',
-            "open(p)\n",
-            'p.write_text("x")\n',
-        ],
-    )
-    def test_a_read_or_a_truncating_write_is_not_seen(self, source: str) -> None:
-        assert not append_opens_in(source), f"the walk over-matched: {source!r}"
-
-    @pytest.mark.xfail(strict=True, raises=AssertionError)
-    def test_an_append_reached_by_seeking_to_the_end_is_missed(self) -> None:
-        """The disclosed limit, pinned so the disclosure cannot rot.
-
-        ``"r+"`` opens for update without truncating, and a seek to the
-        end turns it into an append. The mode contains no ``"a"``, so
-        layer 1 does not count it and layer 2 never sees it. It is not
-        merely unpinned: nothing in this suite would notice such a
-        writer arriving.
-
-        Not fixed by widening the mode test to ``"+"``: every ``"a+"``
-        lock file above would stay counted while every ``"r+"`` reader
-        that never seeks would join them, which trades a disclosed miss
-        for undisclosed noise. The day somebody does widen it, this row
-        XPASSes and ``strict=True`` makes that a failure, so the
-        disclosure is edited in the same diff.
-        """
-        blind_spot(append_opens_in, 'h = open(p, "r+")\nh.seek(0, 2)\nh.write(line)\n')
