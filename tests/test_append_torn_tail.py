@@ -557,3 +557,104 @@ class TestInboxSurvivesATornTail:
 
         assert after.startswith(before)
         assert b"\n\n" not in after
+
+
+# ---------------------------------------------------------------------------
+# the E8 dependency-scope telemetry log
+# ---------------------------------------------------------------------------
+
+
+class TestKnowledgeTelemetrySurvivesATornTail:
+    """``record_dependency_scope_gap``, written by ``build_knowledge_context``.
+
+    No lock, and the reason was read in the source rather than assumed.
+    ``build_knowledge_context`` has one caller, ``factory._submit_args``,
+    which is a closure the scheduler loop calls on the orchestrator
+    thread BEFORE ``executor.submit``, so no worker process ever reaches
+    this writer; the run-level ``factory.lock`` excludes a second
+    orchestrator on the same root.
+
+    A repair ROW here rather than the inbox's bare pad, because nothing
+    counts these rows against anything: this reader has no production
+    consumer, so the row costs nothing and is the durable trace.
+    """
+
+    def record(self, root: Path, component_id: str) -> None:
+        from kstrl.knowledge import record_dependency_scope_gap
+
+        record_dependency_scope_gap(component_id, 1, 1, root)
+
+    def telemetry_path(self, root: Path) -> Path:
+        from kstrl.knowledge import _E8_TELEMETRY_RELATIVE_PATH
+
+        return root / _E8_TELEMETRY_RELATIVE_PATH
+
+    def read(self, root: Path) -> list[str]:
+        from kstrl.knowledge import read_dependency_scope_telemetry
+
+        return [
+            str(e.get("component_id"))
+            for e in read_dependency_scope_telemetry(root)
+            if e.get("component_id")
+        ]
+
+    def test_the_row_after_a_torn_fragment_survives(self, tmp_path: Path) -> None:
+        self.record(tmp_path, "alpha")
+        tear(self.telemetry_path(tmp_path))
+        self.record(tmp_path, "beta")
+
+        assert self.read(tmp_path) == ["alpha", "beta"]
+
+    def test_a_row_that_lost_its_newline_is_recovered(self, tmp_path: Path) -> None:
+        self.record(tmp_path, "a1")
+        self.record(tmp_path, "a2")
+        lose_the_newline(self.telemetry_path(tmp_path))
+        self.record(tmp_path, "a3")
+
+        assert self.read(tmp_path) == ["a1", "a2", "a3"]
+
+    def test_an_untorn_log_is_appended_to_byte_for_byte(self, tmp_path: Path) -> None:
+        self.record(tmp_path, "a1")
+        before = self.telemetry_path(tmp_path).read_bytes()
+        self.record(tmp_path, "a2")
+        after = self.telemetry_path(tmp_path).read_bytes()
+
+        assert after.startswith(before)
+        assert b"\n\n" not in after
+
+    def test_the_repair_row_carries_no_component_id(self, tmp_path: Path) -> None:
+        """On disk with a ``timestamp`` and an ``event`` and nothing else.
+
+        Every caller of the reader selects on ``component_id``, so a row
+        without one counts towards no gap and can invent no withheld
+        fact.
+        """
+        from kstrl.knowledge import read_dependency_scope_telemetry
+
+        self.record(tmp_path, "alpha")
+        tear(self.telemetry_path(tmp_path))
+        self.record(tmp_path, "beta")
+
+        rows = read_dependency_scope_telemetry(tmp_path)
+        markers = repair_rows(rows)
+        assert len(markers) == 1
+        assert "component_id" not in markers[0]
+
+    @skip_as_root
+    def test_a_write_failure_is_still_swallowed(self, tmp_path: Path) -> None:
+        """Telemetry must never block a factory run.
+
+        The ``"a+b"`` open widens what can fail: a log this process can
+        write but cannot read is refused where a plain ``"a"`` would
+        have appended to it blind. The refusal lands in the OSError
+        handler that was already there, so the caller still sees
+        nothing, which is the whole contract of this writer.
+        """
+        self.record(tmp_path, "a1")
+        self.telemetry_path(tmp_path).chmod(0o200)
+        try:
+            self.record(tmp_path, "a2")
+        finally:
+            self.telemetry_path(tmp_path).chmod(0o600)
+
+        assert self.read(tmp_path) == ["a1"]

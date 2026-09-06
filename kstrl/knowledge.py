@@ -29,6 +29,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from kstrl.appendio import JOURNAL_REPAIR_EVENT, append_records
 from kstrl.atomicio import atomic_write_text
 from kstrl.decompose import (
     AgentOutputTooLarge,
@@ -782,6 +783,30 @@ def record_dependency_scope_gap(
 
     Atomic-append best-effort -- write failures are swallowed (telemetry
     must never block a factory run).
+
+    #331: through ``appendio``, which repairs an unterminated tail
+    before appending onto it. Without that, a crash mid-write cost the
+    NEXT row as well as the torn one, measured through
+    :func:`read_dependency_scope_telemetry`: ``['alpha']`` where alpha
+    and beta were both recorded, and ``['a1']`` where a2 had lost only
+    its newline and a3 was appended onto it.
+
+    A repair ROW rather than a bare pad, because nothing counts these
+    rows against anything. The inbox takes a pad because its unreadable
+    lines are charged to an admission cap; this reader has no production
+    consumer at all, so a row costs nothing and is the durable trace
+    that a write here was interrupted.
+
+    No lock. ``build_knowledge_context`` is the only caller and runs in
+    the ORCHESTRATOR process: ``factory._submit_args`` calls it on the
+    scheduler thread before ``executor.submit``, so it is never reached
+    from a worker, and the run-level ``factory.lock`` excludes a second
+    orchestrator on the same root.
+
+    The ``"a+b"`` open widens what can fail - a telemetry log this
+    process can write but not read is refused rather than appended to
+    blind - and the ``OSError`` handler below is what that widening
+    lands in, unchanged.
     """
     if excluded_dep_count == 0 and withheld_fact_count == 0:
         return
@@ -791,11 +816,15 @@ def record_dependency_scope_gap(
         "excluded_dep_count": excluded_dep_count,
         "withheld_fact_count": withheld_fact_count,
     }
+    repair = {"timestamp": _telemetry_timestamp(), "event": JOURNAL_REPAIR_EVENT}
     target = knowledge_root / _E8_TELEMETRY_RELATIVE_PATH
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
-        with target.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(record, separators=(",", ":")) + "\n")
+        append_records(
+            target,
+            json.dumps(record, separators=(",", ":")) + "\n",
+            repair=json.dumps(repair, separators=(",", ":")) + "\n",
+        )
     except OSError:
         pass
 
