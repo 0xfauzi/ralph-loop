@@ -929,7 +929,7 @@ class JsonlSink:
                 # file since the first emit, so nothing can have torn it
                 # without this process being dead.
                 self._fh.write(line.encode("utf-8"))
-            self._fh.flush()
+                self._fh.flush()
 
     def _probe_and_write(self, line: str) -> IO[bytes]:
         """Open, probe and write the first line, returning the bound handle.
@@ -938,6 +938,17 @@ class JsonlSink:
         whole point of the method: :meth:`emit` binds ``self._fh`` only
         after this returns, so a first write that RAISES leaves the sink
         unbound and the next emit probes again.
+
+        THE FLUSH IS IN HERE, and that is not tidiness (#352 round 2,
+        F2). ``open_for_append`` returns a ``BufferedRandom`` with an
+        8 KiB buffer and an event line is smaller than that: measured, a
+        121-byte write leaves 0 bytes on disk until the flush. So an
+        out-of-space error surfaces at the FLUSH and not at the write,
+        and while the flush sat one line below the binding in
+        :meth:`emit`, the ``ENOSPC`` this docstring names as its own
+        example was the one case that still left the sink bound, in the
+        no-probe branch, on an unterminated tail. Everything the first
+        emit has to get right is under the one ``try`` now.
 
         Assigning first was a real hole. ``EventBus.emit`` catches every
         exception per sink and increments ``dropped``, which nothing in
@@ -960,6 +971,7 @@ class JsonlSink:
                 line,
                 repair=JournalRepaired(detail=REPAIR_DETAIL).to_json_line() + "\n",
             )
+            handle.flush()
         except BaseException:
             handle.close()
             raise

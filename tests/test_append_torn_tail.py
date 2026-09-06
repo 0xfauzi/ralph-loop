@@ -461,6 +461,70 @@ class TestJsonlSinkSurvivesATornTail:
 
         assert self.names_in(path) == [JOURNAL_REPAIR_EVENT, "component_started"]
 
+    def test_a_first_flush_that_raises_also_leaves_the_probe_to_the_next_emit(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """ENOSPC surfaces at the FLUSH, which is the case above's own example.
+
+        #352 round 2, F2. ``open_for_append`` returns a
+        ``BufferedRandom`` with an 8 KiB buffer and an event line is
+        smaller than that: measured, a 121-byte write leaves 0 bytes on
+        disk until ``flush``. So the out-of-space error the docstring
+        above picks out as its example does not reach ``write`` at all,
+        and while the flush sat outside ``_probe_and_write`` the sink
+        was already bound when it raised. The K1 defect re-entered
+        through the one line the K1 fix did not move.
+        """
+        import kstrl.events as events_mod
+
+        path = tmp_path / "events.jsonl"
+        path.write_bytes(b'{"event":"x"')  # a torn tail the first emit must repair
+
+        failures = [OSError(28, "No space left on device")]
+        real_open_for_append = events_mod.open_for_append
+        probes: list[Path] = []
+
+        def flush_fails_once(target: Path) -> Any:
+            probes.append(target)
+            handle = real_open_for_append(target)
+            real_flush = handle.flush
+
+            def flush() -> None:
+                if failures:
+                    raise failures.pop()
+                real_flush()
+
+            handle.flush = flush  # type: ignore[method-assign]
+            return handle
+
+        sink = self.sink_at(path)
+        with pytest.MonkeyPatch.context() as patched:
+            patched.setattr(events_mod, "open_for_append", flush_fails_once)
+            with pytest.raises(OSError, match="No space left"):
+                self.emit(sink, "c1")
+            assert sink._fh is None, (
+                "a first emit whose flush raised must leave the sink unbound, "
+                "or every later emit takes the no-probe branch"
+            )
+            self.emit(sink, "c2")
+        sink.close()
+
+        assert probes == [path, path], "the probe must be repeated on the next emit"
+        # Three records, not two, and that is measured rather than
+        # intended: ``handle.close()`` on the raise path flushes the
+        # buffer, so the first event's bytes land after all once the
+        # planted failure is spent. What this test is about is the
+        # BINDING. The line ``append_terminated`` wrote was complete and
+        # newline-terminated before the flush was ever called, so the
+        # second probe finds a whole file, writes one repair row rather
+        # than two, and nothing is concatenated.
+        assert self.names_in(path) == [
+            JOURNAL_REPAIR_EVENT,
+            "component_started",
+            "component_started",
+        ]
+
     def test_the_repair_row_is_not_an_unknown_event(self, tmp_path: Path) -> None:
         """``fold`` counts unknown events, and this is not one of them.
 
