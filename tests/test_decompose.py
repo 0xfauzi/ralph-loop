@@ -1419,6 +1419,26 @@ def _journal_with(tmp_path: Path, entries: list[dict[str, object]]) -> Evolution
     return journal
 
 
+def _journal_rows(tmp_path: Path) -> list[dict[str, Any]]:
+    """Every line of the journal file, parsed STRICTLY, in file order.
+
+    Not a second copy of any selection rule - it selects nothing. It is
+    here because ``get_spec_audits`` reads through
+    ``read_progress_events``, which is deliberately tolerant and SKIPS a
+    line it cannot parse. A test whose subject is what the WRITER put on
+    disk cannot ask that reader: a malformed row would be skipped and
+    the count would still come out right. The helper #337 deleted parsed
+    strictly as a side effect of being a copy; this keeps the strictness
+    and drops the copy.
+    """
+    journal = tmp_path / ".kstrl" / "evolution.jsonl"
+    return [
+        json.loads(line)
+        for line in journal.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
 class TestSpecIssuesPersistence:
     """R1.7: red-team output becomes a durable artifact + journal event."""
 
@@ -1516,6 +1536,7 @@ class TestSpecIssuesPersistence:
                 root_dir=tmp_path,
             )
 
+        assert len(_journal_rows(tmp_path)) == 1, "the writer put more than the audit on disk"
         events = journal_at(tmp_path).get_spec_audits()
         assert len(events) == 1
         assert events[0]["halted"] is True
@@ -1527,10 +1548,42 @@ class TestSpecIssuesPersistence:
             tmp_path,
             _single_component_output([_story()], spec_issues=[MINOR_ISSUE]),
         )
+        assert len(_journal_rows(tmp_path)) == 1, "the writer put more than the audit on disk"
         events = journal_at(tmp_path).get_spec_audits()
         assert len(events) == 1
         assert events[0]["halted"] is False
         assert events[0]["counts"] == {"blocker": 0, "major": 0, "minor": 1}
+
+    def test_the_event_type_on_disk_is_the_wire_value(self, tmp_path: Path) -> None:
+        """The one deliberate literal in the test tree, and why it is one.
+
+        Every other site writes the row and reads it back through
+        SPEC_ISSUES_EVENT, so renaming the constant renames both sides
+        and nothing goes red. Measured in round 1 of review on #337:
+        with SPEC_ISSUES_EVENT set to "spec_audit_row" and the two
+        guard-side literals updated the way somebody doing the rename
+        would update them, 437 passed and 1 xfailed while the journal
+        wrote an event_type no journal already on disk carries. Rows
+        already written are what makes the wire value not the constant's
+        to change, so it is pinned here, once, against the bytes.
+
+        Asserted as a substring of the file rather than as
+        ``row["event_type"] == ...`` because that second shape is
+        exactly what layer 2 of the event-name guard forbids, and one
+        deliberate site is not worth an allowlist in a layer that has
+        none.
+        """
+        self._run(
+            tmp_path,
+            _single_component_output([_story()], spec_issues=[MINOR_ISSUE]),
+        )
+
+        raw = (tmp_path / ".kstrl" / "evolution.jsonl").read_text(encoding="utf-8")
+
+        assert '"event_type":"spec_issues"' in raw, (
+            "the spec audit on disk no longer carries the wire value spec_issues. "
+            f"Renaming SPEC_ISSUES_EVENT does not rename rows already written: {raw}"
+        )
 
 
 class TestPrdValidationInsideRetryLoop:
@@ -2444,11 +2497,22 @@ class TestSpecConvergenceThroughDecompose:
     def test_journal_entries_still_carry_no_run_id(self, tmp_path: Path) -> None:
         """The report reads entries the run-windowed reader drops; if a
         run_id ever appears here, that reader would start windowing
-        spec audits by factory run and this feature would go quiet."""
-        self._run(tmp_path, [BLOCKER_ISSUE])
-        events = journal_at(tmp_path).get_spec_audits()
+        spec audits by factory run and this feature would go quiet.
 
-        assert events and all("run_id" not in e for e in events)
+        Read off the bytes rather than through ``get_spec_audits``: the
+        subject is what decompose PUT on disk, so a reader that dropped
+        or renamed an unknown key could answer this question "no run_id"
+        about rows that carry one, which is the failure the paragraph
+        above names. Every row this run writes is a spec audit
+        (``_record_spec_issues_event`` is decompose's only journal
+        write), so nothing is selected here and no selection rule is
+        copied.
+        """
+        self._run(tmp_path, [BLOCKER_ISSUE])
+        rows = _journal_rows(tmp_path)
+
+        assert rows, "the run wrote no journal rows, so this assertion pins nothing"
+        assert all("run_id" not in row for row in rows), rows
 
     def test_a_legacy_entry_without_run_id_does_not_break_the_read(
         self,
