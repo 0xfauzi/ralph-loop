@@ -702,6 +702,32 @@ class TestAutonomyReplayNamesAnUnreadableFile:
         assert "could not read the recorded run history" in result.output
         assert "INSUFFICIENT DATA" not in result.output
 
+    def test_a_field_over_the_csv_field_limit_reports_the_cause(
+        self, tmp_path: Path
+    ) -> None:
+        """#352 round 2, F1: ``_csv.Error`` is neither an ``OSError`` nor
+        a ``ValueError``, so it escaped this handler as a traceback.
+
+        ``experiment_rows`` refuses on the ``ValueError`` path now, which
+        is the path this handler already takes.
+        """
+        from kstrl.evolution import EXPERIMENTS_HEADER
+
+        width = len(EXPERIMENTS_HEADER.split("\t"))
+        fields = ["run-1", "2026-01-01T00:00:00", "x" * 200_000] + ["0"] * (width - 3)
+        path = tmp_path / "experiments.tsv"
+        path.write_text(EXPERIMENTS_HEADER + "\n" + "\t".join(fields) + "\n", encoding="utf-8")
+
+        result = CliRunner().invoke(
+            cli,
+            ["autonomy", "replay", "--experiments", str(path), "--no-color"],
+        )
+
+        assert result.exit_code == 2
+        assert "could not read the recorded run history" in result.output
+        assert "field larger" in result.output
+        assert "INSUFFICIENT DATA" not in result.output
+
 
 class TestBlankProjectName:
     """#338: an empty or whitespace-only --project-name is refused.

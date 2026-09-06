@@ -61,14 +61,66 @@ JOURNAL_SCHEMA_VERSION = 2
 SPEC_ISSUES_EVENT = "spec_issues"
 
 
+class ExperimentsDialect(csv.Dialect):
+    """The ON-DISK shape of experiments.tsv, in one place (#352 round 2).
+
+    The writer does not go through ``csv`` at all: ``record_run`` joins
+    its fields on this dialect's delimiter, and ``EXPERIMENTS_HEADER``
+    below is built the same way. So the delimiter is genuinely shared
+    and the quoting rules are a description of what that writer does,
+    which is nothing: it never quotes and it never escapes.
+
+    ``quoting = QUOTE_NONE`` is therefore the reader agreeing with the
+    writer rather than a new tolerance. The default dialect did not, and
+    the cost was measured in review of #352: a ``"`` at the start of any
+    field opens a quoted region that swallows every byte to the next
+    ``"``, so a file whose first run was named ``"proj`` returned NO
+    rows at 3 runs and raised ``_csv.Error: field larger than field
+    limit (131072)`` at 20,001. Neither reader caught that, because
+    ``_csv.Error`` is neither an ``OSError`` nor a ``ValueError``.
+
+    ``escapechar`` is ``None`` for the same reason. A tab or a newline
+    inside a field is therefore unrepresentable, which is residual 1 on
+    :func:`experiment_rows` and is a property of the writer, not of this
+    dialect: setting an escapechar here would only change how the reader
+    misreads a row the writer already wrote wrong.
+
+    ``lineterminator`` is what a ``csv.writer`` would emit and is unused
+    on the read side, where ``csv`` recognises all three endings
+    regardless. It is stated so the constant describes the whole file
+    rather than half of it.
+    """
+
+    delimiter = "\t"
+    quotechar = None
+    doublequote = False
+    escapechar = None
+    lineterminator = "\n"
+    quoting = csv.QUOTE_NONE
+    skipinitialspace = False
+
+
 # The header row record_run writes to experiments.tsv, at module scope so
 # that a test can assert against the columns the writer actually emits
-# rather than a shorter hand-typed row that csv.DictReader happens to
+# rather than a shorter hand-typed row a lenient reader happens to
 # tolerate. Files written before R3.1 keep their shorter header.
-EXPERIMENTS_HEADER = (
-    "run_id\ttimestamp\tproject\tcomponents_total\tcompleted\tfailed\t"
-    "skipped\tavg_iterations\tavg_duration_s\tretry_rate\tcommon_failure\t"
-    "total_tokens\ttotal_cost_usd\tunreported_calls"
+EXPERIMENTS_HEADER = ExperimentsDialect.delimiter.join(
+    (
+        "run_id",
+        "timestamp",
+        "project",
+        "components_total",
+        "completed",
+        "failed",
+        "skipped",
+        "avg_iterations",
+        "avg_duration_s",
+        "retry_rate",
+        "common_failure",
+        "total_tokens",
+        "total_cost_usd",
+        "unreported_calls",
+    )
 )
 
 
@@ -101,17 +153,20 @@ def experiment_rows(text: str) -> list[dict[str, Any]]:
     about, because "this writer never emits such a row" was the original
     claim here and it is not true.
 
-    1. A row this writer CAN emit is dropped. ``row`` is built by
-       f-string ``\t``-joining, not by ``csv.writer``, so a tab or a
-       newline in ``project_name`` or ``common_failure`` reaches the
-       file unescaped and nothing between the CLI and the write rejects
-       one (#347's callback rejects blank and whitespace-only names, not
-       embedded tabs). Measured on one ``record_run`` each: a project
-       named ``pro\tject`` rendered a row with shifted columns before
-       this filter and renders nothing now, and ``pro\nject`` produced
-       two rows and now produces none. Dropping beats rendering shifted
-       numbers to a ladder, so the filter is still the right call; the
-       claim was the defect.
+    1. A row this writer CAN emit is dropped. ``row`` is joined on
+       :class:`ExperimentsDialect`'s delimiter, not written by a
+       ``csv.writer``, so a tab or a newline in ``project_name`` or
+       ``common_failure`` reaches the file unescaped and nothing between
+       the CLI and the write rejects one (#347's callback rejects blank
+       and whitespace-only names, not embedded tabs). Measured on one
+       ``record_run`` each: a project named ``pro\tject`` rendered a row
+       with shifted columns before this filter and renders nothing now,
+       and ``pro\nject`` produced two rows and now produces none.
+       Dropping beats rendering shifted numbers to a ladder, so the
+       filter is still the right call; the claim was the defect. A
+       ``"`` used to belong on this list and no longer does: it damaged
+       every LATER row rather than its own, and that is what reading on
+       the writer's own dialect removed.
     2. A header that is NOT a prefix of the current one silently drops
        every row this writer appends. Measured with the first column
        renamed: an 11-column legacy header plus a fresh 14-field row
@@ -132,7 +187,32 @@ def experiment_rows(text: str) -> list[dict[str, Any]]:
     There is no counter for any of it, which is the fourth thing to
     know: ``[]`` from here means "no runs recorded", "the header does
     not match" and "every row was malformed" alike, and the trends tab
-    renders the same empty table for all three.
+    renders the same empty table for all three. A parse that cannot be
+    completed is deliberately NOT a fifth meaning of ``[]``: it raises.
+
+    WHAT THE DIALECT CANNOT REMOVE, and why the parse is guarded.
+    ``csv``'s field-size limit fires under ``QUOTE_NONE`` too, on any
+    single field longer than 131,072 characters, and it raises
+    ``_csv.Error``, which is neither an ``OSError`` nor a
+    ``ValueError``: measured, both ``isinstance`` checks answer False,
+    so it escaped ``get_experiment_trends`` (whose guard is around the
+    read, not the parse) and ``ks autonomy replay``'s handler alike.
+    CLAUDE.md's rule from #318 is that a parser's error taxonomy belongs
+    to the parser, so the clause here is ``except Exception`` exactly
+    rather than an enumeration of what ``csv`` is believed to raise, and
+    it converts to a ``ValueError``, which is the refusal path both
+    callers already take for an unreadable file. All of the I/O is
+    outside the guarded block for the same reason it is in
+    ``config.load_toml_document``: the caller does the reading, and the
+    only thing under the ``try`` is the parse.
+
+    That guard materialises every record before the width filter runs,
+    where the previous shape streamed. Measured on a 20,000-run file
+    (1.13 MB) rather than argued: 18.9 ms and a 21.1 MB peak against
+    15.0 ms and 17.1 MB, so 3.9 ms and 4.0 MB at twenty thousand runs.
+    Bought deliberately: streaming needs the clause twice, once on the
+    header and once on the rows, and two clauses is two messages and two
+    things to keep in step.
 
     Public because this file has TWO readers, not one:
     :meth:`EvolutionJournal.get_experiment_trends` renders it and
@@ -149,18 +229,21 @@ def experiment_rows(text: str) -> list[dict[str, Any]]:
     while this project's floor is 3.11. So a lone ``\r`` inside a field
     is an ``\n`` before it gets here, which residual 1 covers.
     """
-    reader = csv.reader(io.StringIO(text, newline=""), delimiter="\t")
+    buffer = io.StringIO(text, newline="")
     try:
-        header = next(reader)
-    except StopIteration:
+        records = list(csv.reader(buffer, ExperimentsDialect))
+    except Exception as exc:
+        raise ValueError(f"experiments.tsv could not be parsed: {exc}") from exc
+    if not records:
         return []
-    columns = EXPERIMENTS_HEADER.split("\t")
+    header, rows = records[0], records[1:]
+    columns = EXPERIMENTS_HEADER.split(ExperimentsDialect.delimiter)
     widths = {len(header)}
     if header == columns[: len(header)]:
         widths.add(len(columns))
     return [
         dict(zip(header, fields, strict=False))
-        for fields in reader
+        for fields in rows
         if fields and len(fields) in widths
     ]
 
@@ -1062,11 +1145,31 @@ class EvolutionJournal:
         else:
             total_tokens_col = total_cost_col = unreported_col = ""
 
-        row = (
-            f"{run_id}\t{timestamp}\t{manifest.project_name}\t{total}\t"
-            f"{completed}\t{failed}\t{skipped}\t{avg_iterations:.2f}\t"
-            f"{avg_duration:.1f}\t{retry_rate:.2f}\t{common_failure}\t"
-            f"{total_tokens_col}\t{total_cost_col}\t{unreported_col}"
+        # Joined on ExperimentsDialect's delimiter rather than on a
+        # literal tab, so the one constant the reader parses with is the
+        # one this row is built with. Identical bytes: the delimiter IS
+        # "\t". Not through a csv.writer, because under QUOTE_NONE with
+        # no escapechar a writer RAISES on a field holding a tab, and
+        # record_run's only handler is `except OSError`; that would turn
+        # residual 1 on experiment_rows from a dropped row into a lost
+        # run, which is the worse of the two.
+        row = ExperimentsDialect.delimiter.join(
+            (
+                run_id,
+                timestamp,
+                manifest.project_name,
+                str(total),
+                str(completed),
+                str(failed),
+                str(skipped),
+                f"{avg_iterations:.2f}",
+                f"{avg_duration:.1f}",
+                f"{retry_rate:.2f}",
+                common_failure,
+                total_tokens_col,
+                total_cost_col,
+                unreported_col,
+            )
         )
 
         try:
@@ -1704,13 +1807,32 @@ class EvolutionJournal:
         experiments.tsv raised straight out of ``EvolveScreen.on_mount``
         two lines after the #289 config banner, which is that issue's
         own crash from that issue's own screen.
+
+        The PARSE is guarded separately, and differently (#352 round 2).
+        A read failure here is silent because a missing file is the
+        ordinary state of a project that has recorded no runs, and
+        because ``experiment_rows`` already documents ``[]`` as meaning
+        three things. A parse refusal is not one of those three: it can
+        only come from a file that exists and decoded, so it is an
+        incident and it is logged with the path and the cause. The
+        return stays ``[]`` rather than propagating, because this is
+        called from ``EvolveScreen.reload`` on the Textual event loop,
+        where a raise is the #289 crash again.
         """
         try:
             text = self.config.experiments_path.read_text(encoding="utf-8")
         except (OSError, ValueError):
             return []
 
-        return experiment_rows(text)[-last_n:]
+        try:
+            return experiment_rows(text)[-last_n:]
+        except ValueError as exc:
+            logger.warning(
+                "experiments.tsv could not be parsed, so no runs are shown: %s: %s",
+                self.config.experiments_path,
+                exc,
+            )
+            return []
 
     # ------------------------------------------------------------------
     # get_repair_count

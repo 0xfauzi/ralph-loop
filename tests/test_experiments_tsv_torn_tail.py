@@ -194,3 +194,125 @@ class TestExperimentsTsvSurvivesATornTail:
         text = journal.config.experiments_path.read_text(encoding="utf-8")
         assert text.count(EXPERIMENTS_HEADER) == 1
         assert text.startswith(EXPERIMENTS_HEADER)
+
+
+class TestTheReaderUsesTheDialectTheWriterWrites:
+    """#352 round 2, F1: the parse quoted where the writer never does.
+
+    ``record_run`` builds its row by f-string tab-joining, so a ``"`` in
+    ``project_name`` reaches the file as a ``"``. The reader ran on
+    ``csv``'s default dialect, which reads that ``"`` as opening a
+    quoted field and then swallows every byte up to the next one:
+    measured on the head before this change, a three-run file whose
+    FIRST run was named ``"proj`` returned zero rows, and a 20,001-run
+    one raised ``_csv.Error: field larger than field limit (131072)``
+    out of both readers. ``_csv.Error`` is neither an ``OSError`` nor a
+    ``ValueError`` (both ``isinstance`` checks measured False), so it
+    escaped ``get_experiment_trends``, whose guard is around the read,
+    and ``ks autonomy replay``'s handler as well.
+
+    Two halves, and both are here because they fail differently: the
+    dialect removes the quoting mechanism, and the guard turns what the
+    dialect cannot remove into a refusal the callers already handle.
+    """
+
+    def rows(self, count: int, first_project: str = "p") -> str:
+        from kstrl.evolution import EXPERIMENTS_HEADER
+
+        width = len(EXPERIMENTS_HEADER.split("\t"))
+        lines = [EXPERIMENTS_HEADER]
+        for i in range(1, count + 1):
+            project = first_project if i == 1 else "p"
+            fields = [f"run-{i}", "2026-01-01T00:00:00", project] + ["0"] * (width - 3)
+            lines.append("\t".join(fields))
+        return "\n".join(lines) + "\n"
+
+    def test_a_project_name_starting_with_a_quote_keeps_every_later_row(self) -> None:
+        from kstrl.evolution import experiment_rows
+
+        rows = experiment_rows(self.rows(3, first_project='"proj'))
+
+        assert [r["run_id"] for r in rows] == ["run-1", "run-2", "run-3"]
+        assert rows[0]["project"] == '"proj'
+
+    def test_a_quote_inside_a_field_is_a_character_not_a_delimiter(self) -> None:
+        from kstrl.evolution import experiment_rows
+
+        rows = experiment_rows(self.rows(2, first_project='pro"ject'))
+
+        assert [r["project"] for r in rows] == ['pro"ject', "p"]
+
+    def test_twenty_thousand_rows_after_a_quote_are_all_returned(self) -> None:
+        """The size at which the default dialect stopped returning ``[]``
+        and started raising: one open quote makes every later byte one
+        field, and 20,001 rows is past ``csv``'s 128 KiB field limit."""
+        from kstrl.evolution import experiment_rows
+
+        rows = experiment_rows(self.rows(20001, first_project='"proj'))
+
+        assert len(rows) == 20001
+
+    def test_a_field_over_the_csv_field_limit_is_refused_not_raised_out(self) -> None:
+        """What the dialect cannot remove: the field-size limit fires
+        under ``QUOTE_NONE`` too, on a single field longer than 128 KiB.
+
+        A refusal on the ``ValueError`` path, which is the path both
+        readers' callers already handle, rather than a ``_csv.Error``
+        neither of them catches.
+        """
+        import csv
+
+        from kstrl.evolution import EXPERIMENTS_HEADER, experiment_rows
+
+        width = len(EXPERIMENTS_HEADER.split("\t"))
+        fields = ["run-1", "2026-01-01T00:00:00", "x" * 200_000] + ["0"] * (width - 3)
+        text = EXPERIMENTS_HEADER + "\n" + "\t".join(fields) + "\n"
+
+        with pytest.raises(ValueError) as caught:
+            experiment_rows(text)
+
+        assert not isinstance(caught.value, csv.Error)
+        assert "experiments.tsv" in str(caught.value)
+
+    def test_the_tui_reader_logs_the_refusal_instead_of_raising(
+        self,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """``EvolveScreen.reload`` calls this on the Textual event loop.
+
+        ``[]`` here already means three things (no runs, a header that
+        does not match, every row malformed), so a fourth silent meaning
+        would be the silent removal of a mechanism. The refusal is
+        logged with the path and the cause and the table renders empty.
+        """
+        from kstrl.evolution import EXPERIMENTS_HEADER
+
+        journal = TestExperimentsTsvSurvivesATornTail().journal_at(tmp_path)
+        path = journal.config.experiments_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        width = len(EXPERIMENTS_HEADER.split("\t"))
+        fields = ["run-1", "2026-01-01T00:00:00", "x" * 200_000] + ["0"] * (width - 3)
+        path.write_text(EXPERIMENTS_HEADER + "\n" + "\t".join(fields) + "\n", encoding="utf-8")
+
+        with caplog.at_level(logging.WARNING, logger="kstrl.evolution"):
+            assert journal.get_experiment_trends() == []
+
+        messages = [r.getMessage() for r in caplog.records]
+        assert [m for m in messages if str(path) in m and "field larger" in m]
+
+    def test_an_ordinary_file_logs_nothing(
+        self,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """The control: a warning on every load would be noise."""
+        journal = TestExperimentsTsvSurvivesATornTail().journal_at(tmp_path)
+        path = journal.config.experiments_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(self.rows(2), encoding="utf-8")
+
+        with caplog.at_level(logging.WARNING, logger="kstrl.evolution"):
+            assert len(journal.get_experiment_trends()) == 2
+
+        assert [r.getMessage() for r in caplog.records] == []

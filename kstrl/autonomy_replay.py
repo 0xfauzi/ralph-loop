@@ -183,7 +183,11 @@ def load_runs(path: Path) -> list[RunRecord]:
     that command never mutates ladder state.) The shared parser drops a
     row whose width does not fit the file's header.
 
-    MISSING is no runs; UNREADABLE is a refusal. ``OSError`` and
+    MISSING is no runs; UNREADABLE is a refusal, and UNPARSEABLE joins
+    it: ``experiment_rows`` raises a ``ValueError`` for a file ``csv``
+    cannot get to the end of, which before #352 round 2 was a
+    ``_csv.Error`` that neither this function's caller nor
+    ``get_experiment_trends`` caught. ``OSError`` and
     ``ValueError`` go to the caller, where 568bca4 let the ``OSError``
     out too. Swallowing them turned a permission error or a decode
     error into an empty population, and an empty population reads as
