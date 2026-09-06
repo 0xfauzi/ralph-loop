@@ -1045,7 +1045,7 @@ class TestSpecIssueRuns:
             {
                 "timestamp": "2026-08-29T00:00:00Z",
                 "project": project,
-                "event_type": "spec_issues",
+                "event_type": SPEC_ISSUES_EVENT,
                 "spec_file": "spec.md",
                 "halted": blockers > 0,
                 "counts": {"blocker": blockers, "major": 0, "minor": 0},
