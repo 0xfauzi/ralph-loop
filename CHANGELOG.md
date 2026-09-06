@@ -13,6 +13,47 @@ stage, runtime feedback, and an earned-autonomy ladder). See
 
 ### Fixed
 
+- Six more record files survive an interrupted write. A crash leaves a
+  tail with no newline, the next append concatenates onto it, and the
+  tolerant reader then drops BOTH lines: the fragment, which was never
+  readable, and the record written after it, which was. Each was
+  reproduced with a real tear, a real append and the production reader.
+  `progress.jsonl` lost the entry after the tear, and the reducer left a
+  component `running` when the lost row was its `component_completed`;
+  `events.jsonl` and `engineer.jsonl` lost the next event, and the fold
+  reported no components at all; the queue journal lost the transition
+  after it; the inbox lost the item after it; the dependency-scope
+  telemetry lost the row after it. A tail that lost only its terminator
+  is worse than a fragment, because the append destroys a whole record
+  as well as the new one: measured, two records for one interrupted
+  write. Every appender now writes through `kstrl/appendio.py`, which
+  probes the tail through the same file description it appends with and
+  repairs it in one write.
+
+- `experiments.tsv` no longer renders a corrupted run. It is the same
+  interrupted write as above, and it cost more than the JSONL files
+  because its reader displays the damage instead of dropping it: the
+  run after the tear was lost AND the run before it was rendered by
+  `ks evolve --status` and the TUI trends tab with its columns shifted,
+  a timestamp under `completed` and extra fields on the end. The file
+  now pads its own tail, with no marker row, because TSV has none a
+  reader would not render as a run, and `get_experiment_trends` drops
+  any row whose field count differs from the header.
+
+- The evolution journal's probe and append happen under one exclusive
+  lock (POSIX). They shared a file description, which removes the
+  path-level races but is not a lock, so a concurrent writer could
+  crash mid-line between this process's probe and its write, and two
+  processes repairing one tear each wrote a repair row. Measured, two
+  processes and 74 planted tears, eight runs of each arm: unlocked, 244
+  to 269 of 300 records readable and 76 to 86 rows; locked, 300 of 300
+  and exactly 74. The lock is `fcntl.LOCK_EX` on the journal's own
+  descriptor rather than a sibling lock file, because the journal is one
+  file with one writer function. Without `fcntl` there is no exclusion,
+  the same degradation the control, queue and factory locks already take
+  there, and `get_repair_count` and `docs/evolution-metrics.md` both say
+  which case they are describing.
+
 - `kstrl.toml` and the `KSTRL_*` environment are now resolved once, at
   command entry, before a command constructs anything. They used to be
   parsed lazily, by whichever config dataclass first needed its section,
@@ -79,6 +120,15 @@ stage, runtime feedback, and an earned-autonomy ladder). See
   instead.
 
 ### Added
+
+- The evolve screen reports repaired journal writes. `ks evolve
+  --status` has reported them since the repair was added and the TUI did
+  not, which was the gap: the argument for writing a durable
+  `journal_repair` row at all is that under the TUI the logger warning
+  goes to `orchestrator.log` where nobody is looking. A line above the
+  three tabs now carries the count, the path and which of the two
+  outcomes the line above each row is, in the CLI's own words. Silent at
+  zero, and it goes back to silent on reload when the count does.
 
 - The architect's non-blocker spec findings now reach the engineer. They
   were written to `scripts/kstrl/spec-issues.json` on every decompose and
