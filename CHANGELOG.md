@@ -209,9 +209,12 @@ stage, runtime feedback, and an earned-autonomy ladder). See
   to `adversarial_budget:setpoint` in the same sweep. It does not retry, and `ks
   serve` now classifies such a run as the existing terminal `budget_halt`
   verdict rather than as retryable infrastructure, so the queue item is not
-  requeued against a cap that starts again at zero. Two consequences of a halt:
-  every component depending on the halted one is skipped by the usual cascade,
-  and each halt files an inbox item. Advisory mode is unchanged and still
+  requeued against a cap that starts again at zero. Three consequences of a
+  halt: every component depending on the halted one is skipped by the usual
+  cascade, each halt files an inbox item, and because the verdict is terminal
+  `ks serve` poisons the queue item, so three under-budgeted runs in a row trip
+  `[serve] max_consecutive_poison` (default 3) and stop the daemon admitting
+  work. Advisory mode is unchanged and still
   records a `phase_skipped`, and the knowledge distiller is still skipped rather
   than halted in every mode because it is not a merge gate. Nothing changes for
   a default configuration: `max_adversarial_calls = 0` means unbounded, so the
