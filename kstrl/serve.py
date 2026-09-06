@@ -365,9 +365,8 @@ class ServeConfig:
             timeout = float(os.environ["KSTRL_SERVE_FACTORY_TIMEOUT"])
         if "KSTRL_SERVE_ALLOW_UNCOVERED_COST" in os.environ:
             uncovered = os.environ["KSTRL_SERVE_ALLOW_UNCOVERED_COST"] == "1"
-        # `get` with the toml value as the default rather than the `in
-        # os.environ` branch its five siblings use, and only because this
-        # method sits one branch under the cyclomatic ratchet. Same
+        # Not the `in os.environ` branch its six siblings use: a seventh
+        # would push this method past the cyclomatic ratchet. Same
         # semantics: int() of an int is that int, of a string parses it.
         open_prs = int(os.environ.get("KSTRL_SERVE_MAX_OPEN_PRS", open_prs))
 
@@ -1959,16 +1958,17 @@ def count_open_kstrl_prs(cwd: Path, *, limit: int = 100) -> int:
 
     The marker rather than a label, because it identifies every PR kstrl
     has ever opened, including the ones that predate the bound.
+
+    The spawn and its four transport failures belong to
+    :func:`~kstrl.intake_github.run_gh`, which is the package's one gh
+    invocation. Only the two shapes of a bad PAYLOAD are decided here.
     """
-    argv = ["gh", "pr", "list", "--state", "open", "--limit", str(limit), "--json", "number,body"]
-    try:
-        result = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, timeout=GH_TIMEOUT)
-    except subprocess.TimeoutExpired:
-        raise RuntimeError(f"gh pr list timed out after {GH_TIMEOUT}s") from None
-    except OSError as exc:
-        raise RuntimeError(f"gh pr list could not start: {exc}") from exc
-    if result.returncode != 0:
-        raise RuntimeError(f"gh pr list failed: {result.stderr.strip() or result.stdout.strip()}")
+    from kstrl.intake_github import run_gh
+
+    args = ["pr", "list", "--state", "open", "--limit", str(limit), "--json", "number,body"]
+    result = run_gh(args, timeout=GH_TIMEOUT, cwd=cwd)
+    if not result.ok:
+        raise RuntimeError(result.error)
     try:
         rows = json.loads(result.stdout)
     except ValueError as exc:

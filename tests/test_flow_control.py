@@ -21,6 +21,7 @@ import json
 import os
 import subprocess
 from pathlib import Path
+from subprocess import CompletedProcess
 from unittest.mock import patch
 
 import pytest
@@ -39,6 +40,7 @@ from kstrl.serve import (
     serve_cycle,
 )
 from kstrl.workqueue import ItemState
+from tests.helpers.astwalk import assert_census, folds_to, package_sources
 from tests.test_serve import _add, _no_spend, _queue, _stub_runner  # noqa: F401
 from tests.test_serve_seam import _write_executable
 
@@ -63,36 +65,50 @@ def _boom(_: Path) -> int:
     raise AssertionError("the counter was called; the gate should have skipped it")
 
 
+def _put_gh_on_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: str) -> None:
+    """Make ``body`` the `gh` that a PATH lookup finds.
+
+    PATH rather than patching `subprocess.run`, so the lookup, the
+    process and the decode are all the real ones.
+    """
+    bindir = tmp_path / "fakebin"
+    bindir.mkdir(exist_ok=True)
+    _write_executable(bindir / "gh", body)
+    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
+
+
 def _install_fake_gh(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     rows: list[dict[str, object]],
 ) -> Path:
-    """Put a `gh` on PATH that prints ``rows``; return the JSON file.
+    """A `gh` that prints ``rows``; returns the JSON file it reads.
 
-    PATH rather than patching `subprocess.run`, so the lookup, the
-    process and the decode are all the real ones. Rewrite the returned
-    file to change what the next call sees.
+    Rewrite the returned file to change what the next call sees.
     """
-    bindir = tmp_path / "fakebin"
-    bindir.mkdir(exist_ok=True)
-    _write_executable(bindir / "gh", _FAKE_GH)
+    _put_gh_on_path(tmp_path, monkeypatch, _FAKE_GH)
     payload = tmp_path / "fake_gh.json"
     payload.write_text(json.dumps(rows), encoding="utf-8")
     monkeypatch.setenv("FAKE_GH_JSON", str(payload))
-    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
     return payload
 
 
 def _install_marker_gh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Put a `gh` on PATH that touches a marker and exits 99."""
-    bindir = tmp_path / "fakebin"
-    bindir.mkdir(exist_ok=True)
-    _write_executable(bindir / "gh", _FAKE_GH_MARKER)
+    """A `gh` that touches a marker and exits 99; returns the marker."""
+    _put_gh_on_path(tmp_path, monkeypatch, _FAKE_GH_MARKER)
     marker = tmp_path / "gh_was_called"
     monkeypatch.setenv("FAKE_GH_MARKER_PATH", str(marker))
-    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
     return marker
+
+
+#: Where `gh` is actually spawned. `count_open_kstrl_prs` goes through
+#: `intake_github.run_gh`, so patching `kstrl.serve.subprocess.run` would
+#: patch nothing and the tests would silently reach the real `gh`.
+_GH_RUN = "kstrl.intake_github.subprocess.run"
+
+
+def _completed(returncode: int, *, stdout: str = "", stderr: str = "") -> CompletedProcess[str]:
+    return CompletedProcess(args=["gh"], returncode=returncode, stdout=stdout, stderr=stderr)
 
 
 def _marked(number: int) -> dict[str, object]:
@@ -196,18 +212,11 @@ class TestCheckOpenPrBound:
 class TestCountOpenKstrlPrs:
     def test_filters_by_marker(self, tmp_path: Path) -> None:
         rows = [_marked(1), _unmarked(2), _marked(3)]
-        completed = subprocess.CompletedProcess(
-            args=["gh"],
-            returncode=0,
-            stdout=json.dumps(rows),
-            stderr="",
-        )
 
-        with patch("kstrl.serve.subprocess.run", return_value=completed) as run:
+        with patch(_GH_RUN, return_value=_completed(0, stdout=json.dumps(rows))) as run:
             assert count_open_kstrl_prs(tmp_path) == 2
 
-        argv = run.call_args.args[0]
-        assert argv == [
+        assert run.call_args.args[0] == [
             "gh",
             "pr",
             "list",
@@ -219,57 +228,51 @@ class TestCountOpenKstrlPrs:
             "number,body",
         ]
         assert run.call_args.kwargs["timeout"] == GH_TIMEOUT
-        assert run.call_args.kwargs["cwd"] == tmp_path
+        assert run.call_args.kwargs["cwd"] == str(tmp_path)
 
     def test_limit_reaches_the_argv(self, tmp_path: Path) -> None:
-        completed = subprocess.CompletedProcess(args=["gh"], returncode=0, stdout="[]", stderr="")
-        with patch("kstrl.serve.subprocess.run", return_value=completed) as run:
+        with patch(_GH_RUN, return_value=_completed(0, stdout="[]")) as run:
             assert count_open_kstrl_prs(tmp_path, limit=7) == 0
-        argv = run.call_args.args[0]
-        assert "7" in argv
+        assert "7" in run.call_args.args[0]
 
-    def test_raises_on_gh_error(self, tmp_path: Path) -> None:
-        completed = subprocess.CompletedProcess(
-            args=["gh"],
-            returncode=1,
-            stdout="",
-            stderr="gh: auth required\n",
-        )
-        with patch("kstrl.serve.subprocess.run", return_value=completed):
-            with pytest.raises(RuntimeError, match="auth required"):
-                count_open_kstrl_prs(tmp_path)
+    @pytest.mark.parametrize(
+        ("patch_kwargs", "match"),
+        [
+            ({"return_value": _completed(1, stderr="gh: auth required\n")}, "auth required"),
+            (
+                {"side_effect": subprocess.TimeoutExpired(cmd=["gh"], timeout=GH_TIMEOUT)},
+                "timed out",
+            ),
+            ({"side_effect": FileNotFoundError("gh")}, "could not run"),
+            ({"return_value": _completed(0, stdout="not json")}, "unparseable"),
+            ({"return_value": _completed(0, stdout='{"number": 1}')}, "expected a list"),
+        ],
+        ids=["gh error", "timeout", "exec failed", "unparseable", "non-list payload"],
+    )
+    def test_every_failure_shape_raises(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        patch_kwargs: dict[str, object],
+        match: str,
+    ) -> None:
+        """Each failure the counter can meet becomes a RuntimeError.
 
-    def test_raises_on_timeout(self, tmp_path: Path) -> None:
-        with patch(
-            "kstrl.serve.subprocess.run",
-            side_effect=subprocess.TimeoutExpired(cmd=["gh"], timeout=GH_TIMEOUT),
-        ):
-            with pytest.raises(RuntimeError, match="timed out"):
-                count_open_kstrl_prs(tmp_path)
+        `shutil.which` is pinned so these say the same thing on a machine
+        with no `gh`; the missing-binary case is its own test below.
+        """
+        monkeypatch.setattr("shutil.which", lambda _: "/usr/bin/gh")
+        with patch(_GH_RUN, **patch_kwargs), pytest.raises(RuntimeError, match=match):
+            count_open_kstrl_prs(tmp_path)
 
-    def test_raises_when_gh_is_missing(self, tmp_path: Path) -> None:
-        with patch(
-            "kstrl.serve.subprocess.run",
-            side_effect=FileNotFoundError("gh"),
-        ):
-            with pytest.raises(RuntimeError, match="could not start"):
-                count_open_kstrl_prs(tmp_path)
-
-    def test_raises_on_unparseable_output(self, tmp_path: Path) -> None:
-        completed = subprocess.CompletedProcess(
-            args=["gh"], returncode=0, stdout="not json", stderr=""
-        )
-        with patch("kstrl.serve.subprocess.run", return_value=completed):
-            with pytest.raises(RuntimeError, match="unparseable"):
-                count_open_kstrl_prs(tmp_path)
-
-    def test_raises_on_a_non_list_payload(self, tmp_path: Path) -> None:
-        completed = subprocess.CompletedProcess(
-            args=["gh"], returncode=0, stdout='{"number": 1}', stderr=""
-        )
-        with patch("kstrl.serve.subprocess.run", return_value=completed):
-            with pytest.raises(RuntimeError, match="expected a list"):
-                count_open_kstrl_prs(tmp_path)
+    def test_raises_when_gh_is_not_installed(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr("shutil.which", lambda _: None)
+        with pytest.raises(RuntimeError, match="not installed"):
+            count_open_kstrl_prs(tmp_path)
 
     def test_counts_through_a_real_subprocess(
         self,
@@ -433,13 +436,40 @@ class TestConfig:
 # ---------------------------------------------------------------------------
 
 
-class TestFooterMarker:
-    def test_both_footer_sites_use_the_constant(self) -> None:
-        """The counter's filter and the writer's footer are one string.
+#: The marker is spelled ONCE in ``kstrl/``: the constant's own
+#: definition. Anything else is a second spelling, which is the drift the
+#: hoist exists to prevent - a reader in another module reaches for the
+#: nearest spelling, and a footer reword then makes the bound count zero
+#: while every test stays green.
+EXPECTED_MARKER_SPELLINGS: dict[str, int] = {"pr.py": 1}
 
-        Hard-coding the literal in `pr.py` and again in the counter is
-        how a footer reword silently makes the bound count zero.
-        """
+
+class TestFooterMarker:
+    def test_the_marker_is_spelled_once_in_the_package(self) -> None:
+        """Layer 1, the net: every expression in ``kstrl/`` that folds to
+        the marker, counted per module, whatever it does with the string
+        afterwards. Package-wide rather than scoped to ``pr.py``, because
+        the modules that will grow a second spelling are the READERS -
+        this bound, the dampener, the polled steering channel (#231) -
+        and a guard that only reads ``pr.py`` cannot see them."""
+        assert_census(
+            sources=package_sources(),
+            sees=folds_to(PR_FOOTER_MARKER),
+            expected=EXPECTED_MARKER_SPELLINGS,
+            control=f'footer = "{PR_FOOTER_MARKER}"\n',
+            message=(
+                "The set of places spelling the kstrl PR footer changed. A "
+                "reader identifying a kstrl-authored PR must import "
+                "PR_FOOTER_MARKER from kstrl.pr, not repeat the literal: the "
+                "open-PR bound counts bodies containing it, so a second "
+                "spelling that drifts makes the count silently zero."
+            ),
+        )
+
+    def test_both_footer_sites_use_the_constant(self) -> None:
+        """Layer 2, the message: ``pr.py``'s two writers still go through
+        the constant. The census above cannot say this - deleting a
+        footer site leaves the spelling count at 1 - and "you wrote the
+        footer without the constant" is the wrong message for it."""
         source = Path(kstrl.pr.__file__).read_text(encoding="utf-8")
         assert source.count("lines.append(PR_FOOTER_MARKER)") == 2
-        assert source.count(f'"{PR_FOOTER_MARKER}"') == 1
