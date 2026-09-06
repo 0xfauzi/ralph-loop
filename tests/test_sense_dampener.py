@@ -545,3 +545,116 @@ def test_a_missing_collection_is_refused_not_read_as_empty(key: str) -> None:
     with pytest.raises(dampener.BaselineError) as excinfo:
         dampener.Baseline.from_document(document)
     assert key in str(excinfo.value)
+
+
+# --- the dogfood workflow -----------------------------------------------
+#
+# Parsed, not grepped. A substring assertion passes on a file whose YAML is
+# broken, which is the guard-goes-blind shape this repository has eleven logged
+# instances of. Every assertion below reads the PARSED document.
+
+WORKFLOW_PATH = Path(__file__).resolve().parents[1] / ".github/workflows/sense-dampener.yml"
+
+
+def _workflow() -> dict[str, Any]:
+    import yaml
+
+    document = yaml.safe_load(WORKFLOW_PATH.read_text(encoding="utf-8"))
+    assert isinstance(document, dict)
+    return document
+
+
+def _steps() -> list[dict[str, Any]]:
+    jobs = _workflow()["jobs"]
+    return [step for job in jobs.values() for step in job["steps"]]
+
+
+def _runs() -> list[str]:
+    return [str(step["run"]) for step in _steps() if "run" in step]
+
+
+def test_the_workflow_triggers_on_pull_requests_only() -> None:
+    document = _workflow()
+    # YAML 1.1 reads a bare `on` as the boolean true, so the key is True and
+    # not "on". Read both rather than pretend one of them.
+    triggers = document.get("on", document.get(True))
+
+    assert list(triggers) == ["pull_request"]
+    assert triggers["pull_request"]["types"] == ["opened", "synchronize", "reopened"]
+    # pull_request_target would run the pull request's own test suite with a
+    # write token. It is refused outright, not merely absent by accident.
+    assert "pull_request_target" not in triggers
+
+
+def test_the_workflow_asks_for_least_privilege() -> None:
+    assert _workflow()["permissions"] == {"contents": "read", "pull-requests": "write"}
+
+
+def test_the_workflow_runs_once_per_pull_request() -> None:
+    """The job runs the whole test suite a second time on every push. One run
+    per pull request, superseded ones cancelled, is what keeps that bounded."""
+    concurrency = _workflow()["concurrency"]
+
+    assert concurrency["cancel-in-progress"] is True
+    assert "pull_request.number" in concurrency["group"]
+
+
+def test_every_job_is_bounded() -> None:
+    for job in _workflow()["jobs"].values():
+        assert isinstance(job["timeout-minutes"], int)
+
+
+def test_the_checkout_is_deep_enough_to_reach_the_base() -> None:
+    """`ks sense` asks git for the diff STRICTLY and exits 2 when it cannot get
+    one, so a shallow clone makes this job fail on every pull request."""
+    checkouts = [s for s in _steps() if str(s.get("uses", "")).startswith("actions/checkout@")]
+
+    assert len(checkouts) == 1
+    assert checkouts[0]["with"]["fetch-depth"] == 0
+    assert checkouts[0]["with"]["persist-credentials"] is False
+
+
+def test_the_workflow_finds_its_comment_by_the_marker_constant() -> None:
+    """Compared against the CONSTANT, so moving the marker in one place and
+    not the other is a red test rather than a second comment on every PR."""
+    assert any(dampener.MARKDOWN_MARKER in run for run in _runs())
+
+
+def test_the_workflow_is_advisory() -> None:
+    """The contract in one line: no step asks the dampener to fail the job.
+
+    Graduating to blocking is adding this flag, deliberately, in its own
+    change. It must not arrive by accident.
+    """
+    assert not any("--fail-on-regression" in run for run in _runs())
+
+
+def test_the_workflow_measures_at_the_timeout_the_baseline_was_written_at() -> None:
+    """A baseline and a comparison measured at different verify timeouts are
+    not a comparison: this repository's suite times out at the default 300s,
+    and a timed-out check contributes no signatures at all."""
+    sense_steps = [s for s in _steps() if "uv run ks sense" in str(s.get("run", ""))]
+
+    assert len(sense_steps) == 1
+    assert sense_steps[0]["env"]["KSTRL_TIMEOUT_VERIFY"] == "1800"
+    assert "--compare-baseline" in sense_steps[0]["run"]
+    assert "--format markdown" in sense_steps[0]["run"]
+
+
+def test_the_comment_step_is_guarded_for_forks() -> None:
+    """A fork pull request gets a read-only token whatever `permissions:`
+    says. The guard is what keeps that a skipped step rather than a red job,
+    and the step summary is what its author reads instead."""
+    comment_steps = [s for s in _steps() if "issues/comments" in str(s.get("run", ""))]
+    summary_steps = [s for s in _steps() if "GITHUB_STEP_SUMMARY" in str(s.get("run", ""))]
+
+    assert len(comment_steps) == 1
+    assert "head.repo.full_name == github.repository" in comment_steps[0]["if"]
+    assert summary_steps and all("if" not in step for step in summary_steps)
+
+
+def test_the_job_fails_only_when_the_sensor_could_not_run() -> None:
+    failing = [s for s in _steps() if "exit 1" in str(s.get("run", ""))]
+
+    assert len(failing) == 1
+    assert failing[0]["if"] == "steps.sense.outputs.rc == '2'"
