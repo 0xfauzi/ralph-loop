@@ -82,6 +82,13 @@ def _arguments_reversed(comparison: Comparison) -> bool:
     while the command only printed; it costs a level now. False whenever
     the order cannot be established, so an unusual timestamp is never
     grounds for refusing to act.
+
+    The advisory item is suppressed along with the demotion, deliberately:
+    what this detects is that the comparison itself is inverted, so the
+    ``calibration_drift`` item it would open describes a regression that
+    did not happen. An operator reading the inbox would have no way to
+    tell that row from a real one, and the printed refusal is on the
+    surface the person who typed the command is looking at.
     """
     old_at = _parsed(comparison.old.timestamp)
     new_at = _parsed(comparison.new.timestamp)
@@ -106,13 +113,42 @@ def _comparison_id(comparison: Comparison) -> str:
     the regression itself. The digest says in the key how it was derived,
     and it dedupes on what was MEASURED, which is the property the
     timestamps were standing in for.
+
+    "What was measured" is the whole RATE TABLE, both sides of it, not
+    the failure lines. A floor failure quotes only the new rate ("role
+    'security' detection rate 0.60 is below its floor 0.80"), so two
+    different old baselines whose difference sits in a role that does not
+    fail produce byte-identical failure text - and a digest over that
+    text alone put two different comparisons on one key, which is the
+    same collision the sentinel caused, one field over.
     """
     old_ts = comparison.old.timestamp
     new_ts = comparison.new.timestamp
     if UNKNOWN_TIMESTAMP in (old_ts, new_ts):
-        digest = hashlib.sha256("\n".join(comparison.failures).encode("utf-8")).hexdigest()
-        return f"sha256-{digest[:16]}"
+        return f"sha256-{_measurement_digest(comparison)[:16]}"
     return f"{old_ts}:{new_ts}"
+
+
+def _measurement_digest(comparison: Comparison) -> str:
+    """A digest of both baselines' numbers, in the comparison's own order.
+
+    The paths are deliberately not in it: the identity is the
+    measurement, and the same pair of files re-read has to dedupe.
+    """
+    material = "\n".join(
+        [
+            *(
+                f"role {delta.role} {delta.old_rate} -> {delta.new_rate}"
+                for delta in comparison.role_deltas
+            ),
+            *(
+                f"category {delta.role}/{delta.category} {delta.old_rate} -> {delta.new_rate}"
+                for delta in comparison.category_deltas
+            ),
+            *comparison.failures,
+        ]
+    )
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
 def _already_demoted_for(state: AutonomyState, comparison_id: str) -> bool:
@@ -162,10 +198,14 @@ def _open_drift_item(root_dir: Path, evidence: dict[str, Any]) -> None:
             dedupe_key=f"calibration:{comparison_id}",
             evidence=evidence,
         )
-    except (OSError, ValueError, ControlStateError) as exc:
-        # ControlStateError is a RuntimeError, so it escapes the
-        # (OSError, ValueError) pair the inbox sites were written with,
-        # and Inbox._append takes the control lock on every write.
+    except (OSError, TypeError, ValueError, ControlStateError) as exc:
+        # The callee's surface. ControlStateError is a RuntimeError, so
+        # it escapes the (OSError, ValueError) pair the inbox sites were
+        # written with, and Inbox._append takes the control lock on every
+        # write. TypeError is InboxConfig.load's per-key cast, the same
+        # one report_to_ladder catches on the ladder's config twenty-five
+        # lines above; without it a valid document with one wrong VALUE
+        # left a measurement command as a traceback.
         print(f"warning: inbox write failed (non-fatal): {exc}", file=sys.stderr)
 
 

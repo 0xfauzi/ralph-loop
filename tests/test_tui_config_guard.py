@@ -115,10 +115,20 @@ def _kstrl_domain_errors() -> list[type[BaseException]]:
     SPELL ``RuntimeError``, which is the census this file pins, and the
     two that now derive from one of those would otherwise have dropped
     out of the behaviour check below without any of them changing what
-    ``raise_if_defect`` does with them. ``__subclasses__`` is exact here
-    because the comprehension has already imported every module in the
-    package.
+    ``raise_if_defect`` does with them.
+
+    Every module in the package is imported FIRST, on its own line,
+    rather than as a side effect of the comprehension below. The
+    comprehension imports one module per NAME it finds, so a module that
+    declares no direct ``RuntimeError`` subclass was never imported by
+    it: measured on this package, 27 of 130 modules stayed unimported in
+    a process that already had 100 of them loaded for other reasons. A
+    domain error declared in one of those was invisible to
+    ``__subclasses__``, so the sentence claiming this walk is exact was
+    the only thing making it exact.
     """
+    for path in astwalk.package_sources():
+        importlib.import_module(astwalk.module_name(path))
     direct = [
         getattr(importlib.import_module(astwalk.module_name(path)), name)
         for path in astwalk.package_sources()

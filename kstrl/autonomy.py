@@ -160,6 +160,24 @@ def _warn_rejected_state(path: Path, reason: str) -> str:
     return message
 
 
+def _warn_refused_save(path: Path, reason: str) -> str:
+    """Warn that a degraded state was NOT written back; return the sentence.
+
+    Same shape as ``_warn_rejected_state``: one string, warned here and
+    returned so a caller holding a ``UI`` can put the identical text on
+    the surface an operator is actually watching. Nothing is written, so
+    repeated runs cannot pile up a record of this; what makes it visible
+    on every run is that the refusal is re-reported every time a save is
+    attempted, keyed by the file and the cause an operator has to fix.
+    """
+    message = (
+        f"autonomy: ladder state is degraded ({reason}); refusing to overwrite {path}, "
+        "which is the only record an operator can repair"
+    )
+    warnings.warn(message, RuntimeWarning, stacklevel=3)
+    return message
+
+
 def _require_int(data: dict[str, Any], key: str, default: int) -> int:
     """Read an int field strictly: a wrong TYPE is a rejection, not a coerce.
 
@@ -427,8 +445,30 @@ class AutonomyState:
             return cls(degraded_reason=_warn_rejected_state(path, str(exc)))
         return state
 
-    def save(self, root_dir: Path) -> None:
-        """Atomic write, through the one helper that owns the pattern (#291)."""
+    def save(self, root_dir: Path) -> str | None:
+        """Atomic write, through the one helper that owns the pattern (#291).
+
+        Refuses when this state came back from a ``load`` that failed
+        closed. Saving a fresh L1 over damaged bytes destroys the only
+        thing an operator could have repaired, and the counters the save
+        would carry were lost with the file they came from anyway. The
+        next ``load`` would then find a clean file, so nothing would ever
+        report the damage again.
+
+        The refusal lives HERE, in the one function that writes
+        ``autonomy.json``, rather than in the callers that remembered to
+        ask: a branch-by-branch guard is only closed over the branches
+        someone enumerated, and the branch an ordinary run takes was not
+        one of them. ``tests/test_autonomy_one_writer.py`` pins that this
+        is the only writer.
+
+        Returns None when the file was written, and the refusal sentence
+        when it was not, so a caller holding a ``UI`` can report it on
+        the surface the operator is watching rather than only as a
+        ``RuntimeWarning``.
+        """
+        if self.degraded_reason is not None:
+            return _warn_refused_save(self.path_for(root_dir), self.degraded_reason)
         ensure_control_state(root_dir)
         path = self.path_for(root_dir)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -446,6 +486,7 @@ class AutonomyState:
         }
         with control_lock(root_dir):
             atomic_write_json(path, payload)
+        return None
 
     # -- transitions -------------------------------------------------------
     def _reset_level_counters(self) -> None:
@@ -622,14 +663,17 @@ def _strict_bool(section: Mapping[str, Any], key: str, default: bool) -> bool:
 
     ``bool("false")`` is True, so the ``bool(section[key])`` reading this
     package uses everywhere else arms a switch the operator wrote
-    ``"false"`` against. The two keys that use this one revoke autonomy,
-    and a typo that ARMS a safety switch is worse than one that disarms
-    it, so a non-boolean is named and refused rather than coerced.
+    ``"false"`` against. All three keys that use this one arm or revoke
+    autonomy, and a typo that ARMS a safety switch is worse than one that
+    disarms it, so a non-boolean is named and refused rather than
+    coerced.
 
-    Deliberately local to those two keys. The coercion is repo-wide (29
-    ``bool(section[...])`` sites in ``kstrl/``, counted by grep) and
-    tightening all of them changes how existing configs load, which is
-    its own change with its own guard.
+    Deliberately local to ``[autonomy]``'s three booleans: the two
+    revocation switches and ``enabled``, which is the switch that arms
+    them and can therefore only fail in the arming direction. The
+    coercion is repo-wide (29 ``bool(section[...])`` sites in ``kstrl/``,
+    counted by grep) and tightening the rest changes how existing configs
+    load, which is its own change with its own guard.
     """
     if key not in section:
         return default
@@ -708,7 +752,7 @@ class AutonomyConfig:
             root_dir = Path.cwd()
         section = load_toml_section(resolve_config_file(root_dir), "autonomy")
         defaults = cls()
-        enabled = bool(section["enabled"]) if "enabled" in section else defaults.enabled
+        enabled = _strict_bool(section, "enabled", defaults.enabled)
         max_level = int(section["max_level"]) if "max_level" in section else defaults.max_level
         demote_calibration = _strict_bool(
             section,
@@ -864,7 +908,13 @@ def commit_transition(
     ``bus`` is present only inside a factory run; CLI transitions have no
     run stream, so the evolution journal is their durable record.
     """
-    state.save(root_dir)
+    if state.save(root_dir) is not None:
+        # The state save is the load-bearing one, and it refuses to
+        # overwrite a degraded file. Journalling and emitting a
+        # transition the ladder did not take would record a level
+        # nothing holds, which is the drift this function exists to
+        # prevent. ``save`` has already warned, naming the file.
+        return
 
     from kstrl.evolution import JOURNAL_SCHEMA_VERSION, EvolutionConfig, EvolutionJournal
 
@@ -919,6 +969,21 @@ def commit_transition(
         )
 
 
+def save_ladder_state(state: AutonomyState, root_dir: Path, ui: UI) -> None:
+    """Persist ladder state, reporting a refused save on the run's surface.
+
+    ``AutonomyState.save`` is what decides: it refuses to write over a
+    file ``load`` already failed closed on, and warns through
+    ``warnings.warn``, which nobody watching a run is reading. Putting
+    the same sentence on the UI is the one thing every caller then has
+    to remember, so it is here instead, in the one place both the
+    demoting path and the ordinary path go through.
+    """
+    refused = state.save(root_dir)
+    if refused is not None:
+        ui.warn(refused)
+
+
 def apply_demotion(
     root_dir: Path,
     trigger: DemotionTrigger,
@@ -936,11 +1001,13 @@ def apply_demotion(
     repeated trigger there is a no-op rather than an error. The state is
     still saved on that path, because the caller's own counters (a policy
     violation, say) were mutated before the demotion was attempted and
-    they are what blocks the next promotion. One exception, warned about:
+    they are what blocks the next promotion. One exception, decided by
+    ``AutonomyState.save`` rather than here so that every caller gets it:
     a state that ``load`` already failed closed on is not written back,
     because saving a fresh L1 over damaged bytes destroys the only thing
-    an operator could have repaired, and the counters that save would
-    carry were lost with the file they came from anyway.
+    an operator could have repaired. The refusal is reported on this
+    caller's ``ui`` as well as warned, because the operator is watching
+    the run, not the warning stream.
 
     ``state`` is for callers that already hold a mutated, unsaved state.
     ``factory._record_autonomy_outcome`` counts the run's violations on an
@@ -964,17 +1031,7 @@ def apply_demotion(
     trigger_text = trigger.label.replace("_", " ")
     record = state.demote(trigger, reason, evidence=evidence)
     if record is None:
-        if state.degraded_reason is None:
-            state.save(root_dir)
-        else:
-            # ``load`` fails closed to a fresh L1 when the stored record
-            # is damaged, and those bytes are the only thing an operator
-            # could repair. Saving here replaces them with an empty
-            # ladder, and the counters that save would carry were lost
-            # with the file they were read from.
-            ui.warn(
-                f"Autonomy: ladder state is degraded ({state.degraded_reason}); not overwriting it"
-            )
+        save_ladder_state(state, root_dir, ui)
         ui.warn(f"Autonomy: {trigger_text} recorded ({reason}); already at L1, nothing to revoke")
         return None
     commit_transition(state, record, root_dir, bus=bus, run_id=run_id)
@@ -997,11 +1054,17 @@ def apply_demotion(
                     **record.evidence,
                 },
             )
-    except (OSError, ValueError, ControlStateError) as exc:
+    except (OSError, TypeError, ValueError, ControlStateError) as exc:
+        # The callee's surface, not an enumeration of believed causes.
         # ControlStateError is a RuntimeError, so the (OSError,
         # ValueError) pair every inbox site was written with does not
         # catch it - and Inbox._append takes the control lock on every
-        # write, which is where it comes from.
+        # write, which is where it comes from. TypeError is
+        # InboxConfig.load's: it casts per key, so a TOML date or array
+        # in [inbox] raises it. Escaping HERE is the worst of the six
+        # sites, because commit_transition has already saved the
+        # demotion: the level would be revoked with no notice, no
+        # DEMOTED line and a traceback in place of the caller's return.
         ui.warn(f"Inbox write failed (non-fatal): {exc}")
     ui.warn(
         f"Autonomy DEMOTED L{record.from_level} -> L{record.to_level} "

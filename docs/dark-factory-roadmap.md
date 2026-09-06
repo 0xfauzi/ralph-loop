@@ -428,7 +428,8 @@ exists and its output over historical `experiments.tsv` is captured here.
 Status: `[x]` - Shipped in `kstrl/inbox.py` + `ks inbox` +
 `kstrl/tui/screens/inbox.py`. Append-only `.kstrl/inbox.jsonl` folded on
 read; item kinds policy_exception / merge_gate / halted_run /
-budget_overrun / demotion_notice / calibration_drift / test_adequacy;
+budget_overrun / demotion_notice / calibration_drift / test_adequacy /
+health_breach (added with its emitter in #232);
 dedupe by key, snooze with a TTL that RETURNS the item, and an open-item
 cap that R8.6 will consult before admitting queue work.
 

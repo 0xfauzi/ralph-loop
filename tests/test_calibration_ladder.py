@@ -20,11 +20,13 @@ from typing import Any
 import pytest
 
 from kstrl.autonomy import AutonomyLevel, AutonomyState
+from kstrl.calibration import compare_baselines, load_baseline
 from kstrl.calibration_ladder import LADDER_DISABLED_LINE
 from kstrl.inbox import Inbox, ItemKind
 from kstrl.statedir import ControlUnavailableError
 from tests.helpers.bad_toml import TOML_PARSE_FAULTS
 from tests.helpers.demotion import (
+    ARCHITECT_MISSED_IN_OLD,
     EXPECTED_FAILURES,
     MISSED_IN_NEW,
     NEW_TS,
@@ -177,7 +179,9 @@ class TestCompareLadder:
         assert fragment in err
         assert inbox_items(tmp_path) == []
 
-    @pytest.mark.skipif(os.geteuid() == 0, reason="root reads a 000 file")
+    @pytest.mark.skipif(
+        hasattr(os, "geteuid") and os.geteuid() == 0, reason="root reads a 000 file"
+    )
     def test_compare_unreadable_config_exits_2(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
@@ -310,6 +314,62 @@ class TestCompareLadder:
         drift = inbox_items(tmp_path, ItemKind.CALIBRATION_DRIFT)
         assert len(drift) == 2
         assert all(item.dedupe_key.startswith("calibration:sha256-") for item in drift)
+
+    def test_timestampless_olds_with_different_rates_stay_distinct(self, tmp_path: Path) -> None:
+        """The digest is the identity, so it has to carry what was measured.
+
+        A FLOOR failure quotes only the new rate ("role 'security'
+        detection rate 0.60 is below its floor 0.80"), so two different
+        old baselines whose difference sits in a role that does not fail
+        produce byte-identical failure lines. Digesting the failures
+        alone collapsed those two comparisons onto one key: the second
+        could not demote, and the item's evidence described comparison B
+        while the durable transition record described comparison A.
+        """
+        write_config(tmp_path, demote_on_calibration=True)
+        AutonomyState(level=int(AutonomyLevel.L3_ENVELOPED_AUTO)).save(tmp_path)
+        old_a = without_timestamp(baseline(tmp_path, missed=frozenset(), timestamp=OLD_TS))
+        old_b = without_timestamp(
+            baseline(tmp_path, missed=ARCHITECT_MISSED_IN_OLD, timestamp=OTHER_OLD_TS)
+        )
+        new = baseline(tmp_path, missed=MISSED_IN_NEW, timestamp=NEW_TS)
+        # The premise, measured rather than assumed: the two comparisons
+        # fail identically and differ only in the rate table.
+        loaded_new = load_baseline(new)
+        failures_a = compare_baselines(load_baseline(old_a), loaded_new).failures
+        failures_b = compare_baselines(load_baseline(old_b), loaded_new).failures
+        assert failures_a == failures_b
+
+        assert run_compare(tmp_path, old_a, new) == 1
+        assert run_compare(tmp_path, old_b, new) == 1
+
+        state = AutonomyState.load(tmp_path)
+        assert len([t for t in state.history if t.direction == "demote"]) == 2
+        assert state.level == int(AutonomyLevel.L1_SUPERVISED)
+        drift = inbox_items(tmp_path, ItemKind.CALIBRATION_DRIFT)
+        assert len(drift) == 2
+        assert len({item.dedupe_key for item in drift}) == 2
+
+    def test_drift_item_survives_an_unreadable_inbox_config(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """``InboxConfig.load`` casts per key, so a TOML date raises TypeError.
+
+        ``report_to_ladder`` catches ``TypeError`` twenty-five lines
+        above for exactly this reason, on the ladder's own config. The
+        inbox guard below it did not, so a valid document with one wrong
+        VALUE came out of a measurement command as a raw traceback.
+        """
+        (tmp_path / "kstrl.toml").write_text(
+            "[autonomy]\nenabled = true\n\n[inbox]\nsnooze_hours = 1979-05-27\n",
+            encoding="utf-8",
+        )
+        AutonomyState(level=int(AutonomyLevel.L2_GATED_MERGE)).save(tmp_path)
+        old, new = baseline_pair(tmp_path, missed=MISSED_IN_NEW)
+
+        assert run_compare(tmp_path, old, new) == 1
+        assert "inbox write failed" in capsys.readouterr().err
+        assert AutonomyState.load(tmp_path).level == int(AutonomyLevel.L2_GATED_MERGE)
 
     def test_reversed_arguments_do_not_consult_the_ladder(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]

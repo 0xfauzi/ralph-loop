@@ -31,6 +31,7 @@ from kstrl.autonomy import (
     flag_bundle_for,
     manual_override_notes,
     resolve_runtime_level,
+    save_ladder_state,
 )
 from kstrl.breaker import BreakerConfig
 from kstrl.commandrun import start_heartbeat as _start_heartbeat
@@ -2820,7 +2821,12 @@ def _open_health_breach_items(
     """
     try:
         inbox_config = InboxConfig.load(root_dir)
-    except (OSError, ValueError, ControlStateError) as exc:
+    except (OSError, TypeError, ValueError, ControlStateError) as exc:
+        # TypeError is this callee's own surface: InboxConfig.load casts
+        # per key, so `[inbox] open_item_cap = 1979-05-27` (a valid TOML
+        # date) raises it rather than a ValueError, and a raw traceback
+        # from a seam whose whole contract is "bookkeeping cannot fail a
+        # run" is the outcome this guard exists to prevent.
         ui.warn(f"Inbox write failed (non-fatal): {exc}")
         return
     if not inbox_config.enabled:
@@ -3022,7 +3028,11 @@ def _record_autonomy_outcome(
             state=state,
         )
     else:
-        state.save(root_dir)
+        # Through the same save every other path uses, which is what
+        # refuses to overwrite a file ``load`` failed closed on. This
+        # branch is the one an ordinary run takes, and it was the branch
+        # a guard placed in the demotion path could not see.
+        save_ladder_state(state, root_dir, ui)
         if decisive:
             ui.kv(
                 "Autonomy evidence",

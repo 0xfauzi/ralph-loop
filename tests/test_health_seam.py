@@ -22,7 +22,7 @@ import pytest
 
 from kstrl.autonomy import AutonomyLevel, AutonomyState
 from kstrl.inbox import Inbox, ItemKind, Priority
-from kstrl.statedir import ControlUnavailableError
+from kstrl.statedir import CONTROL_AUTONOMY, ControlUnavailableError, control_file
 from tests.helpers.demotion import (
     BrokenHealthFinder,
     fake_health,
@@ -164,6 +164,91 @@ class TestHealthSeam:
         # in that same run. The cool-down has ended by then, which is the
         # intended edge and worth pinning rather than discovering.
         assert "2 decisive run(s) remaining" in warned
+
+    def test_cooldown_of_one_ends_in_this_run_and_the_breach_demotes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The lower edge of the gate, which the comment claimed and nothing pinned.
+
+        ``record_decisive_run()`` burns the cool-down down before the
+        health check runs in the same function, so a decisive run that
+        takes it from 1 to 0 CAN demote on a breach in that same run.
+        Seeded at 3 and at 0, the two existing cases straddle this
+        without touching it.
+        """
+        monkeypatch.setitem(sys.modules, "kstrl.health", fake_health(make_breach()))
+        write_config(tmp_path, demote_on_health=True)
+        state = AutonomyState(level=int(AutonomyLevel.L3_ENVELOPED_AUTO))
+        state.cooldown_runs_remaining = 1
+        state.save(tmp_path)
+        run_outcome(tmp_path)
+
+        assert AutonomyState.load(tmp_path).level == int(AutonomyLevel.L2_GATED_MERGE)
+        assert inbox_items(tmp_path, ItemKind.DEMOTION_NOTICE)
+
+    def test_cooldown_of_two_suppresses_with_one_run_remaining(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The upper edge, and the case that discriminates.
+
+        Seeded at 2 the cool-down burns to 1, which is still running, so
+        the breach must not demote. This is the assertion an off-by-one
+        in the gate (``> 0`` written ``> 1``) fails: at the seeds the
+        other cases use, 3 and 0, both spellings agree.
+        """
+        monkeypatch.setitem(sys.modules, "kstrl.health", fake_health(make_breach()))
+        write_config(tmp_path, demote_on_health=True)
+        state = AutonomyState(level=int(AutonomyLevel.L3_ENVELOPED_AUTO))
+        state.cooldown_runs_remaining = 2
+        state.save(tmp_path)
+        warned = run_outcome(tmp_path)
+
+        assert AutonomyState.load(tmp_path).level == int(AutonomyLevel.L3_ENVELOPED_AUTO)
+        assert inbox_items(tmp_path, ItemKind.DEMOTION_NOTICE) == []
+        assert "1 decisive run(s) remaining" in warned
+
+    def test_clean_run_does_not_overwrite_a_degraded_state(self, tmp_path: Path) -> None:
+        """The path an ordinary run takes, which is the common one.
+
+        A run with no policy violation saves the ladder state to record
+        its evidence counters. Doing that over a file ``load`` already
+        failed closed on replaces the only bytes an operator could have
+        repaired with a fresh L1, and the next load then finds a clean
+        file, so nothing reports the damage again.
+        """
+        write_config(tmp_path)
+        AutonomyState(level=int(AutonomyLevel.L3_ENVELOPED_AUTO)).save(tmp_path)
+        path = control_file(tmp_path, CONTROL_AUTONOMY)
+        damaged = '{"level": 3, "history": [ truncated'
+        path.write_text(damaged, encoding="utf-8")
+
+        warned = run_outcome(tmp_path)
+
+        assert path.read_text(encoding="utf-8") == damaged
+        assert "ladder state is degraded" in warned
+        assert "refusing to overwrite" in warned
+
+    def test_health_items_survive_an_unreadable_inbox_config(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``InboxConfig.load`` casts per key, so a TOML date raises TypeError.
+
+        ``int(datetime.date)`` is a ``TypeError``, not a ``ValueError``,
+        so the guard that was widened for the ladder's own config still
+        let this one out - as a traceback from the seam, on a path whose
+        whole contract is that bookkeeping cannot fail a run.
+        """
+        monkeypatch.setitem(sys.modules, "kstrl.health", fake_health(make_breach()))
+        (tmp_path / "kstrl.toml").write_text(
+            "[autonomy]\nenabled = true\n\n[inbox]\nopen_item_cap = 1979-05-27\n",
+            encoding="utf-8",
+        )
+        AutonomyState(level=int(AutonomyLevel.L2_GATED_MERGE)).save(tmp_path)
+
+        warned = run_outcome(tmp_path)
+
+        assert "Inbox write failed (non-fatal)" in warned
+        assert AutonomyState.load(tmp_path).level == int(AutonomyLevel.L2_GATED_MERGE)
 
     def test_health_items_honour_inbox_disabled(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

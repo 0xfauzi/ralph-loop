@@ -533,7 +533,10 @@ class Inbox:
         item: ``detail`` said value 0.9 over 20 runs while ``evidence``
         still said 0.4 over 8. ``title`` is deliberately NOT refreshed:
         it is the row's label, and a repeat must not relabel a row an
-        operator has already read.
+        operator has already read. Neither is ``run_id``: it is the run
+        that first raised the item, which is where an operator goes to
+        read what happened, and ``last_seen_at`` with ``occurrences`` is
+        what says the condition is still current.
         """
         now = _utc_now()
         existing = self.find_by_dedupe_key(dedupe_key)

@@ -59,6 +59,10 @@ MISSED_IN_NEW = frozenset({"sec-04-path", "sec-05-secret"})
 #: A structurally DIFFERENT regression: the reviewer role rather than
 #: security, so the failure lines differ from the set above.
 OTHER_MISSED_IN_NEW = frozenset({"rev-01-scope", "rev-02-tests"})
+#: Missed in an OLD baseline, in a role whose rate then IMPROVES. An
+#: improvement is not a failure, so two olds differing only here produce
+#: byte-identical failure lines and differ only in the rate table.
+ARCHITECT_MISSED_IN_OLD = frozenset({"spec-01-no-error-handling"})
 EXPECTED_FAILURES = 4
 
 

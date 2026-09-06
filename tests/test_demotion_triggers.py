@@ -167,6 +167,37 @@ class TestApplyDemotion:
         assert path.read_text(encoding="utf-8") == "{ not json"
         assert "ladder state is degraded" in buffer.getvalue()
 
+    def test_notice_survives_an_unreadable_inbox_config(self, tmp_path: Path) -> None:
+        """A TOML date in ``[inbox]`` must not undo a demotion already written.
+
+        ``InboxConfig.load`` casts per key, and ``int(datetime.date)``
+        raises ``TypeError``, which is not a ``ValueError``. Escaping
+        here is worse than at the other two emitters: ``commit_transition``
+        has already saved the demotion, so the level is revoked and the
+        notice, the DEMOTED line and the caller's exit path all go with
+        the traceback.
+        """
+        (tmp_path / "kstrl.toml").write_text(
+            "[inbox]\nopen_item_cap = 1979-05-27\n", encoding="utf-8"
+        )
+        AutonomyState(level=int(AutonomyLevel.L3_ENVELOPED_AUTO)).save(tmp_path)
+        ui, buffer = make_ui()
+
+        record = apply_demotion(
+            tmp_path,
+            DemotionTrigger.POLICY_VIOLATION,
+            "policy violation in comp-a",
+            evidence={},
+            run_id="r1",
+            ui=ui,
+            state=None,
+        )
+
+        assert record is not None
+        assert AutonomyState.load(tmp_path).level == int(AutonomyLevel.L2_GATED_MERGE)
+        assert "Inbox write failed (non-fatal)" in buffer.getvalue()
+        assert "Autonomy DEMOTED L3 -> L2" in buffer.getvalue()
+
     def test_notice_honours_inbox_disabled(self, tmp_path: Path) -> None:
         """An inbox an operator switched off is not re-opened by a demotion.
 
@@ -285,3 +316,50 @@ class TestConfigFlags:
         # preflight appends names the section again on purpose, so the
         # check is on the prefix rather than on a count.
         assert not problems[0].startswith("[autonomy] [autonomy]")
+
+
+class TestEnabledIsStrict:
+    """``[autonomy] enabled`` is the switch that arms the other two.
+
+    It was still read with ``bool(section["enabled"])`` seven lines from
+    the helper written to refuse exactly that, so ``enabled = "false"``
+    armed the ladder and both revocation keys with it. The coercion is
+    repo-wide and tightening all 29 sites is its own change; this one key
+    is in scope because it gates the two this issue added and because it
+    can only ever fail in the arming direction.
+    """
+
+    @pytest.mark.parametrize("literal", ['"false"', '"off"', '"0"', "0"])
+    def test_quoted_enabled_is_refused(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, literal: str
+    ) -> None:
+        monkeypatch.delenv("KSTRL_AUTONOMY_ENABLED", raising=False)
+        (tmp_path / "kstrl.toml").write_text(f"[autonomy]\nenabled = {literal}\n", encoding="utf-8")
+        with pytest.raises(ConfigError, match="enabled must be a boolean"):
+            AutonomyConfig.load(tmp_path)
+
+    def test_real_booleans_still_load(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The behaviour change is confined to values that were never booleans."""
+        monkeypatch.delenv("KSTRL_AUTONOMY_ENABLED", raising=False)
+        (tmp_path / "kstrl.toml").write_text("[autonomy]\nenabled = true\n", encoding="utf-8")
+        assert AutonomyConfig.load(tmp_path).enabled is True
+        (tmp_path / "kstrl.toml").write_text("[autonomy]\nenabled = false\n", encoding="utf-8")
+        assert AutonomyConfig.load(tmp_path).enabled is False
+        (tmp_path / "kstrl.toml").write_text("[factory]\n", encoding="utf-8")
+        assert AutonomyConfig.load(tmp_path).enabled is False
+        monkeypatch.setenv("KSTRL_AUTONOMY_ENABLED", "1")
+        assert AutonomyConfig.load(tmp_path).enabled is True
+
+    def test_quoted_enabled_reaches_the_preflight_as_a_problem(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """16 CLI commands run this preflight; none may traceback on it."""
+        monkeypatch.delenv("KSTRL_AUTONOMY_ENABLED", raising=False)
+        (tmp_path / "kstrl.toml").write_text('[autonomy]\nenabled = "false"\n', encoding="utf-8")
+
+        problems = config_problem_lines(tmp_path, warn=lambda _line: None)
+
+        assert len(problems) == 1, problems
+        assert problems[0].startswith("[autonomy] enabled must be a boolean"), problems[0]

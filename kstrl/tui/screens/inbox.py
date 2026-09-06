@@ -27,6 +27,7 @@ from textual.screen import Screen
 from textual.widgets import DataTable, Footer, Static
 
 from kstrl.inbox import Inbox, InboxConfig, InboxError, InboxItem
+from kstrl.statedir import ControlStateError
 from kstrl.tui.widgets.config_problem import ConfigProblemBanner
 from kstrl.tui.widgets.context_bar import ContextBar
 
@@ -179,7 +180,12 @@ class InboxScreen(Screen[None]):
                 box.reject(item.id, actor=self._actor(), comment=comment)
             else:
                 box.snooze(item.id, actor=self._actor())
-        except InboxError as exc:
+        except (InboxError, ControlStateError) as exc:
+            # ControlStateError is a RuntimeError, so it escapes an
+            # InboxError clause: every decide reaches Inbox._append,
+            # which takes the control lock, and an uncaught one here
+            # takes the Textual event loop down rather than telling the
+            # operator their keystroke did nothing.
             self.notify(str(exc), severity="error")
             return
         self.notify(f"{action}d: {item.title}")
