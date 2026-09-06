@@ -38,21 +38,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO, Any, ClassVar, Final, Protocol
 
-from kstrl.appendio import JOURNAL_REPAIR_EVENT, append_terminated, open_for_append
+from kstrl.appendio import (
+    JOURNAL_REPAIR_EVENT,
+    REPAIR_DETAIL,
+    append_terminated,
+    open_for_append,
+)
 from kstrl.observability import ProgressLog
 
 SCHEMA_VERSION: Final = 2
-
-#: What the ``detail`` of a :class:`JournalRepaired` row says. One
-#: sentence, spelled once, because the same fact is stated by the
-#: evolution journal's own repair row and the two must not drift into
-#: two different accounts of the same incident.
-_REPAIR_DETAIL: Final = (
-    "the preceding line was not newline-terminated when this sink "
-    "opened the file, so a write was interrupted. It is either a torn "
-    "fragment that was never readable or a complete event that lost "
-    "only its newline; both are on their own line now."
-)
 
 _ENVELOPE_FIELDS: Final = frozenset({"ts", "run_id", "component", "source", "seq"})
 
@@ -900,7 +894,6 @@ class JsonlSink:
             path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         self._fh: IO[bytes] | None = None
-        self._repaired = False
 
     def emit(self, event: Event) -> None:
         line = event.to_json_line() + "\n"
@@ -910,10 +903,10 @@ class JsonlSink:
                 # repair row and the event it protects land in ONE
                 # write and nothing can get between them.
                 self._fh = open_for_append(self.path)
-                self._repaired = append_terminated(
+                append_terminated(
                     self._fh,
                     line,
-                    repair=JournalRepaired(detail=_REPAIR_DETAIL).to_json_line() + "\n",
+                    repair=JournalRepaired(detail=REPAIR_DETAIL).to_json_line() + "\n",
                 )
             else:
                 # Every later emit writes straight through. The probe is
@@ -922,17 +915,6 @@ class JsonlSink:
                 # without this process being dead.
                 self._fh.write(line.encode("utf-8"))
             self._fh.flush()
-
-    @property
-    def repaired(self) -> bool:
-        """Whether this sink found an unterminated tail when it opened.
-
-        The live signal. The durable one is the row in the file, which
-        is what an operator greps months later; this is for whoever is
-        watching now, and is False until the first emit because that is
-        when the file is opened.
-        """
-        return self._repaired
 
     def close(self) -> None:
         with self._lock:

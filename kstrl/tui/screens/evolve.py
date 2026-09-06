@@ -258,10 +258,10 @@ class EvolveScreen(Screen[None]):
         something else.
         """
         line = self.query_one("#evolve-repairs", Static)
-        repairs = journal.get_repair_count() if journal is not None else 0
-        line.display = repairs > 0
-        if journal is None or not repairs:
+        if journal is None or not (repairs := journal.get_repair_count()):
+            line.display = False
             return
+        line.display = True
         line.update(
             Text(
                 f"▲ journal: {repairs} interrupted write(s) repaired. A crash left "

@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
-from kstrl.appendio import JOURNAL_REPAIR_EVENT, append_records
+from kstrl.appendio import JOURNAL_REPAIR_EVENT, REPAIR_DETAIL, append_records
 
 
 class ProgressSink(Protocol):
@@ -179,15 +179,7 @@ class ProgressLog:
         event: dict[str, Any] = {"ts": _iso_now(), "event": JOURNAL_REPAIR_EVENT}
         if self._run_id:
             event["run_id"] = self._run_id
-        event["data"] = {
-            "detail": (
-                "the preceding line was not newline-terminated when this "
-                "event was written, so a write was interrupted. It is "
-                "either a torn fragment that was never readable or a "
-                "complete event that lost only its newline; both are on "
-                "their own line now."
-            )
-        }
+        event["data"] = {"detail": REPAIR_DETAIL}
         return event
 
     def factory_started(self, project_name: str, component_count: int) -> None:

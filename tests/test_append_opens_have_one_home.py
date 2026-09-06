@@ -146,6 +146,18 @@ def opens_for_append(names: frozenset[str]) -> Sees:
     return sees
 
 
+def append_open_net(sources: Iterable[Path]) -> Sees:
+    """Layer 1's predicate, built once from the names that corpus binds.
+
+    One home for a construction three assertions and the census below
+    all need. Rebuilding it per call site is how two of them end up
+    pooling names over a different corpus than the third and quietly
+    disagreeing about what counts.
+    """
+    trees = [parsed(source) for source in sources]
+    return opens_for_append(append_open_names(trees))
+
+
 def census_key(source_file: Path, node: ast.AST) -> str:
     """``module: callee(mode)``, with no line number in it.
 
@@ -169,8 +181,7 @@ def append_open_census() -> dict[str, int]:
     nothing, while executing the guard at those revisions was red.
     """
     sources = package_sources()
-    sees = opens_for_append(append_open_names(parsed(source) for source in sources))
-    return census(sources, sees, key=census_key)
+    return census(sources, append_open_net(sources), key=census_key)
 
 
 class Reason(StrEnum):
@@ -275,12 +286,19 @@ def scope_of(tree: ast.Module) -> dict[int, str]:
     return owner
 
 
-def spells(nodes: Iterable[ast.AST], token: str) -> bool:
+def scope_spells(nodes: Iterable[ast.AST], token: str) -> bool:
     """Does this scope name ``token``, as a bare name or an attribute?
 
     ``fcntl.flock`` and a bare ``flock`` both count, which is the point:
     the check is about what the scope DOES, and the import style is not
     part of that.
+
+    Named apart from ``astwalk.spells``, which is a different question
+    with a different breadth: that one asks whether ONE node holds the
+    string anywhere ``ast.iter_fields`` reaches, string literals and
+    argument names included. Swapping it in here would widen the
+    ``LOCK_FILE`` check, and that check fails a row when the scope
+    STOPS spelling ``flock``, so a wider net makes it fail less often.
     """
     return any(
         (isinstance(node, ast.Name) and node.id == token)
@@ -295,9 +313,9 @@ def reason_still_holds(reason: Reason, body: list[ast.AST], node: ast.Call) -> s
     A negative check: it can fail a row, and it can never clear a site
     that has no row.
     """
-    if reason is Reason.LOCK_FILE and not spells(body, "flock"):
+    if reason is Reason.LOCK_FILE and not scope_spells(body, "flock"):
         return "claims to be a lock file, but the scope no longer spells flock"
-    if reason is Reason.TEXT_LOG and spells(body, "dumps"):
+    if reason is Reason.TEXT_LOG and scope_spells(body, "dumps"):
         return "claims to be a text log, but the scope serialises JSON now"
     if reason is Reason.PADS_ITSELF and not any(
         (folded_str(child) or "").startswith("\n") for child in body
@@ -308,10 +326,9 @@ def reason_still_holds(reason: Reason, body: list[ast.AST], node: ast.Call) -> s
     return None
 
 
-def unrouted_append_opens(source_file: Path, names: frozenset[str]) -> list[str]:
+def unrouted_append_opens(source_file: Path, sees: Sees) -> list[str]:
     """Layer 2: the sites in one module with no row, or a row gone stale."""
     tree = parsed(source_file)
-    sees = opens_for_append(names)
     owner = scope_of(tree)
     bodies = {qualified: own_nodes(node) for node, qualified in scopes(tree)}
     found: list[str] = []
@@ -356,7 +373,7 @@ class TestEveryAppendOpenHasOneHome:
         sources = package_sources()
         assert_census(
             sources=sources,
-            sees=opens_for_append(append_open_names(parsed(src) for src in sources)),
+            sees=append_open_net(sources),
             key=census_key,
             expected=EXPECTED_APPEND_OPENS,
             control=(
@@ -385,9 +402,9 @@ class TestEveryAppendOpenHasOneHome:
     def test_every_append_open_is_routed_or_has_a_reason(self) -> None:
         """Layer 2, the message: name the line and what to do about it."""
         sources = package_sources()
-        names = append_open_names(parsed(src) for src in sources)
+        net = append_open_net(sources)
         offenders = [
-            offender for source in sources for offender in unrouted_append_opens(source, names)
+            offender for source in sources for offender in unrouted_append_opens(source, net)
         ]
 
         assert offenders == [], (
@@ -412,12 +429,12 @@ class TestEveryAppendOpenHasOneHome:
         the shape #324 records eleven times is a guard going quiet.
         """
         sources = package_sources()
-        names = append_open_names(parsed(src) for src in sources)
+        net = append_open_net(sources)
         live = {
             f"{label(source)}:{scope_of(parsed(source)).get(id(node), '<module>')}"
             for source in sources
             for node in all_nodes(parsed(source))
-            if opens_for_append(names)(node)
+            if net(node)
         }
 
         assert set(ALLOWED_APPEND_OPENS) <= live, (

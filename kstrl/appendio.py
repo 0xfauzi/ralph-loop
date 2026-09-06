@@ -56,7 +56,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from pathlib import Path
 from typing import IO
 
@@ -66,6 +66,20 @@ from typing import IO
 #: now in six modules, and ``tests/test_event_names_have_one_home.py``
 #: is the guard that keeps a second spelling from appearing.
 JOURNAL_REPAIR_EVENT = "journal_repair"
+
+#: What the repair row TELLS an operator, for the three appenders whose
+#: row carries a detail field (``evolution``, ``observability``,
+#: ``events``). Here for the same reason the name above is: it was
+#: written out three times, once per appender, and the three had already
+#: drifted into "a complete event" against "a complete record" for one
+#: incident. It says nothing about WHICH appender ran, because the file
+#: the row is in answers that and a per-site clause is what the three
+#: copies differed in.
+REPAIR_DETAIL = (
+    "the preceding line was not newline-terminated when this row was written, so a "
+    "write was interrupted. It is either a torn fragment that was never readable or a "
+    "complete record that lost only its newline; both are on their own line now."
+)
 
 
 def handle_ends_without_newline(handle: IO[bytes]) -> bool:
@@ -163,6 +177,33 @@ def append_terminated(handle: IO[bytes], payload: str, *, repair: str) -> bool:
 
 
 @contextmanager
+def _flock(handle: IO[bytes]) -> Iterator[None]:
+    """Hold ``LOCK_EX`` on ``handle``'s own descriptor, flushed before it drops.
+
+    The shape ``statedir.control_lock`` and ``workqueue.queue_lock``
+    already use: the import is the first thing, so the no-``fcntl``
+    platform yields once and returns rather than being a third branch
+    inside the caller.
+
+    ``flush()`` before ``LOCK_UN`` is mandatory and is why the unlock is
+    written out here rather than left to ``close()``: the handle is a
+    ``BufferedRandom``, and unlocking first lets this process's bytes
+    land after the exclusion has dropped.
+    """
+    try:
+        import fcntl
+    except ImportError:
+        yield
+        return
+    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    try:
+        yield
+    finally:
+        handle.flush()
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+@contextmanager
 def appending(path: Path, *, lock: bool = False) -> Iterator[IO[bytes]]:
     """Hold an append handle on ``path``, optionally under an exclusive flock.
 
@@ -173,11 +214,6 @@ def appending(path: Path, *, lock: bool = False) -> Iterator[IO[bytes]]:
     a mechanism instead of adding one, and #330's "the lock file cannot
     be created" case does not exist, because an unopenable file already
     raises ``OSError`` out of the open.
-
-    ``flush()`` before ``LOCK_UN`` is mandatory and is why the unlock is
-    written out here rather than left to ``close()``: the handle is a
-    ``BufferedRandom``, and unlocking first lets this process's bytes
-    land after the exclusion has dropped.
 
     POSIX only. Without ``fcntl`` this yields no exclusion, which is the
     same degradation ``control_lock``, ``queue_lock`` and the factory
@@ -210,21 +246,10 @@ def appending(path: Path, *, lock: bool = False) -> Iterator[IO[bytes]]:
     site.
     """
     handle = open_for_append(path)
+    exclusion: AbstractContextManager[None] = _flock(handle) if lock else nullcontext()
     try:
-        if not lock:
+        with exclusion:
             yield handle
-            return
-        try:
-            import fcntl
-        except ImportError:
-            yield handle
-            return
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        try:
-            yield handle
-        finally:
-            handle.flush()
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
     finally:
         handle.close()
 

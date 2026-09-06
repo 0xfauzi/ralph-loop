@@ -18,7 +18,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from kstrl.appendio import JOURNAL_REPAIR_EVENT, append_records
+from kstrl.appendio import JOURNAL_REPAIR_EVENT, REPAIR_DETAIL, append_records
 from kstrl.observability import read_progress_events
 from kstrl.verify import SCOPE_UNREADABLE_CHECK, SCOPE_UNREADABLE_ERROR_PREFIX
 
@@ -71,7 +71,7 @@ EXPERIMENTS_HEADER = (
 )
 
 
-def _experiment_rows(text: str) -> list[dict[str, Any]]:
+def experiment_rows(text: str) -> list[dict[str, Any]]:
     """Parse experiments.tsv, dropping any row whose WIDTH this writer never emits.
 
     #331's read half. The write half pads an unterminated tail, but a
@@ -95,6 +95,13 @@ def _experiment_rows(text: str) -> list[dict[str, Any]]:
     Blank lines are skipped rather than dropped as malformed: the pad
     the writer leaves behind is one, and it is not an incident by
     itself.
+
+    Public because this file has TWO readers, not one:
+    :meth:`EvolutionJournal.get_experiment_trends` renders it and
+    ``autonomy_replay.load_runs`` feeds it to the autonomy ladder. Both
+    used a bare ``csv.DictReader``, so a filter on only one of them
+    would fix the screen and leave the ladder promoting on a run that
+    does not exist.
     """
     reader = csv.reader(io.StringIO(text), delimiter="\t")
     try:
@@ -690,12 +697,7 @@ def _repair_entry() -> dict[str, Any]:
         "schema_version": JOURNAL_SCHEMA_VERSION,
         "timestamp": _timestamp_now(),
         "event_type": JOURNAL_REPAIR_EVENT,
-        "detail": (
-            "the preceding line was not newline-terminated when this append "
-            "ran, so a write was interrupted. It is either a torn fragment "
-            "that was never readable, or a complete record that lost only its "
-            "newline; both are on their own line now."
-        ),
+        "detail": REPAIR_DETAIL,
     }
 
 
@@ -1607,7 +1609,7 @@ class EvolutionJournal:
         except (OSError, ValueError):
             return []
 
-        return _experiment_rows(text)[-last_n:]
+        return experiment_rows(text)[-last_n:]
 
     # ------------------------------------------------------------------
     # get_repair_count
@@ -1765,11 +1767,11 @@ class EvolutionJournal:
         same degradation ``control_lock``, ``queue_lock`` and the
         run-level factory lock already take.
 
-        MEASURED, two processes x 150 appends of 200 KB lines with 74
-        torn fragments planted between them, eight runs of each arm:
-        unlocked, 244 to 269 of 300 records readable and 76 to 86 repair
-        rows for 74 tears; locked, 300 of 300 and exactly 74 rows every
-        run. 0.08 to 0.11 s against 0.11 to 0.14 s.
+        The two-process measurement that decided this is on
+        :func:`appendio.appending`, where the lock lives, rather than
+        copied here: two copies of one measurement drift, and this
+        docstring is about which residuals close, not about the numbers
+        that showed they do.
 
         1. A STALE PROBE. Between this process's tail read and its
            write, another process could append; if that other write
