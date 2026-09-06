@@ -191,6 +191,39 @@ stage, runtime feedback, and an earned-autonomy ladder). See
 
 ### Changed
 
+- **Breaking:** a hard-mode review or security phase that finds
+  `max_adversarial_calls` already spent now halts the component instead of
+  downgrading itself to a skip. Before this, an operator running with a cap and
+  `review_mode = "hard"` got every component past the cap merged on mechanical
+  verification alone, with the reviewer silently shed: the reviewer accounts for
+  14 of the 17 failure signatures in this repository's own journal, so the phase
+  dropped under budget pressure was the one doing most of the catching. The halt
+  is recorded as `failed_check = adversarial_budget`, journalled as
+  `adversarial_budget:review` or `adversarial_budget:security`, and carries an
+  `infrastructure_error` finding for the phase. The signature leads with the
+  check name rather than the phase so that the journal and `ks autonomy replay`
+  answer the same way about the run: the replay reads everything before the
+  first colon as the check name, and `adversarial_budget` is enrolled as
+  infrastructure, so a run whose reviewer never ran is not counted as a verdict
+  about the factory's judgement. The set-point gate's own budget refusal moved
+  to `adversarial_budget:setpoint` in the same sweep. It does not retry, and `ks
+  serve` now classifies such a run as the existing terminal `budget_halt`
+  verdict rather than as retryable infrastructure, so the queue item is not
+  requeued against a cap that starts again at zero. Three consequences of a
+  halt: every component depending on the halted one is skipped by the usual
+  cascade, each halt files an inbox item, and because the verdict is terminal
+  `ks serve` poisons the queue item, so three under-budgeted runs in a row trip
+  `[serve] max_consecutive_poison` (default 3) and stop the daemon admitting
+  work. Advisory mode is unchanged and still
+  records a `phase_skipped`, and the knowledge distiller is still skipped rather
+  than halted in every mode because it is not a merge gate. Nothing changes for
+  a default configuration: `max_adversarial_calls = 0` means unbounded, so the
+  refusal is unreachable unless an operator sets a cap. If you set one, budget
+  one call for every phase that runs, the distiller included even though it
+  gates nothing: hard review plus hard security plus knowledge costs 3 per
+  component. Anything less halts something, but which component and which phase
+  depends on the component count, so see `docs/runbook.md` rather than
+  generalising from one run (R10.5, #226).
 - The retry context handed to the engineer is now level-triggered: it renders
   the failures measured in the latest attempt, lists earlier findings whose
   sensor did not run again under "Not re-measured", and replaces the rest with
