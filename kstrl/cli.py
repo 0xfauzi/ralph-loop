@@ -165,6 +165,48 @@ def _use_cli_value(ctx: click.Context, name: str) -> bool:
     return ctx.get_parameter_source(name) == ParameterSource.COMMANDLINE
 
 
+def _reject_blank_project_name(
+    ctx: click.Context,
+    param: click.Parameter,
+    value: str | None,
+) -> str | None:
+    """Refuse an empty or whitespace-only project name at the boundary (#338).
+
+    The project name is an identity: it keys the journal audits, the
+    decision register and, under ``--single-pr``, the branch. "" was
+    accepted by Click and is the one value at which the convergence
+    accounting counted an audit with no project as BOTH this project's
+    and unattributed, reporting five audits as eight. Refusing it here
+    means no downstream reader has to carry a special case for it, and
+    the refusal lands before the architect is invoked, measured at 119
+    to 210 seconds against a frontier model on a real spec.
+
+    Rejects or returns the value VERBATIM; it never strips. " x " is a
+    strange name but it is the name the operator typed, and quietly
+    substituting "x" would write a manifest, a branch and a journal
+    audit under something else.
+
+    On all three ``--project-name`` options, ``ks queue add``
+    included, whose "" default is the sentinel ``serve`` derives
+    ``queue-<id>`` from. Click runs a callback over an option's own
+    default, so the refusal is gated on the parameter SOURCE rather
+    than left off the option: a "" the operator never typed is
+    returned untouched, an explicit "" or "   " is refused. A source
+    this cannot resolve is refused too, because a check that cannot
+    prove the value came from the default must flag, not clear.
+
+    ``tests/test_project_name_boundary.py`` walks the Click tree and
+    fails if a fourth ``--project-name`` option, or a fourth parameter
+    bound to ``project_name``, appears without this callback, so the
+    boundary is closed by census rather than by a list of the options
+    someone remembered.
+    """
+    source = ctx.get_parameter_source(param.name) if param.name else None
+    if value is not None and not value.strip() and source is not ParameterSource.DEFAULT:
+        raise click.BadParameter("must not be empty or whitespace-only", ctx=ctx, param=param)
+    return value
+
+
 # Accepted spellings for the agent type across the config surface.
 # kstrl.toml documents "claude" | "codex" | "custom"; the --agent-type
 # flags and KSTRL_AGENT_TYPE historically use "claude-code" | "codex" |
@@ -2006,6 +2048,7 @@ def feature(
 @click.option(
     "--project-name",
     required=True,
+    callback=_reject_blank_project_name,
     help="Name for this factory project",
 )
 @click.option(
@@ -2216,6 +2259,7 @@ def decompose(
 )
 @click.option(
     "--project-name",
+    callback=_reject_blank_project_name,
     help="Name for this factory project (required with --spec)",
 )
 @click.option(
@@ -4780,7 +4824,12 @@ def _resolve_queue_item(queue: Any, item_id: str, ui_impl: UI) -> Any:
 @click.argument("spec", type=click.Path(exists=True, path_type=Path))
 @click.option("--priority", type=int, default=0, help="Higher runs first")
 @click.option("--title", default="", help="Human label (default: spec filename)")
-@click.option("--project-name", default="", help="Factory project name")
+@click.option(
+    "--project-name",
+    default="",
+    callback=_reject_blank_project_name,
+    help="Factory project name (omit it and serve derives queue-<id>)",
+)
 @click.option(
     "--auto-merge/--stop-at-pr",
     "auto_merge",

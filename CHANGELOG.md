@@ -48,6 +48,27 @@ stage, runtime feedback, and an earned-autonomy ladder). See
 
 ### Fixed
 
+- `ks decompose --project-name`, `ks factory --project-name` and
+  `ks queue add --project-name` refuse an explicit empty or
+  whitespace-only name at the command line, exiting 2 and naming the
+  option, instead of running the architect against it. `queue add`
+  keeps its `""` default, which is how a queued item asks `serve` to
+  name it `queue-<id>`: the refusal is gated on the parameter source,
+  so only a blank the operator typed is refused. A queue item already
+  on disk with a whitespace-only name, added before this change, is
+  poisoned on its next attempt instead of run: the child `ks factory`
+  refuses the name and `serve` files the refusal as needing a human.
+  The name is an identity: it keys the journal audits, the decision
+  register and, under `--single-pr`, the branch. Related, and the reason
+  the boundary check
+  is worth having: the convergence report's accounting of audits the
+  trend leaves out is now computed by one classifier per audit, so the
+  three buckets (this project's, another project's, no project recorded)
+  always sum to the audits on disk. At an empty project name the two
+  counts were separate predicates asking the same question, so an audit
+  recording no project was counted both as this project's and as
+  unattributed: five audits on disk reported as eight (#338).
+
 - `kstrl.toml` and the `KSTRL_*` environment are now resolved once, at
   command entry, before a command constructs anything. They used to be
   parsed lazily, by whichever config dataclass first needed its section,

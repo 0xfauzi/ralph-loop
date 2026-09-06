@@ -545,8 +545,10 @@ def load_toml_document(path: Path) -> dict[str, Any]:
       then refuses to build: ``max_iterations = <4301 digits>`` raises
       "Exceeds the limit (4300 digits) for integer string conversion"
       from ``sys.get_int_max_str_digits``. Walked past round 1.
-    - ``RecursionError``, at roughly 496 nested arrays or inline tables,
-      from tomllib's recursive-descent parser. It derives from
+    - ``RecursionError``, from tomllib's recursive-descent parser, at no
+      one depth: at the default limit nested arrays first fail at 497
+      levels from a one-frame caller and 397 under 200 more, inline
+      tables at 331 and 264; the caller's own stack sets it. It derives from
       ``RuntimeError``, NOT ``ValueError``, so it walked past round 2 -
       whose docstring, whose AST guard and whose CLAUDE.md line all
       asserted that ``ValueError`` WAS the whole class. Round 2 stated
@@ -564,12 +566,18 @@ def load_toml_document(path: Path) -> dict[str, Any]:
     that no handler can promise the interpreter has the headroom left to
     render the message.
 
+    Provenance follows (#323): the parse runs 9 to 16 frames deep under
+    ``ks status``, 13 on the Textual event loop's own callbacks (one TUI
+    parse inherits its caller's stack), so a ``RecursionError`` here is
+    the document's. Not by construction: measured, a CALLER with 5 or 6
+    of 1000 frames left gets a valid file called unparseable, and IS the
+    runaway. ``raise_if_defect`` has the rest.
+
     ``OSError`` is not in the catch-all's reach at all, which is the
-    stronger form of the guarantee two callers depend on. An earlier
-    draft re-raised it from inside the guard; that clause was correct
-    and unpinnable, because with the I/O already hoisted out there was
-    no way to make a test reach it. A special case no test can enter is
-    a special case that has not been deleted yet.
+    stronger form of the guarantee two callers depend on. Re-raising it
+    from inside the guard was correct and unpinnable: with the I/O
+    hoisted out, no test could reach that clause, and a special case no
+    test can enter is a special case that has not been deleted yet.
 
     The rule, after being wrong three times: a parser's error taxonomy
     belongs to the parser, and a reader naming any class narrower than
