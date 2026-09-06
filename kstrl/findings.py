@@ -129,7 +129,9 @@ class Finding:
     @classmethod
     def infrastructure_error(cls, phase: str, explanation: str) -> Finding:
         """Build a synthetic Finding marking that the given role failed
-        to execute (timeout, parse failure, agent crash). Treated by the
+        to execute (timeout, parse failure, agent crash) or was never
+        started, for example because the adversarial call budget was
+        spent before a hard-mode phase could run. Treated by the
         factory as a critical-severity blocker in hard mode (E9 already
         produces this signal via the result-level flag; this lifts it
         into the typed findings stream so `len(findings)==0` is a safe

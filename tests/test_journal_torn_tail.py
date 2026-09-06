@@ -36,7 +36,7 @@ from pathlib import Path
 
 import pytest
 
-from kstrl.evolution import EXPERIMENTS_HEADER, JOURNAL_REPAIR_EVENT
+from kstrl.evolution import EXPERIMENTS_HEADER, JOURNAL_REPAIR_EVENT, SPEC_ISSUES_EVENT
 from kstrl.observability import handle_ends_without_newline, read_progress_events
 from tests.helpers.journal import (
     DANGLING_UTF8,
@@ -66,7 +66,7 @@ class TestTheEntryAfterATear:
 
         journal.append_entries([audit("beta")])
 
-        assert audits_in(journal.config.journal_path) == ["alpha", "beta"]
+        assert audits_in(journal) == ["alpha", "beta"]
 
     def test_the_torn_fragment_is_not_resurrected(self, tmp_path: Path) -> None:
         """The repair isolates the fragment, it does not repair it.
@@ -85,7 +85,7 @@ class TestTheEntryAfterATear:
         path = journal.config.journal_path
         assert TORN_FRAGMENT in path.read_text(encoding="utf-8")
         parsed_types = [e.get("event_type") for e in read_progress_events(path)]
-        assert parsed_types == ["spec_issues", JOURNAL_REPAIR_EVENT, "spec_issues"]
+        assert parsed_types == [SPEC_ISSUES_EVENT, JOURNAL_REPAIR_EVENT, SPEC_ISSUES_EVENT]
 
     def test_a_tail_that_lost_only_its_newline_keeps_its_record(self, tmp_path: Path) -> None:
         """The tear that costs TWO records, not one.
@@ -102,11 +102,11 @@ class TestTheEntryAfterATear:
         journal.append_entries([audit("a1"), audit("a2"), audit("a3")])
         path = journal.config.journal_path
         lose_the_newline(path)
-        assert audits_in(path) == ["a1", "a2", "a3"]
+        assert audits_in(journal) == ["a1", "a2", "a3"]
 
         journal.append_entries([audit("a4")])
 
-        assert audits_in(path) == ["a1", "a2", "a3", "a4"]
+        assert audits_in(journal) == ["a1", "a2", "a3", "a4"]
 
     def test_an_autonomy_transition_after_a_tear_survives(self, tmp_path: Path) -> None:
         """The second writer, which the fix to the first would not reach.
@@ -139,7 +139,7 @@ class TestTheEntryAfterATear:
 
         events = read_progress_events(journal.config.journal_path)
         assert [e.get("event_type") for e in events] == [
-            "spec_issues",
+            SPEC_ISSUES_EVENT,
             JOURNAL_REPAIR_EVENT,
             "autonomy_transition",
         ]
@@ -162,7 +162,7 @@ class TestWhatIsNotATear:
         after = path.read_bytes()
         assert after.startswith(before)
         assert after == before + json.dumps(audit("beta"), separators=(",", ":")).encode() + b"\n"
-        assert repair_rows_in(path) == []
+        assert repair_rows_in(journal) == []
 
     def test_an_empty_journal_file_is_not_a_tear(self, tmp_path: Path) -> None:
         """Zero bytes has no unterminated line in it."""
@@ -172,8 +172,8 @@ class TestWhatIsNotATear:
 
         journal.append_entries([audit("alpha")])
 
-        assert audits_in(journal.config.journal_path) == ["alpha"]
-        assert repair_rows_in(journal.config.journal_path) == []
+        assert audits_in(journal) == ["alpha"]
+        assert repair_rows_in(journal) == []
 
     def test_a_terminated_but_malformed_tail_is_not_a_tear(self, tmp_path: Path) -> None:
         """Residual 4 of ``append_entries``, pinned rather than implied.
@@ -197,7 +197,7 @@ class TestWhatIsNotATear:
 
         journal.append_entries([audit("beta")])
 
-        assert audits_in(path) == ["alpha", "beta"]
+        assert audits_in(journal) == ["alpha", "beta"]
         assert journal.get_repair_count() == 0
 
     def test_a_missing_journal_file_is_not_a_tear(self, tmp_path: Path) -> None:
@@ -209,8 +209,8 @@ class TestWhatIsNotATear:
 
         journal.append_entries([audit("alpha")])
 
-        assert audits_in(journal.config.journal_path) == ["alpha"]
-        assert repair_rows_in(journal.config.journal_path) == []
+        assert audits_in(journal) == ["alpha"]
+        assert repair_rows_in(journal) == []
 
     def test_an_empty_append_repairs_nothing(self, tmp_path: Path) -> None:
         """Nothing to protect, so nothing is written.
@@ -326,7 +326,7 @@ class TestTheRepairIsReportable:
         path = journal.config.journal_path
         lose_the_newline(path)
         journal.append_entries([audit("beta")])
-        assert audits_in(path) == ["alpha", "beta"]
+        assert audits_in(journal) == ["alpha", "beta"]
 
         output = self.status_output(tmp_path)
 
@@ -468,7 +468,7 @@ class TestTheTearIsVisible:
 
         journal.append_entries([audit("beta")])
 
-        rows = repair_rows_in(journal.config.journal_path)
+        rows = repair_rows_in(journal)
         assert len(rows) == 1
         assert rows[0]["timestamp"]
         assert "not newline-terminated" in rows[0]["detail"]
@@ -505,7 +505,7 @@ class TestTheTearIsVisible:
         tear(journal.config.journal_path)
         journal.append_entries([audit("beta")])
 
-        detail = str(repair_rows_in(journal.config.journal_path)[0]["detail"])
+        detail = str(repair_rows_in(journal)[0]["detail"])
         assert "torn fragment that was never readable" in detail
         assert "lost only its newline" in detail
 
@@ -520,7 +520,7 @@ class TestTheTearIsVisible:
         journal.append_entries([audit("beta")])
         journal.append_entries([audit("gamma")])
 
-        assert len(repair_rows_in(journal.config.journal_path)) == 1
+        assert len(repair_rows_in(journal)) == 1
 
     def test_the_repair_row_counts_towards_no_aggregate(self, tmp_path: Path) -> None:
         """A repair row must not move a number anyone reads.
@@ -540,7 +540,7 @@ class TestTheTearIsVisible:
         torn.append_entries(records[:1])
         tear(torn.config.journal_path)
         torn.append_entries(records[1:])
-        assert len(repair_rows_in(torn.config.journal_path)) == 1
+        assert len(repair_rows_in(torn)) == 1
 
         assert clean.get_concern_hit_rate()["components"] == 2
         assert torn.get_concern_hit_rate() == clean.get_concern_hit_rate()
@@ -647,4 +647,4 @@ class TestTheUndecodableTail:
 
         journal.append_entries([audit("beta")])
 
-        assert audits_in(path) == ["alpha", "beta"]
+        assert audits_in(journal) == ["alpha", "beta"]
