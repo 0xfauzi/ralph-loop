@@ -1642,7 +1642,6 @@ class TestCheckDeadCodeRuff:
         assert outcome.message == "ruff reports 3 auto-removable, not removed"
 
 
-
 #: ``CHEAP_GATES`` plus the opt-in dead-code phases, with the diff
 #: comparison off so the only rows are the three cheap gates and
 #: whichever of ``dead_code_ruff`` / ``dead_code`` actually measured
@@ -1660,6 +1659,7 @@ def _dead_code_verification(
     diff: list[str] | None = None,
     seen: list[str] | None = None,
     config: VerifyConfig | None = None,
+    read_only: bool = False,
 ) -> VerificationResult:
     """Phase 1 over ``root`` with both dead-code phases driven by stubs.
 
@@ -1673,6 +1673,9 @@ def _dead_code_verification(
     command PREFIX and never by "everything else", so the three cheap
     gates and the ``git add`` / ``git commit`` pair cannot be mistaken
     for the detector.
+
+    ``read_only`` is forwarded to ``run_mechanical_verification`` rather
+    than to a check, because that is how ``ks sense`` reaches it.
     """
     recorded = [] if seen is None else seen
 
@@ -1706,6 +1709,7 @@ def _dead_code_verification(
             "main",
             None,
             config or DEAD_CODE_GATES,
+            read_only=read_only,
         )
 
 
@@ -1746,26 +1750,111 @@ class TestDeadCodeRowsOnlyExistWhenMeasured:
     a scan that never happened. Split, each phase answers for itself.
     """
 
-    def test_a_missing_vulture_leaves_the_ruff_row_and_records_a_gap(
+    @pytest.mark.parametrize(
+        "stubs, gap, survivor, survivor_message",
+        [
+            pytest.param(
+                {"tools": ("ruff",)},
+                ("dead_code", NOT_MEASURED_TOOL_MISSING),
+                "dead_code_ruff",
+                "ruff auto-fixed 0",
+                id="vulture-missing",
+            ),
+            pytest.param(
+                {
+                    "tools": ("ruff",),
+                    "ruff": _completed("ruff", 0, "Found 2 errors (2 fixed, 0 remaining)."),
+                },
+                ("dead_code", NOT_MEASURED_TOOL_MISSING),
+                "dead_code_ruff",
+                "ruff auto-fixed 2",
+                id="vulture-missing-after-ruff-fixed-2",
+            ),
+            pytest.param(
+                {"detect": TimeoutExpired("vulture", 30)},
+                ("dead_code", NOT_MEASURED_TIMED_OUT),
+                "dead_code_ruff",
+                "ruff auto-fixed 0",
+                id="vulture-timed-out",
+            ),
+            pytest.param(
+                {"detect": _completed("vulture", 2)},
+                ("dead_code", NOT_MEASURED_COMMAND_FAILED),
+                "dead_code_ruff",
+                "ruff auto-fixed 0",
+                id="vulture-exit-2-no-output",
+            ),
+            pytest.param(
+                {"diff": ["README.md", "tests/test_x.py"]},
+                ("dead_code", NOT_MEASURED_NO_TARGET),
+                "dead_code_ruff",
+                "ruff auto-fixed 0",
+                id="nothing-scannable-in-the-diff",
+            ),
+            pytest.param(
+                {
+                    "tools": ("ruff",),
+                    "read_only": True,
+                    "ruff": _completed("ruff", 1, "Found 3 errors.\n"),
+                },
+                ("dead_code", NOT_MEASURED_TOOL_MISSING),
+                "dead_code_ruff",
+                "ruff reports 3 auto-removable, not removed",
+                id="vulture-missing-read-only",
+            ),
+            pytest.param(
+                {"tools": ("vulture",)},
+                ("dead_code_ruff", NOT_MEASURED_TOOL_MISSING),
+                "dead_code",
+                "no remaining dead code",
+                id="ruff-missing",
+            ),
+            pytest.param(
+                {"ruff": TimeoutExpired("ruff check", 30)},
+                ("dead_code_ruff", NOT_MEASURED_TIMED_OUT),
+                "dead_code",
+                "no remaining dead code",
+                id="ruff-timed-out",
+            ),
+            pytest.param(
+                {"ruff": _completed("ruff", 2, "", "error: Failed to parse ruff.toml")},
+                ("dead_code_ruff", NOT_MEASURED_COMMAND_FAILED),
+                "dead_code",
+                "no remaining dead code",
+                id="ruff-exit-2",
+            ),
+        ],
+    )
+    def test_a_phase_that_did_not_run_leaves_a_gap_and_the_other_row(
         self,
         tmp_path: Path,
+        stubs: dict[str, object],
+        gap: tuple[str, str],
+        survivor: str,
+        survivor_message: str,
     ) -> None:
-        """The path the issue was filed from. ruff DID measure, so its
-        row stays with its real message; vulture did not, so it is a gap
-        and not a green row."""
-        result = _dead_code_verification(
-            tmp_path,
-            tools=("ruff",),
-            ruff=_completed("ruff", 0, "Found 2 errors (2 fixed, 0 remaining)."),
-        )
+        """The nine states the issue was filed over, as one census.
 
-        assert _dead_code_rows(result) == ["dead_code_ruff"]
-        ruff_row = next(c for c in result.checks if c.name == "dead_code_ruff")
-        assert ruff_row.passed is True
-        assert "auto-fixed 2" in ruff_row.message
-        assert [(g.check, g.reason) for g in result.not_measured] == [
-            ("dead_code", NOT_MEASURED_TOOL_MISSING)
-        ]
+        It said four; measuring the fused function found nine, and every
+        one of them printed ``dead_code  pass``. Five are the detector
+        not running while ruff did (``vulture-missing`` is the path the
+        issue was filed from, and ``read-only`` is the same path under
+        ``ks sense``); four are ruff not running while the detector did,
+        which the fused row hid completely because it only ever reported
+        the vulture verdict.
+
+        Three assertions per row, and the third is the one that makes
+        this a split rather than an omission: the phase that DID measure
+        keeps its row AND its real message. Omitting the fused row would
+        have satisfied the first two and thrown a real measurement away.
+        """
+        result = _dead_code_verification(tmp_path, **stubs)  # type: ignore[arg-type]
+
+        assert _dead_code_rows(result) == [survivor]
+        assert [(g.check, g.reason) for g in result.not_measured] == [gap]
+        row = next(c for c in result.checks if c.name == survivor)
+        assert row.passed is True
+        assert row.message == survivor_message
         # A check that measured nothing neither passes nor fails.
         assert result.passed is True
 
