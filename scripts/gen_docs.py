@@ -501,8 +501,10 @@ KEY_DESCRIPTIONS: dict[tuple[str, str], str] = {
     "At the cap a hard-mode review or security phase HALTS the component "
     "(failed_check = adversarial_budget) instead of merging it on mechanical "
     "checks alone; an advisory phase records a phase_skipped and continues; the "
-    "distiller is always skipped. Hard review plus hard security costs 2 calls "
-    "per component (R10.5)",
+    "distiller is always skipped rather than halted. Every phase that runs costs one call, and the "
+    "distiller spends from the same cap although it gates nothing, so hard "
+    "review plus hard security plus knowledge costs 3 per component - a cap of "
+    "2 per component halts the second one at security (R10.5)",
     (
         "factory",
         "max_total_tokens",

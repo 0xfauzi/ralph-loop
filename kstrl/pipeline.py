@@ -2930,22 +2930,19 @@ class ComponentPipeline:
         recorded skip, because advisory never blocks.
         """
         cap = self.factory_config.max_adversarial_calls
-        error = (
-            f"{role} infrastructure error: adversarial LLM budget ({cap}) "
-            "exhausted before the phase ran; hard mode refuses to merge unreviewed"
+        # One sentence, two surfaces. The banner and the Finding said the
+        # same thing in two literals and had already drifted apart by one
+        # clause; the Finding carries ``phase`` as a field, so spelling the
+        # phase into its text bought nothing either.
+        reason = (
+            f"adversarial LLM budget ({cap}) exhausted before the phase ran; "
+            "hard mode refuses to merge unreviewed"
         )
+        error = f"{role} infrastructure error: {reason}"
         self.ui.err(f"  {banner} FAILED for {comp.id}: {error}")
         self._add_findings(
             comp,
-            [
-                Finding.infrastructure_error(
-                    phase=phase,
-                    explanation=(
-                        f"adversarial LLM budget ({cap}) exhausted before "
-                        f"{phase}; hard mode refuses to merge unreviewed"
-                    ),
-                )
-            ],
+            [Finding.infrastructure_error(phase=phase, explanation=reason)],
         )
         return PhaseFailure(
             action=FailureAction.FAIL,

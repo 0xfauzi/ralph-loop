@@ -179,9 +179,9 @@ Phase 2.5 FAILED for <comp_id>: Security review infrastructure error: adversaria
 
 It is recorded as `failed_check = adversarial_budget` and journalled as `review:budget-exhausted` or `security:budget-exhausted`, with an `infrastructure_error` finding for the phase. It does not retry: the budget only shrinks, so a retry would burn engineer iterations against the same wall.
 
-**Diagnose**: `FactoryConfig.max_adversarial_calls` is set and the count of review + security + distillation calls has hit the cap. Each adversarial phase costs one call per component, so hard review plus hard security needs `2 * components`; a cap below that halts every component past the cap.
+**Diagnose**: `FactoryConfig.max_adversarial_calls` is set and the count of review + security + distillation calls has hit the cap. Every one of those phases that runs costs one call per component, and the knowledge distiller spends from the same cap even though it gates nothing, so with hard review, hard security and `[knowledge] enabled = true` (the default) a run costs `3 * components`. Measured on a two-component run: a cap of `2 * components` completes the first component and halts the second at security with `failed_check = adversarial_budget`, because component A's distiller spent the call component B's security needed. Budget `3 * components`, or `2 * components` with `[knowledge] enabled = false`.
 
-**Resolve**: raise the cap to cover the run, or set `review_mode` (and `[security] mode`) to `advisory` as a deliberate decision to merge on mechanical checks alone. There is no third option, and that is the point: hard mode will not silently drop the reviewer to stay inside a budget. The knowledge distiller is still skipped in every mode, because it is not a merge gate.
+**Resolve**: raise the cap to cover the run, or set `review_mode` (and `[security] mode`) to `advisory` as a deliberate decision to merge on mechanical checks alone. There is no third option, and that is the point: hard mode will not silently drop the reviewer to stay inside a budget. The knowledge distiller is still skipped rather than halted in every mode, because it is not a merge gate - but it is charged to the cap before it gets there, which is why it appears in the arithmetic above.
 
 ## Spec was rejected by the architect
 

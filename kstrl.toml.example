@@ -119,10 +119,13 @@ max_adversarial_calls = 0          # 0 = unbounded; otherwise cap review+securit
 #   the component (failed_check = adversarial_budget) rather than merging
 #   it on mechanical checks alone. An advisory phase records a
 #   phase_skipped finding and the component continues, because advisory
-#   never blocks. The knowledge distiller is skipped in every mode: it is
-#   not a merge gate. Budget one call per adversarial phase per
-#   component, so hard review plus hard security needs 2 * components
-#   and a cap below that halts every component past the cap (R10.5).
+#   never blocks. The knowledge distiller is skipped rather than halted
+#   in every mode, since it is not a merge gate - but it still spends one
+#   call before it gets there. So budget one call per phase that runs,
+#   distiller included: hard review plus hard security plus knowledge is
+#   3 * components. MEASURED on two components: a cap of 2 * components
+#   halts the second one at security, because A's distiller spent the
+#   call B's security needed (R10.5).
 max_total_tokens = 0               # run-level token budget; 0 = unbounded (R3.1/R8)
 max_cost_usd = 0.0                 # run-level USD budget; 0 = unbounded (R8)
 # Prefer max_cost_usd if what you mean is "do not spend more than $X".
