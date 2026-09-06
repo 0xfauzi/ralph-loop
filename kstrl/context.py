@@ -49,11 +49,13 @@ PHASE_RANK: dict[str, int] = {
 #: The rank rule reads "an entry ranked below Q means that phase ran in
 #: attempt N and passed, or Q would be lower". That holds only for a
 #: phase that always runs once its predecessor passes. Review and
-#: security do not: `_phase_review` and `_phase_security` downgrade to
-#: SKIP when the adversarial LLM budget runs out and let the component
-#: carry on, so a later contract failure does not prove the reviewer
-#: ran. Entries from these phases are only ever retired by a fresh
-#: reading from the same phase, which is observed rather than inferred.
+#: security do not: in ADVISORY mode `_phase_review` and
+#: `_phase_security` downgrade to SKIP when the adversarial LLM budget
+#: runs out and let the component carry on, and `review_mode = "skip"`
+#: turns the reviewer off outright, so a later contract failure does not
+#: prove the reviewer ran. Entries from these phases are only ever
+#: retired by a fresh reading from the same phase, which is observed
+#: rather than inferred.
 #:
 #: The cost, accepted deliberately: when the reviewer DID run in attempt
 #: N and passed, it records no entry, so an earlier review finding it
@@ -62,8 +64,10 @@ PHASE_RANK: dict[str, int] = {
 #: over-show. The alternative error is dropping a live finding in
 #: silence, which the halt-over-heroics doctrine rules out. Retiring on
 #: an observed pass needs the context to record which phases ran, and
-#: the context is only built on failure paths today; that is issue #247,
-#: and #226 removes the cause by making hard mode halt rather than skip.
+#: the context is only built on failure paths today; that is issue #247.
+#: #226 removed the HARD-mode case: hard mode now halts instead of
+#: skipping, so the remaining causes are an advisory budget downgrade
+#: and an explicit skip. Both are live, so this set stays.
 SKIPPABLE_PHASES: frozenset[str] = frozenset({"review", "security"})
 
 #: Attempt number carried by entries recovered from a context serialised

@@ -70,9 +70,12 @@ from tests.helpers.astfold import (
 #: trail ``tests/test_prompt_versions.py`` asks for, not an oversight.
 EXPECTED_SPELLINGS: frozenset[tuple[str, str]] = frozenset(
     {
-        # --- journal signatures: these eight ARE check names, and every
+        # --- journal signatures: these nine ARE check names, and every
         # one is enrolled in evolution._CATEGORY_BY_CHECK.
         ("kstrl/factory.py", "contract"),
+        # #226: written as f"{ADVERSARIAL_BUDGET_CHECK}:{phase}", so the
+        # head folds through the imported constant rather than a literal.
+        ("kstrl/pipeline.py", "adversarial_budget"),
         ("kstrl/factory.py", "scope_unreadable"),
         ("kstrl/pipeline.py", "aborted"),
         ("kstrl/pipeline.py", "diff"),

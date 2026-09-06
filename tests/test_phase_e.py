@@ -182,10 +182,17 @@ class TestE4BudgetCap:
         # Unbounded budget means review fires
         assert mock_review.called
 
-    def test_budget_one_skips_second_component_review(
+    def test_budget_one_stops_second_component_review(
         self,
         tmp_path: Path,
     ) -> None:
+        """The cap is what it says: one adversarial call, so the second
+        component's reviewer never runs. Named "stops" rather than
+        "skips" since R10.5 (#226): in hard mode, which this test uses,
+        the second component now halts on the exhausted budget instead of
+        being skipped past it. What the cap does to the CALL COUNT is
+        the same either way, and that is all this test measures.
+        """
         root = self._scaffold(tmp_path, "comp-a")
         feature_b = root / "scripts/kstrl/feature/comp-b"
         feature_b.mkdir(parents=True)
@@ -245,7 +252,7 @@ class TestE4BudgetCap:
                 PlainUI(no_color=True),
                 root,
             )
-        # Budget=1; second component's review is budget-skipped
+        # Budget=1; the second component's review never gets a call
         assert mock_review.call_count == 1
 
 

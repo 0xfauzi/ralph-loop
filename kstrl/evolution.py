@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from kstrl.appendio import JOURNAL_REPAIR_EVENT, REPAIR_DETAIL, append_records
+from kstrl.manifest import ADVERSARIAL_BUDGET_CHECK
 from kstrl.observability import read_progress_events
 from kstrl.verify import SCOPE_UNREADABLE_CHECK, SCOPE_UNREADABLE_ERROR_PREFIX
 
@@ -494,7 +495,7 @@ _DIGIT_RUN_RE = re.compile(r"\d+")
 # accounting asks the FINDING question (`_infra_casualty`) while the
 # replay asks the SIGNATURE question, and #339 review counted the
 # divergence rather than leaving it at the one example this comment used
-# to give. Six signatures, in both directions:
+# to give. Seven signatures, in both directions:
 #
 #   - the whole `pr:` family, `provisioning:` and `aborted:shutdown` are
 #     infrastructure to the replay and attach no finding at all, so the
@@ -504,7 +505,21 @@ _DIGIT_RUN_RE = re.compile(r"\d+")
 #     infrastructure prefixes, so the replay counts them as evidence;
 #   - `scope_unreadable:` depends on which producer fired - the Phase 1
 #     gate attaches a finding, the pre-launch refusal in factory does
-#     not.
+#     not;
+#   - `adversarial_budget:setpoint` is the seventh, added by #226 round
+#     2 and of the first kind: the R10.3 set-point gate refuses a
+#     component whose reviewer never ran, the only finding on it is the
+#     phase_skipped trace, so the replay calls it plumbing and the live
+#     side calls it judgement. Its two siblings do NOT diverge -
+#     `adversarial_budget:review` and `adversarial_budget:security` come
+#     from `pipeline._budget_refusal`, which attaches the
+#     infrastructure_error finding, so both consumers read the same
+#     answer. Enrolling the check is what fixed those two and what
+#     exposed this one: before the sweep it was spelled
+#     `review:setpoint-budget-exhausted` and both consumers agreed by
+#     both being wrong. tests/test_setpoint_agreement.py::
+#     test_the_setpoint_refusal_is_a_disclosed_divergence asserts both
+#     halves, so this row fails if it stops being true.
 #
 # Reconciling those is not this table's job (#332 holds factory.py), but
 # an undercount was, because it read as a single known exception.
@@ -546,6 +561,14 @@ _CATEGORY_BY_CHECK = {
     "token_budget": "infrastructure",
     "pr": "infrastructure",
     "diff": "infrastructure",
+    # R10.5 (#226): a hard-mode reviewer that never ran because
+    # max_adversarial_calls was already spent. Infrastructure for the
+    # same reason token_budget is: it is a ceiling the operator set,
+    # not a verdict on the change, and no reviewer looked at the
+    # component. Enrolling it here is what makes the replay agree with
+    # factory's live accounting, which reads the infrastructure_error
+    # finding the same refusal attaches.
+    ADVERSARIAL_BUDGET_CHECK: "infrastructure",
     # #315: the fallback already answers "iteration" for these two. The
     # rows are here so the table states every name kstrl emits rather
     # than most of them, and so that a reader cannot tell an unenrolled

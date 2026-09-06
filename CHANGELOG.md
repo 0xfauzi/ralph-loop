@@ -79,6 +79,27 @@ stage, runtime feedback, and an earned-autonomy ladder). See
   append raise on such a mount where it used to write the entry, so the
   lock added to protect the record was the thing losing it.
 
+- `ks decompose --project-name`, `ks factory --project-name` and
+  `ks queue add --project-name` refuse an explicit empty or
+  whitespace-only name at the command line, exiting 2 and naming the
+  option, instead of running the architect against it. `queue add`
+  keeps its `""` default, which is how a queued item asks `serve` to
+  name it `queue-<id>`: the refusal is gated on the parameter source,
+  so only a blank the operator typed is refused. A queue item already
+  on disk with a whitespace-only name, added before this change, is
+  poisoned on its next attempt instead of run: the child `ks factory`
+  refuses the name and `serve` files the refusal as needing a human.
+  The name is an identity: it keys the journal audits, the decision
+  register and, under `--single-pr`, the branch. Related, and the reason
+  the boundary check
+  is worth having: the convergence report's accounting of audits the
+  trend leaves out is now computed by one classifier per audit, so the
+  three buckets (this project's, another project's, no project recorded)
+  always sum to the audits on disk. At an empty project name the two
+  counts were separate predicates asking the same question, so an audit
+  recording no project was counted both as this project's and as
+  unattributed: five audits on disk reported as eight (#338).
+
 - `kstrl.toml` and the `KSTRL_*` environment are now resolved once, at
   command entry, before a command constructs anything. They used to be
   parsed lazily, by whichever config dataclass first needed its section,
@@ -245,6 +266,39 @@ stage, runtime feedback, and an earned-autonomy ladder). See
 
 ### Changed
 
+- **Breaking:** a hard-mode review or security phase that finds
+  `max_adversarial_calls` already spent now halts the component instead of
+  downgrading itself to a skip. Before this, an operator running with a cap and
+  `review_mode = "hard"` got every component past the cap merged on mechanical
+  verification alone, with the reviewer silently shed: the reviewer accounts for
+  14 of the 17 failure signatures in this repository's own journal, so the phase
+  dropped under budget pressure was the one doing most of the catching. The halt
+  is recorded as `failed_check = adversarial_budget`, journalled as
+  `adversarial_budget:review` or `adversarial_budget:security`, and carries an
+  `infrastructure_error` finding for the phase. The signature leads with the
+  check name rather than the phase so that the journal and `ks autonomy replay`
+  answer the same way about the run: the replay reads everything before the
+  first colon as the check name, and `adversarial_budget` is enrolled as
+  infrastructure, so a run whose reviewer never ran is not counted as a verdict
+  about the factory's judgement. The set-point gate's own budget refusal moved
+  to `adversarial_budget:setpoint` in the same sweep. It does not retry, and `ks
+  serve` now classifies such a run as the existing terminal `budget_halt`
+  verdict rather than as retryable infrastructure, so the queue item is not
+  requeued against a cap that starts again at zero. Three consequences of a
+  halt: every component depending on the halted one is skipped by the usual
+  cascade, each halt files an inbox item, and because the verdict is terminal
+  `ks serve` poisons the queue item, so three under-budgeted runs in a row trip
+  `[serve] max_consecutive_poison` (default 3) and stop the daemon admitting
+  work. Advisory mode is unchanged and still
+  records a `phase_skipped`, and the knowledge distiller is still skipped rather
+  than halted in every mode because it is not a merge gate. Nothing changes for
+  a default configuration: `max_adversarial_calls = 0` means unbounded, so the
+  refusal is unreachable unless an operator sets a cap. If you set one, budget
+  one call for every phase that runs, the distiller included even though it
+  gates nothing: hard review plus hard security plus knowledge costs 3 per
+  component. Anything less halts something, but which component and which phase
+  depends on the component count, so see `docs/runbook.md` rather than
+  generalising from one run (R10.5, #226).
 - The retry context handed to the engineer is now level-triggered: it renders
   the failures measured in the latest attempt, lists earlier findings whose
   sensor did not run again under "Not re-measured", and replaces the rest with
