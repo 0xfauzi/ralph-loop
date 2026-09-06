@@ -25,6 +25,7 @@ import ast
 import importlib
 import os
 import stat
+import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -85,7 +86,12 @@ EXPECTED_RUNTIMEERROR_SPELLINGS: dict[str, int] = {
     # The transport failures belong to run_gh, counted against
     # intake_github.py rather than here.
     "serve.py": 5,
-    "statedir.py": 2,  # two subclasses
+    # One since #232: ControlLockedError and ControlUnavailableError now
+    # derive from a shared ControlStateError, which is the only class in
+    # the module that spells RuntimeError. They are still kstrl's, so
+    # raise_if_defect still treats them as operator input, and the walk
+    # below follows them by subclass rather than by spelling.
+    "statedir.py": 1,
     "workqueue.py": 1,
 }
 
@@ -109,12 +115,46 @@ def _domain_subclass_names(tree: ast.Module, module: str) -> list[str]:
 
 
 def _kstrl_domain_errors() -> list[type[BaseException]]:
-    """Every ``RuntimeError`` subclass ``kstrl/`` declares, imported."""
-    return [
+    """Every ``RuntimeError`` subclass ``kstrl/`` declares, imported.
+
+    TRANSITIVELY, since #232 gave ``statedir`` a shared
+    ``ControlStateError`` base: the AST walk above finds the classes that
+    SPELL ``RuntimeError``, which is the census this file pins, and the
+    two that now derive from one of those would otherwise have dropped
+    out of the behaviour check below without any of them changing what
+    ``raise_if_defect`` does with them.
+
+    Every module in the package is imported FIRST, on its own line,
+    rather than as a side effect of the comprehension below. The
+    comprehension imports one module per NAME it finds, so a module that
+    declares no direct ``RuntimeError`` subclass was never imported by
+    it: measured on this package, 27 of 130 modules stayed unimported in
+    a process that already had 100 of them loaded for other reasons. A
+    domain error declared in one of those was invisible to
+    ``__subclasses__``, so the sentence claiming this walk is exact was
+    the only thing making it exact.
+    """
+    for path in astwalk.package_sources():
+        importlib.import_module(astwalk.module_name(path))
+    direct = [
         getattr(importlib.import_module(astwalk.module_name(path)), name)
         for path in astwalk.package_sources()
         for name in _domain_subclass_names(astwalk.parsed(path), astwalk.module_name(path))
     ]
+    seen: dict[str, type[BaseException]] = {}
+    pending = list(direct)
+    while pending:
+        cls = pending.pop()
+        key = f"{cls.__module__}.{cls.__qualname__}"
+        if key in seen:
+            continue
+        seen[key] = cls
+        pending.extend(
+            sub
+            for sub in cls.__subclasses__()
+            if sub.__module__.split(".")[0] == "kstrl"  # ours, not a dependency's
+        )
+    return list(seen.values())
 
 
 class _Harness(App[None]):
@@ -470,6 +510,14 @@ class TestSharedGuard:
         """
         subclasses = _kstrl_domain_errors()
         assert len(subclasses) >= 10, subclasses
+        # Closed under subclassing within kstrl: a domain error that
+        # derives from another domain error rather than from
+        # RuntimeError directly is still the operator's input, and
+        # #232 added the first two of those. Derived, not listed.
+        for cls in subclasses:
+            for descendant in cls.__subclasses__():
+                if descendant.__module__.split(".")[0] == "kstrl":
+                    assert descendant in subclasses, descendant
         for cls in subclasses:
             raise_if_defect(cls("operator input"))  # must not raise
         for defect in (RuntimeError, NotImplementedError, RecursionError):
@@ -478,6 +526,25 @@ class TestSharedGuard:
         # And nothing outside RuntimeError is this rule's business.
         raise_if_defect(ValueError("a knob"))
         raise_if_defect(OSError("a file"))
+
+    def test_the_domain_walk_imports_the_whole_package(self) -> None:
+        """The property the transitive closure rests on, asserted.
+
+        ``__subclasses__`` only knows about classes that have been
+        imported, so a domain error in a module nothing pulled in is
+        invisible to the loop above. The comprehension imports one module
+        per NAME it finds, which is 11 of this package's 130; the rest
+        are imported on their own line. Without that line this walk is
+        exact only by luck of what some other test already loaded, and
+        the mutation that removes it fails here rather than nowhere.
+        """
+        _kstrl_domain_errors()
+        missing = [
+            name
+            for path in astwalk.package_sources()
+            if (name := astwalk.module_name(path)) not in sys.modules
+        ]
+        assert missing == [], missing
 
     def test_the_walk_sees_a_base_it_has_to_resolve_to_recognise(self) -> None:
         """The control: an empty subclass list and a switched-off

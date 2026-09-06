@@ -631,9 +631,20 @@ def control_lock(root_dir: Path, *, blocking: bool = True) -> Iterator[None]:
         handle.close()
 
 
-class ControlLockedError(RuntimeError):
+class ControlStateError(RuntimeError):
+    """The control state would not serve this caller.
+
+    One name for the whole surface :func:`control_lock` refuses on, so a
+    caller writes what the callee can raise rather than an enumeration
+    of the causes it happens to have thought of. Both subclasses stay
+    ``RuntimeError`` subclasses, so nothing that already catches one of
+    them by name changes.
+    """
+
+
+class ControlLockedError(ControlStateError):
     """Another process holds ``control.lock``."""
 
 
-class ControlUnavailableError(RuntimeError):
+class ControlUnavailableError(ControlStateError):
     """Control state directory cannot be created or locked."""

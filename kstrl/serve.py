@@ -82,6 +82,7 @@ from kstrl.procgroup import (
 from kstrl.runid import run_kind
 from kstrl.statedir import (
     CONTROL_SPEND,
+    ControlStateError,
     control_file,
     control_lock,
     control_untrusted_reason,
@@ -2406,8 +2407,16 @@ def _file_inbox_item(
     """Record a decision for a human, never failing the caller.
 
     An inbox write must not be able to undo a queue transition that
-    already happened, so failures here degrade to a warning. The queue
-    journal remains the authoritative record either way.
+    already happened, so a failure here returns an empty id and the
+    caller carries on. The queue journal remains the authoritative record
+    either way.
+
+    Every one of the seven callers is already past the transition it is
+    recording: the queue has been paused, the item poisoned or intake
+    halted. That is why the caught set is the callee's whole surface
+    rather than the three types someone expected: ``Inbox.add`` reaches
+    ``_append``, which takes the control lock, and ``InboxConfig.load``
+    casts per key.
     """
     try:
         from kstrl.inbox import Inbox, InboxConfig, ItemKind
@@ -2425,7 +2434,7 @@ def _file_inbox_item(
             run_id=run_id,
         )
         return item.id
-    except (OSError, ValueError, KeyError):
+    except (OSError, TypeError, ValueError, KeyError, ControlStateError):
         return ""
 
 
