@@ -5,8 +5,8 @@ module is the consequence. It sits beside ``kstrl.calibration`` rather
 than inside it so the measurement half stays free of control-plane
 imports, and because folding it back in would not fit. Measured, and
 measured the way a reader can repeat: ``kstrl/calibration.py`` is 752
-lines, and this module's body below its imports is 245, so the fold is
-at least 997 against the repo's 800-line growth ratchet.
+lines, and this module's body below its last import (line 51 of 291) is
+240, so the fold is at least 992 against the 800-line growth ratchet.
 
 Advisory first, in two tiers. A regression always opens a
 ``calibration_drift`` inbox item when the ladder is enabled; it demotes
