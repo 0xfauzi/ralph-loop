@@ -1419,13 +1419,6 @@ def _journal_with(tmp_path: Path, entries: list[dict[str, object]]) -> Evolution
     return journal
 
 
-def _read_spec_issue_events(tmp_path: Path) -> list[dict[str, object]]:
-    journal = tmp_path / ".kstrl" / "evolution.jsonl"
-    assert journal.exists(), "journal event was not written"
-    entries = [json.loads(line) for line in journal.read_text().splitlines() if line.strip()]
-    return [e for e in entries if e.get("event_type") == SPEC_ISSUES_EVENT]
-
-
 class TestSpecIssuesPersistence:
     """R1.7: red-team output becomes a durable artifact + journal event."""
 
@@ -1460,7 +1453,7 @@ class TestSpecIssuesPersistence:
         assert artifact.exists()
         assert exc_info.value.artifact_path == artifact
 
-        content = json.loads(artifact.read_text())
+        content = json.loads(artifact.read_text(encoding="utf-8"))
         assert content["project"] == "test"
         assert content["specFile"] == "spec.md"
         assert content["halted"] is True
@@ -1482,7 +1475,7 @@ class TestSpecIssuesPersistence:
             _single_component_output([_story()], spec_issues=[MINOR_ISSUE]),
         )
         assert artifact.exists()
-        content = json.loads(artifact.read_text())
+        content = json.loads(artifact.read_text(encoding="utf-8"))
         assert content["halted"] is False
         assert content["counts"] == {"blocker": 0, "major": 0, "minor": 1}
         assert content["issues"][0]["summary"] == "Edge case unspecified"
@@ -1496,7 +1489,7 @@ class TestSpecIssuesPersistence:
             _single_component_output([_story()], spec_issues=[]),
         )
         assert artifact.exists()
-        content = json.loads(artifact.read_text())
+        content = json.loads(artifact.read_text(encoding="utf-8"))
         assert content["halted"] is False
         assert content["issues"] == []
 
@@ -1523,7 +1516,7 @@ class TestSpecIssuesPersistence:
                 root_dir=tmp_path,
             )
 
-        events = _read_spec_issue_events(tmp_path)
+        events = journal_at(tmp_path).get_spec_audits()
         assert len(events) == 1
         assert events[0]["halted"] is True
         assert events[0]["counts"] == {"blocker": 1, "major": 0, "minor": 0}
@@ -1534,7 +1527,7 @@ class TestSpecIssuesPersistence:
             tmp_path,
             _single_component_output([_story()], spec_issues=[MINOR_ISSUE]),
         )
-        events = _read_spec_issue_events(tmp_path)
+        events = journal_at(tmp_path).get_spec_audits()
         assert len(events) == 1
         assert events[0]["halted"] is False
         assert events[0]["counts"] == {"blocker": 0, "major": 0, "minor": 1}
@@ -2453,7 +2446,7 @@ class TestSpecConvergenceThroughDecompose:
         run_id ever appears here, that reader would start windowing
         spec audits by factory run and this feature would go quiet."""
         self._run(tmp_path, [BLOCKER_ISSUE])
-        events = _read_spec_issue_events(tmp_path)
+        events = journal_at(tmp_path).get_spec_audits()
 
         assert events and all("run_id" not in e for e in events)
 

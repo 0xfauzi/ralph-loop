@@ -19,6 +19,13 @@ ones with a single caller today. The RECORD BUILDERS and READERS
 entries as the cost file; ``component_result``, ``audits_in`` and
 ``repair_rows_in`` have one caller each at the moment, which is the
 weakest case for this module and worth revisiting if it stays that way.
+
+``audits_in`` takes the journal rather than its path and reads through
+``EvolutionJournal.get_spec_audits``, so a test asserting on what the
+journal reads back is not asserting on a second copy of that reader's
+selection rule (#337). ``repair_rows_in`` still takes a path, because
+no production reader returns repair rows to route it through:
+``get_repair_count`` returns an int.
 """
 
 from __future__ import annotations
@@ -110,12 +117,13 @@ def journal_at(tmp_path: Path) -> EvolutionJournal:
     return EvolutionJournal(EvolutionConfig.load(tmp_path))
 
 
-def audits_in(path: Path) -> list[str]:
-    return [
-        str(entry.get("project"))
-        for entry in read_progress_events(path)
-        if entry.get("event_type") == SPEC_ISSUES_EVENT
-    ]
+def audits_in(journal: EvolutionJournal) -> list[str]:
+    """The projects of every spec audit the journal reads back, in order.
+
+    Through ``EvolutionJournal.get_spec_audits``, not a private copy of
+    its selection rule (#337).
+    """
+    return [str(entry.get("project")) for entry in journal.get_spec_audits()]
 
 
 def repair_rows_in(path: Path) -> list[dict[str, Any]]:

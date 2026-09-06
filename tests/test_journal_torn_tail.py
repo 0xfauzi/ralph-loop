@@ -66,7 +66,7 @@ class TestTheEntryAfterATear:
 
         journal.append_entries([audit("beta")])
 
-        assert audits_in(journal.config.journal_path) == ["alpha", "beta"]
+        assert audits_in(journal) == ["alpha", "beta"]
 
     def test_the_torn_fragment_is_not_resurrected(self, tmp_path: Path) -> None:
         """The repair isolates the fragment, it does not repair it.
@@ -102,11 +102,11 @@ class TestTheEntryAfterATear:
         journal.append_entries([audit("a1"), audit("a2"), audit("a3")])
         path = journal.config.journal_path
         lose_the_newline(path)
-        assert audits_in(path) == ["a1", "a2", "a3"]
+        assert audits_in(journal) == ["a1", "a2", "a3"]
 
         journal.append_entries([audit("a4")])
 
-        assert audits_in(path) == ["a1", "a2", "a3", "a4"]
+        assert audits_in(journal) == ["a1", "a2", "a3", "a4"]
 
     def test_an_autonomy_transition_after_a_tear_survives(self, tmp_path: Path) -> None:
         """The second writer, which the fix to the first would not reach.
@@ -172,7 +172,7 @@ class TestWhatIsNotATear:
 
         journal.append_entries([audit("alpha")])
 
-        assert audits_in(journal.config.journal_path) == ["alpha"]
+        assert audits_in(journal) == ["alpha"]
         assert repair_rows_in(journal.config.journal_path) == []
 
     def test_a_terminated_but_malformed_tail_is_not_a_tear(self, tmp_path: Path) -> None:
@@ -197,7 +197,7 @@ class TestWhatIsNotATear:
 
         journal.append_entries([audit("beta")])
 
-        assert audits_in(path) == ["alpha", "beta"]
+        assert audits_in(journal) == ["alpha", "beta"]
         assert journal.get_repair_count() == 0
 
     def test_a_missing_journal_file_is_not_a_tear(self, tmp_path: Path) -> None:
@@ -209,7 +209,7 @@ class TestWhatIsNotATear:
 
         journal.append_entries([audit("alpha")])
 
-        assert audits_in(journal.config.journal_path) == ["alpha"]
+        assert audits_in(journal) == ["alpha"]
         assert repair_rows_in(journal.config.journal_path) == []
 
     def test_an_empty_append_repairs_nothing(self, tmp_path: Path) -> None:
@@ -326,7 +326,7 @@ class TestTheRepairIsReportable:
         path = journal.config.journal_path
         lose_the_newline(path)
         journal.append_entries([audit("beta")])
-        assert audits_in(path) == ["alpha", "beta"]
+        assert audits_in(journal) == ["alpha", "beta"]
 
         output = self.status_output(tmp_path)
 
@@ -647,4 +647,4 @@ class TestTheUndecodableTail:
 
         journal.append_entries([audit("beta")])
 
-        assert audits_in(path) == ["alpha", "beta"]
+        assert audits_in(journal) == ["alpha", "beta"]
